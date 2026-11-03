@@ -76,3 +76,22 @@ func TestFormatRejectsInvalidGeometry(t *testing.T) {
 		t.Fatalf("expected geometry error, got %v", err)
 	}
 }
+
+func TestFormatInvalidatesStaleSuperblocks(t *testing.T) {
+	d := newMemdev(32)
+	stale, err := encodeSuperblock(Superblock{VolumeID: "v", Generation: 99, TotalPages: 32, ArenaStart: 2, ArenaPages: 30, RootPage: NoPage})
+	if err != nil { t.Fatal(err) }
+	if _, err = d.WriteAt(stale, 0); err != nil { t.Fatal(err) }
+	if _, err = d.WriteAt(stale, PageSize); err != nil { t.Fatal(err) }
+	if _, err = Format(d, Layout{VolumeID: "v", TotalPages: 32, ArenaStart: 2, ArenaPages: 30}); err != nil { t.Fatal(err) }
+	s, err := Open(d, "v")
+	if err != nil { t.Fatal(err) }
+	if got := s.Superblock().Generation; got != 1 { t.Fatalf("stale generation survived format: %d", got) }
+}
+
+func TestPublishRequiresIncreasingMappingSequence(t *testing.T) {
+	d := newMemdev(16)
+	s, err := Format(d, Layout{VolumeID: "v", TotalPages: 16, ArenaStart: 2, ArenaPages: 14})
+	if err != nil { t.Fatal(err) }
+	if err = s.Publish(NoPage, 0); err == nil { t.Fatal("expected non-increasing sequence rejection") }
+}
