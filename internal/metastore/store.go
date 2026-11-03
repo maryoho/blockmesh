@@ -93,6 +93,15 @@ func Format(dev Device, l Layout) (*Store, error) {
 	if err := validateLayout(l); err != nil {
 		return nil, err
 	}
+	// Invalidate both old copies first. Otherwise a stale superblock left by a
+	// previous format could have a larger generation and win during Open if
+	// formatting is interrupted before both new copies are written.
+	if err := writeFullAt(dev, make([]byte, 2*PageSize), 0); err != nil {
+		return nil, err
+	}
+	if err := dev.Sync(); err != nil {
+		return nil, err
+	}
 	sb := Superblock{VolumeID: l.VolumeID, Generation: 1, TotalPages: l.TotalPages,
 		ArenaStart: l.ArenaStart, ArenaPages: l.ArenaPages, RootPage: NoPage}
 
@@ -168,8 +177,8 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	if rootPage != NoPage && !s.inArena(rootPage) {
 		return ErrOutOfRange
 	}
-	if mappingSequence < s.sb.MappingSequence {
-		return errors.New("mapping sequence cannot move backwards")
+	if mappingSequence <= s.sb.MappingSequence {
+		return errors.New("mapping sequence must increase")
 	}
 	if s.sb.Generation == math.MaxUint64 {
 		return errors.New("superblock generation exhausted")
