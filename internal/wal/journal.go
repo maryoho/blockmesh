@@ -65,6 +65,7 @@ type Journal struct {
 	lastTx uint64
 	poisoned bool
 	poolFormatted bool
+	poolSB format.Superblock
 }
 
 func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
@@ -117,7 +118,7 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 		}
 	}
 	j := &Journal{
-		dev: dev, segmentBase: segmentBase, size: walBankSize, poolFormatted: poolFormatted,
+		dev: dev, segmentBase: segmentBase, size: walBankSize, poolFormatted: poolFormatted, poolSB: sb,
 		metadataSize: sb.MetadataSize, nodeTableStart: sb.NodeTableOffset,
 		nodeTableEnd: sb.NodeTableOffset + format.NodeTableSize, walStart: sb.WALOffset,
 		walEnd: sb.WALOffset + sb.WALSize,
@@ -348,7 +349,7 @@ func (j *Journal) Recover() (bool, error) {
 func (j *Journal) applyUpdate(update PageUpdate) error {
 	if isVolumeDescriptor(update.Image) {
 		current := make([]byte, format.PageSize)
-		if err := readAtFull(j.dev, current, int64(update.Offset)); err == nil && validVolumeDescriptor(current) {
+		if err := readAtFull(j.dev, current, int64(update.Offset)); err == nil && validVolumeDescriptor(current, j.poolSB) {
 			currentGeneration := binary.LittleEndian.Uint64(current[16:24])
 			newGeneration := binary.LittleEndian.Uint64(update.Image[16:24])
 			if currentGeneration >= newGeneration {
@@ -378,7 +379,7 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 			}
 		} else if isVolumeDescriptor(update.Image) {
 			rootDescriptors++
-			if i != len(updates)-1 || rootDescriptors > 1 || !validVolumeDescriptor(update.Image) ||
+			if i != len(updates)-1 || rootDescriptors > 1 || !validVolumeDescriptor(update.Image, j.poolSB) ||
 				update.Offset < j.nodeTableStart || update.Offset > j.nodeTableEnd ||
 				format.PageSize > j.nodeTableEnd-update.Offset {
 				return fmt.Errorf("WAL Volume Descriptor must be a valid final after-image in the Node Table region")
@@ -607,9 +608,9 @@ func isVolumeDescriptor(b []byte) bool {
 	return len(b) == int(format.PageSize) && string(b[:8]) == format.VolumeDescriptorMagic
 }
 
-func validVolumeDescriptor(b []byte) bool {
-	_, err := format.DecodeVolumeDescriptor(b)
-	return err == nil
+func validVolumeDescriptor(b []byte, sb format.Superblock) bool {
+	d, err := format.DecodeVolumeDescriptor(b)
+	return err == nil && d.ValidatePool(sb) == nil
 }
 
 func allZero(b []byte) bool {
