@@ -110,11 +110,10 @@ PR_SET_PDEATHSIG, checks the expected parent PID to close the parent-death
 race, and only then creates the readiness marker. Set HelperBinary to its
 installed path when it is not available in PATH.
 
-ReaderLeaseConfig.ResourceFor receives volume ID, stable slot number, node
-identity, boot ID, and epoch. It must resolve to the pre-initialized sanlock
-resource assigned to that slot. SanlockReaderLeaseProbe.ResourceFor must
-resolve the exact same resource so recovery can acquire it only after the
-previous Reader process has released it.
+ReaderLeaseConfig.ResourceFor and SanlockReaderLeaseProbe.ResourceFor both
+receive only volume ID and stable slot number. They must resolve to the exact
+same pre-initialized sanlock resource. BootID and Epoch are intentionally not
+part of the lock resource name.
 
 
 ## 8. P3-3.8 Reader Recovery Controller
