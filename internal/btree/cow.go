@@ -322,6 +322,38 @@ func rebalanceChild(store *metastore.Store, parent *cowNode, idx int) error {
 	return nil
 }
 
+// collectCowPages enumerates the page graph represented by a COW root.
+// It is called after persistCOW has assigned IDs to all dirty nodes.
+func collectCowPages(root *cowNode) []uint64 {
+	if root == nil { return nil }
+	seen := make(map[uint64]struct{})
+	var pages []uint64
+	var walk func(*cowNode)
+	add := func(id uint64) {
+		if id == 0 || id == metastore.NoPage { return }
+		if _, ok := seen[id]; ok { return }
+		seen[id] = struct{}{}
+		pages = append(pages, id)
+	}
+	walk = func(n *cowNode) {
+		if n == nil { return }
+		if !n.dirty {
+			add(n.id)
+			return
+		}
+		if n.leaf {
+			add(n.id)
+			return
+		}
+		for _, child := range n.children {
+			if child.node != nil { walk(child.node) } else { add(child.id) }
+		}
+		add(n.id)
+	}
+	walk(root)
+	return pages
+}
+
 func countDirty(n *cowNode) int {
 	if n == nil || !n.dirty {
 		return 0
