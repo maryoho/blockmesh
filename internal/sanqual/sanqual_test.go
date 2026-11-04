@@ -22,7 +22,7 @@ func TestCollectCapturesEveryPathAndOnlyUsesReadCommands(t *testing.T){
 	for _,p:=range []string{"/dev/sda","/dev/sdb"}{
 		r.outputs["udevadm info --query=property --name "+p]=[]byte("ID_WWN=naa.6000000000000001\n")
 		r.outputs["sg_persist --in --read-keys --device="+p]=[]byte("  key = 0x00000000000000aa\n  key = 0x00000000000000bb\n")
-		r.outputs["sg_persist --in --read-reservation --device="+p]=[]byte("  Reservation holder = 0x00000000000000aa\n")
+		r.outputs["sg_persist --in --read-reservation --device="+p]=[]byte("PR generation=0x00000001\nReservation follows:\n  Key=0x00000000000000aa\n  scope: LU_SCOPE, type: Exclusive Access, registrants only\n")
 	}
 	r.outputs["multipath -ll /dev/mapper/mpatha"]=[]byte("mpatha (3600000000000001) dm-0\n|- 2:0:0:1 sda 8:0 active ready running\n`- 3:0:0:1 sdb 8:16 active ready running\n")
 	for _,cmd:=range []string{
@@ -71,4 +71,66 @@ func TestVerifyTargetKeyAbsentPassesOnlyWhenAbsentEverywhere(t *testing.T){
 func TestVerifyTargetKeyAbsentRejectsIncompleteMultipathCoverage(t *testing.T) {
 	e := Evidence{Paths: []PathEvidence{{Device: "/dev/sda", ReadKeys: CommandResult{ExitCode: 0}, KeysParsed: true}}}
 	if _, err := VerifyTargetKeyAbsent(e, "aa"); err == nil { t.Fatal("incomplete path coverage must not produce a fencing conclusion") }
+}
+
+func TestParseReservationTypeAndHolder(t *testing.T) {
+	tests := []struct { output string; key string; typ uint8; all bool }{
+		{"Reservation follows:\n Key=0x00000000000000aa\n scope: LU_SCOPE, type: Write Exclusive", "aa", 1, false},
+		{"Reservation follows:\n Key=0x00000000000000aa\n scope: LU_SCOPE, type: Exclusive Access", "aa", 3, false},
+		{"Reservation follows:\n Key=0xaa\n scope: LU_SCOPE, type: Write Exclusive, registrants only", "aa", 5, false},
+		{"Reservation follows:\n Key=0xaa\n scope: LU_SCOPE, type: Exclusive Access, registrants only", "aa", 6, false},
+		{"Reservation follows:\n Key=0xaa\n scope: LU_SCOPE, type: Write Exclusive, all registrants", "aa", 7, true},
+		{"Reservation follows:\n Key=0xaa\n scope: LU_SCOPE, type: Exclusive Access, all registrants", "aa", 8, true},
+	}
+	for _, tt := range tests {
+		got := parseReservation(tt.output)
+		if !got.Parsed || !got.Present || got.HolderKey != tt.key || got.Type != tt.typ || got.AllRegistrants != tt.all {
+			t.Errorf("parseReservation(%q) = %+v", tt.output, got)
+		}
+	}
+}
+
+func TestParseReservationNoReservationAndMalformed(t *testing.T) {
+	absent := parseReservation("PR generation=0x1\nReservation follows: No reservation held")
+	if !absent.Parsed || absent.Present { t.Fatalf("no-reservation response not recognized: %+v", absent) }
+	for _, output := range []string{
+		"PR generation=0x1\nReservation follows:\n Key=0xaa",
+		"Reservation follows:\n Key=0xaa\n Key=0xbb\n type: Exclusive Access",
+		"Reservation follows:\n Key=0xaa\n type: vendor-specific",
+	} {
+		if got := parseReservation(output); got.Parsed { t.Errorf("malformed reservation accepted: %+v", got) }
+	}
+}
+
+func TestVerifyReservationRequiresExpectedHolderAndTypeOnEveryPath(t *testing.T) {
+	e := Evidence{PathCoverageVerified: true, Paths: []PathEvidence{
+		{Device: "/dev/sda", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
+		{Device: "/dev/sdb", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
+	}}
+	got, err := VerifyReservation(e, "0x000000aa", 6)
+	if err != nil || !got.Verified { t.Fatalf("expected verified reservation: %+v, %v", got, err) }
+	e.Paths[1].Reservation.HolderKey = "bb"
+	got, err = VerifyReservation(e, "aa", 6)
+	if err != nil || got.Verified || len(got.MismatchPaths) != 1 || got.MismatchPaths[0] != "/dev/sdb" {
+		t.Fatalf("holder mismatch accepted: %+v, %v", got, err)
+	}
+	e.Paths[1].Reservation.HolderKey = "aa"
+	e.Paths[1].Reservation.Type = 3
+	got, err = VerifyReservation(e, "aa", 6)
+	if err != nil || got.Verified || len(got.MismatchPaths) != 1 { t.Fatalf("type mismatch accepted: %+v, %v", got, err) }
+	e.Paths[1].ReadReservation.ExitCode = 1
+	got, err = VerifyReservation(e, "aa", 6)
+	if err != nil || got.Verified || len(got.UnknownPaths) != 1 { t.Fatalf("unreadable path accepted: %+v, %v", got, err) }
+}
+
+func TestVerifyReservationFailsClosedForAbsentOrIncompleteReservation(t *testing.T) {
+	e := Evidence{PathCoverageVerified: true, Paths: []PathEvidence{
+		{Device: "/dev/sda", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Parsed: true, Present: false}},
+	}}
+	got, err := VerifyReservation(e, "aa", 6)
+	if err != nil || got.Verified || len(got.MismatchPaths) != 1 { t.Fatalf("absent reservation accepted: %+v, %v", got, err) }
+	e.PathCoverageVerified = false
+	if _, err := VerifyReservation(e, "aa", 6); err == nil { t.Fatal("incomplete path coverage must fail") }
+	if _, err := VerifyReservation(e, "aa", 2); err == nil { t.Fatal("unsupported PR type must fail") }
+	if _, err := VerifyReservation(e, "0", 6); err == nil { t.Fatal("zero holder key must fail") }
 }
