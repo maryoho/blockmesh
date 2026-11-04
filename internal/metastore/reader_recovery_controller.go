@@ -32,6 +32,8 @@ type ReaderRecoveryReport struct {
 	Fenced int
 	SkippedLegacyTimestamp int
 	SkippedClockSkew int
+	SkippedRenewed int
+	SkippedChangedIdentity int
 	RetryDeferred int
 	Failed int
 	ReclaimedPages int
@@ -124,7 +126,8 @@ func (c *ReaderRecoveryController) RecoverOnce(ctx context.Context) (ReaderRecov
 		c.markAttempt(key,now)
 		staleBefore:=now.Add(-c.Config.HeartbeatTimeout-c.Config.MaxClockSkew)
 		if err:=c.Table.FenceExpiredReaderIfStale(ctx,reader.Slot,reader.NodeID,reader.BootID,reader.Epoch,staleBefore,c.Probe,c.Fencer);err!=nil {
-			if errors.Is(err,ErrReaderNotStale) { c.clearAttempt(key); continue }
+			if errors.Is(err,ErrReaderNotStale) { c.clearAttempt(key);report.SkippedRenewed++;continue }
+			if errors.Is(err,ErrReaderIdentity) { c.clearAttempt(key);report.SkippedChangedIdentity++;continue }
 			report.Failed++
 			failures=append(failures,fmt.Errorf("recover reader slot %d (%s/%s): %w",reader.Slot,reader.NodeID,reader.BootID,err))
 			if c.Config.OnError!=nil { c.Config.OnError(reader,err) }
