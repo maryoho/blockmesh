@@ -146,7 +146,6 @@ func TestPersistentCollectionWaitsForReaderGeneration(t *testing.T) {
 	newRoot:=reservation.Pages()[0]
 	err=pa.CommitPagesAndPublish(reservation,[]Page{{ID:newRoot,Type:1,Generation:2,Payload:[]byte("new-root")}},[]uint64{newRoot},newRoot,2,1,[]uint64{2})
 	if err!=nil{t.Fatal(err)}
-	if err=reservation.Commit();err!=nil{t.Fatal(err)}
 
 	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=0{t.Fatalf("old reader must pin retired page: released=%d err=%v",n,err)}
 	if err=readers.AdvanceGeneration(0,"node-reader","boot-1",1,2,true);err!=nil{t.Fatal(err)}
@@ -386,7 +385,6 @@ func TestReaderRecoveryControllerRetriesPendingCollectionWithoutNewFence(t *test
 	newRoot:=reservation.Pages()[0]
 	if err=arena.CommitPagesAndPublish(reservation,[]Page{{ID:newRoot,Type:1,Generation:2,Payload:[]byte("new")}},
 		[]uint64{newRoot},newRoot,2,1,[]uint64{2});err!=nil {t.Fatal(err)}
-	if err=reservation.Commit();err!=nil {t.Fatal(err)}
 	if len(arena.Pending())==0 {t.Fatal("test requires a pending retired page")}
 
 	drain:=&recordingMetadataDrain{}
