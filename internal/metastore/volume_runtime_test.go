@@ -17,6 +17,13 @@ type runtimeTestCloser struct {
 }
 func (c *runtimeTestCloser) Close() error { c.mu.Lock(); defer c.mu.Unlock(); *c.events=append(*c.events,c.name); return nil }
 
+type runtimeTestDevice struct { closer runtimeTestCloser }
+func (d *runtimeTestDevice) ReadAt(p []byte, _ int64)(int,error){return len(p),nil}
+func (d *runtimeTestDevice) WriteAt(p []byte, _ int64)(int,error){return len(p),nil}
+func (d *runtimeTestDevice) Sync()error{return nil}
+func (d *runtimeTestDevice) Size()int64{return 1<<20}
+func (d *runtimeTestDevice) Close()error{return d.closer.Close()}
+
 type runtimeTestReader struct { events *[]string; mu *sync.Mutex }
 func (r *runtimeTestReader) CloseDrained(_ context.Context, drained bool) error {
 	if !drained { return ErrUnsafeReclaim }
@@ -48,10 +55,10 @@ type runtimeTestBackend struct {
 func (b *runtimeTestBackend) add(v string) { b.mu.Lock(); defer b.mu.Unlock(); b.events=append(b.events,v) }
 func (b *runtimeTestBackend) snapshot() []string { b.mu.Lock(); defer b.mu.Unlock(); return append([]string(nil),b.events...) }
 func (b *runtimeTestBackend) closer(name string) io.Closer { return &runtimeTestCloser{events:&b.events,mu:&b.mu,name:name} }
-func (b *runtimeTestBackend) OpenDevice(context.Context,VolumeRuntimeSpec)(io.Closer,error){b.add("device-open");return b.closer("device-close"),nil}
+func (b *runtimeTestBackend) OpenDevice(context.Context,VolumeRuntimeSpec)(RuntimeMetadataDevice,error){b.add("device-open");return &runtimeTestDevice{closer:runtimeTestCloser{events:&b.events,mu:&b.mu,name:"device-close"}},nil}
 func (b *runtimeTestBackend) AcquireOwnerLease(context.Context,VolumeRuntimeSpec)(io.Closer,error){b.add("owner-acquire");return b.closer("owner-release"),nil}
-func (b *runtimeTestBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,io.Closer)error{b.add("wal-recover");return nil}
-func (b *runtimeTestBackend) OpenMetadata(_ context.Context,s VolumeRuntimeSpec,_ io.Closer)(*VolumeRuntimeMetadata,error){
+func (b *runtimeTestBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,RuntimeMetadataDevice)error{b.add("wal-recover");return nil}
+func (b *runtimeTestBackend) OpenMetadata(_ context.Context,s VolumeRuntimeSpec,_ RuntimeMetadataDevice)(*VolumeRuntimeMetadata,error){
 	b.add("metadata-open")
 	store:=&Store{sb:Superblock{VolumeID:s.VolumeID,TotalPages:16,ArenaStart:2,ArenaPages:8,RootPage:NoPage}}
 	return &VolumeRuntimeMetadata{Store:store,ReaderTable:&ReaderTable{store:store},Arena:&PersistentArena{store:store}},nil
@@ -141,4 +148,4 @@ func TestVolumeRuntimeActivationFailureRollsBack(t *testing.T) {
 	if len(m.ActiveVolumes())!=0{t.Fatal("failed activation was published")}
 }
 type runtimeFailingWALBackend struct { *runtimeTestBackend; err error }
-func (b *runtimeFailingWALBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,io.Closer)error{b.add("wal-recover");return b.err}
+func (b *runtimeFailingWALBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,RuntimeMetadataDevice)error{b.add("wal-recover");return b.err}
