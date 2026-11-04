@@ -138,3 +138,19 @@ recovered root.
 This stage does not yet make retirement durable. Old COW pages remain in the
 process-local retire queue, and they must not be reclaimed until the later
 persistent retire queue + reader-generation + fencing work is complete.
+
+
+## P3-3.5 lifecycle after-images
+
+When a B+Tree is opened with `btree.OpenPersistent`, each COW root transaction
+also includes the Arena lifecycle checkpoint and persistent Retire Queue
+pages as WAL after-images. Ordering is COW data pages, lifecycle pages, then
+the inactive metastore superblock as the final root publication image.
+Retirement therefore cannot be lost between root publication and process
+restart. Reclamation is a separate WAL transaction that first persists the
+shortened queue; only then are the pages returned to the in-memory allocator.
+
+The lifecycle pages must be configured outside the Arena and outside the
+per-AG WAL/checkpoint regions. Recover the relevant WAL before opening the
+persistent tree. The lifecycle checkpoint and queue pages carry matching
+generations; a mismatch fails closed.
