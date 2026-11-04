@@ -6,6 +6,7 @@ import (
 )
 
 type testCommitter struct{ d Device }
+func (testCommitter) ClusterSafe() bool { return true }
 func (c testCommitter) CommitImages(images []PageImage)error{
  for _,image:=range images {if err:=writeFullAt(c.d,image.Data,int64(image.Offset));err!=nil{return err}}
  return c.d.Sync()
