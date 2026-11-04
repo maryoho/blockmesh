@@ -1,0 +1,81 @@
+package metadata
+
+import (
+	"errors"
+	"fmt"
+
+	"blockmesh/internal/device"
+	"blockmesh/internal/format"
+)
+
+var ErrVolumeSlotOccupied = errors.New("Volume Descriptor slot is already initialized")
+
+// InitVolume reserves the deterministic extent assigned to one Node Table
+// index and writes its redundant BMDVOL02 descriptor copies. The caller must
+// hold an external Pool administration lock and ensure no node is using it.
+func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID string, ownerEpoch uint64, lifecyclePages uint64) (format.VolumeDescriptor, error) {
+	var zero format.VolumeDescriptor
+	if dev == nil || volumeID == "" || ownerEpoch == 0 {
+		return zero, errors.New("device, Volume ID and non-zero Owner Epoch are required")
+	}
+	if err := sb.Validate(); err != nil { return zero, fmt.Errorf("invalid Pool Superblock: %w", err) }
+	if lifecyclePages == 0 { lifecyclePages = 32 }
+	if lifecyclePages < 2 || lifecyclePages > 32 { return zero, errors.New("lifecycle pages must be in [2,32]") }
+	pair, err := format.VolumeDescriptorPairOffset(sb,index)
+	if err != nil { return zero,err }
+	// The Reserved region is divided into equal, page-aligned extents. This is
+	// a bootstrap allocator; later Pool extent management may replace it.
+	reservedBytes:=sb.MetadataSize-sb.ReservedOffset
+	slotBytes:=(reservedBytes/uint64(format.MaxVolumeDescriptors))/format.PageSize*format.PageSize
+	if slotBytes/format.PageSize<=lifecyclePages+1 { return zero,errors.New("reserved Pool metadata is too small for a Volume extent") }
+	start:=sb.ReservedOffset+uint64(index)*slotBytes
+	arenaPages:=slotBytes/format.PageSize-lifecyclePages
+	arenaStart:=start/format.PageSize
+	lifecycleStart:=arenaStart+arenaPages
+	for slot:=uint64(0);slot<2;slot++ {
+		page:=make([]byte,format.PageSize)
+		if err:=readAtFull(dev,page,int64(pair+slot*format.PageSize));err!=nil{return zero,err}
+		for _,b:=range page { if b!=0 { return zero,ErrVolumeSlotOccupied } }
+	}
+	d:=format.VolumeDescriptor{
+		VolumeID:volumeID,AG:0,Generation:1,VolumeSequence:1,
+		MappingRootOffset:sb.MappingOffset,BitmapSequence:1,OwnerEpoch:ownerEpoch,
+		ArenaStart:arenaStart,ArenaPages:arenaPages,RootPage:^uint64(0),
+		LifecycleStart:lifecycleStart,LifecyclePages:lifecyclePages,
+	}
+	image,err:=d.Encode();if err!=nil{return zero,err}
+	if err=writeAtFull(dev,image,int64(pair));err!=nil{return zero,err}
+	if err=dev.Sync();err!=nil{return zero,err}
+	if err=writeAtFull(dev,image,int64(pair+format.PageSize));err!=nil{return zero,err}
+	if err=dev.Sync();err!=nil{return zero,err}
+	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
+	return d,nil
+}
+
+// ReadVolumeDescriptor returns the newest valid redundant descriptor copy.
+// A valid but conflicting same-generation pair is treated as corruption.
+func ReadVolumeDescriptor(dev device.Device, sb format.Superblock, index uint32) (format.VolumeDescriptor,error) {
+	var zero format.VolumeDescriptor
+	if dev==nil{return zero,errors.New("nil metadata device")}
+	pair,err:=format.VolumeDescriptorPairOffset(sb,index);if err!=nil{return zero,err}
+	var best format.VolumeDescriptor
+	found:=false
+	for slot:=uint64(0);slot<2;slot++ {
+		b:=make([]byte,format.PageSize)
+		if err:=readAtFull(dev,b,int64(pair+slot*format.PageSize));err!=nil{return zero,err}
+		d,decodeErr:=format.DecodeVolumeDescriptor(b)
+		if decodeErr!=nil { continue }
+		if found && d.Generation==best.Generation && d!=best { return zero,fmt.Errorf("conflicting Volume Descriptor copies at generation %d",d.Generation) }
+		if !found || d.Generation>best.Generation { best=d;found=true }
+	}
+	if !found{return zero,format.ErrVolumeDescriptor}
+	// Validate that all volume-owned extents are contained in Pool Reserved.
+	reservedEnd:=sb.MetadataSize/format.PageSize
+	if best.ArenaStart<sb.ReservedOffset/format.PageSize || best.ArenaStart>reservedEnd ||
+		best.ArenaPages>reservedEnd-best.ArenaStart ||
+		best.LifecycleStart<best.ArenaStart+best.ArenaPages ||
+		best.LifecycleStart>reservedEnd || best.LifecyclePages>reservedEnd-best.LifecycleStart {
+		return zero,errors.New("Volume Descriptor extent is outside Pool Reserved region")
+	}
+	return best,nil
+}
