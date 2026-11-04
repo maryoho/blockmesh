@@ -50,6 +50,7 @@ func TestPersistentRetireQueueSpansMultiplePages(t *testing.T) {
 	s,err:=Format(d,Layout{VolumeID:"multi-queue",TotalPages:1000,ArenaStart:2,ArenaPages:700,LifecycleStart:800,LifecyclePages:4})
 	if err!=nil{t.Fatal(err)}
 	if err=s.Publish(NoPage,2);err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
 	ids:=make([]uint64,600)
 	for i:=range ids{ids[i]=uint64(i+2)}
 	pages,err:=encodeRetireQueuePages([]RetireBatch{{RetireGeneration:1,PageIDs:ids}},7,3)
