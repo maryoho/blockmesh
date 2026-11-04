@@ -30,6 +30,7 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 	registrar fence.ReaderRegistrar, slot uint32, nodeID, bootID string, epoch uint64,
 	onLeaseLost func(error)) (*ReaderSession, error) {
 	if table == nil || registrar == nil { return nil, errors.New("reader table and SCSI PR registrar are required") }
+	if table.coordinator == nil { return nil, ErrReaderCoordinatorRequired }
 	if err := table.store.Refresh(); err != nil { return nil, err }
 	rootGeneration := table.store.Superblock().MappingSequence
 	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, slot, nodeID, bootID, epoch, onLeaseLost)
