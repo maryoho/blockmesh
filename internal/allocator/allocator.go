@@ -10,9 +10,9 @@ import (
 	"hash/crc32"
 	"io"
 
+	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
-	"blockmesh/internal/device"
 	"blockmesh/internal/wal"
 )
 
