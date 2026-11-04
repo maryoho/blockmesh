@@ -310,9 +310,17 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 		return fmt.Errorf("B+Tree mapping sequence exhausted")
 	}
 	sequence := sb.MappingSequence + 1
+	oldPages := append([]uint64(nil), t.pages...)
+	var newPages []uint64
+	if root != nil {
+		newPages = collectCowPages(root)
+	}
 	if root == nil {
 		if err := t.store.Publish(metastore.NoPage, sequence); err != nil {
 			return fmt.Errorf("publish empty B+Tree root: %w", err)
+		}
+		if err := t.retireSuperseded(oldPages, nil, sb.MappingSequence); err != nil {
+			return fmt.Errorf("record retired B+Tree pages after empty-root publication: %w", err)
 		}
 		t.items, t.pages, t.root = nil, nil, metastore.NoPage
 		return nil
@@ -320,13 +328,14 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 
 	pageCount := countDirty(root)
 	if pageCount == 0 {
-		// Deleting the final key in one root child may collapse the root to
-		// an unchanged sibling. Publishing that existing page needs no COW
-		// page allocation, but still advances the mapping sequence.
 		if err := t.store.Publish(root.id, sequence); err != nil {
 			return fmt.Errorf("publish collapsed B+Tree root: %w", err)
 		}
+		if err := t.retireSuperseded(oldPages, newPages, sb.MappingSequence); err != nil {
+			return fmt.Errorf("record retired B+Tree pages after root publication: %w", err)
+		}
 		t.items = append([]Item(nil), items...)
+		t.pages = newPages
 		t.root = root.id
 		return nil
 	}
@@ -353,8 +362,6 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 		return fmt.Errorf("sync COW pages: %w", err)
 	}
 	if err = t.store.Publish(rootID, sequence); err != nil {
-		// The inactive superblock may have reached stable storage despite a
-		// reported flush error. Keep these IDs reserved until reopen/recovery.
 		committed = true
 		return fmt.Errorf("publish COW root (reservation retained for recovery): %w", err)
 	}
@@ -363,8 +370,25 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 		return fmt.Errorf("root published but arena commit failed: %w", err)
 	}
 	committed = true
+
+	// persistCOW has assigned durable IDs to all dirty nodes; collect again so
+	// the current page set contains the newly allocated IDs.
+	newPages = collectCowPages(root)
+	if err := t.retireSuperseded(oldPages, newPages, sb.MappingSequence); err != nil {
+		return fmt.Errorf("record retired B+Tree pages after root publication: %w", err)
+	}
 	t.items = append([]Item(nil), items...)
 	t.root = rootID
-	t.pages = append(t.pages, ids...)
+	t.pages = newPages
 	return nil
+}
+
+func (t *Tree) retireSuperseded(oldPages, newPages []uint64, generation uint64) error {
+	current := make(map[uint64]struct{}, len(newPages))
+	for _, id := range newPages { current[id] = struct{}{} }
+	var retired []uint64
+	for _, id := range oldPages {
+		if _, ok := current[id]; !ok { retired = append(retired, id) }
+	}
+	return t.retire.Retire(generation, retired)
 }
