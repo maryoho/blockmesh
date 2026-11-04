@@ -29,7 +29,7 @@ func openTest(t *testing.T, lease volume.Lease, f fence.Fencer) (*Engine, string
 	t.Helper()
 	d := t.TempDir()
 	s, w := filepath.Join(d, "state"), filepath.Join(d, "wal")
-	e, err := Open(Config{VolumeID: "v1", NodeID: "n1", StatePath: s, WALPath: w, TotalBlocks: 64, Lease: lease, Fencer: f})
+	e, err := OpenEngine(Config{VolumeID: "v1", NodeID: "n1", StatePath: s, WALPath: w, TotalBlocks: 64, Lease: lease, Fencer: f})
 	if err != nil {
 		t.Fatal(err)
 	}
