@@ -205,3 +205,26 @@ type testFenceFunc func(context.Context, string, string) error
 func (f testFenceFunc) FenceNode(ctx context.Context, nodeID, bootID string) error {
 	return f(ctx,nodeID,bootID)
 }
+
+
+type localOnlyCommitter struct{ d Device }
+func (c localOnlyCommitter) CommitImages(images []PageImage) error {
+	for _,image:=range images { if err:=writeFullAt(c.d,image.Data,int64(image.Offset));err!=nil{return err} }
+	return c.d.Sync()
+}
+
+func TestCoordinatedReaderMetadataRequiresClusterSafeCommitter(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"cluster-safe-committer",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+	coordinator:=&testReaderCoordinator{}
+	local:=localOnlyCommitter{d:d}
+	if _,err=NewReaderTable(s,18,2,local,coordinator);!errors.Is(err,ErrClusterSafeCommitterRequired) {
+		t.Fatalf("reader table accepted process-local WAL committer: %v",err)
+	}
+	if _,err=NewPersistentArena(s,nil,local,coordinator);!errors.Is(err,ErrClusterSafeCommitterRequired) {
+		t.Fatalf("persistent arena accepted process-local WAL committer: %v",err)
+	}
+}
