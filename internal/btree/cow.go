@@ -520,7 +520,11 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   if !errors.Is(err,wal.ErrJournalFull) && !errors.Is(err,metastore.ErrRetireQueueFull) && !errors.Is(err,metastore.ErrMetadataTransactionTooLarge) {committed=true}
   return fmt.Errorf("WAL commit COW pages, lifecycle and root: %w",err)
  }
- if err=reservation.Commit();err!=nil {committed=true;return fmt.Errorf("WAL root committed but Arena reservation transition failed: %w",err)}
+ if t.persistentArena==nil {
+  if err=reservation.Commit();err!=nil {committed=true;return fmt.Errorf("WAL root committed but Arena reservation transition failed: %w",err)}
+ }
+ // PersistentArena transitions its reservation to Live while still holding
+ // the Arena mutex across the durable WAL commit.
  committed=true
  if t.persistentArena==nil {
   if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w",err)}
