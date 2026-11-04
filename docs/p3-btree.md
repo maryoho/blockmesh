@@ -53,7 +53,8 @@ error, so reusing those page IDs before reopen/recovery would be unsafe.
 
 ## Current implementation scope and limitations
 
-- API: `Open`, `Get`, `Put`, `Delete`, `Snapshot`, `RootPage`.
+- API: `Open`, `Get`, `Put`, `Delete`, `Snapshot`, `RootPage`, `RetiredPages`,
+  `CollectRetired`.
 - The tree is validated recursively when opened, including node type, level,
   ordering, child ranges, separators, page checksums and duplicate/cyclic
   child references.
