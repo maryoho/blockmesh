@@ -204,6 +204,15 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
 // Collect durably removes safe retire records before making their pages free.
 // A crash after the WAL commit but before the in-memory release is safe:
 // reopening reconstructs free space from the root and the now-shorter queue.
+// CollectWithReaders derives the safe generation from the durable Reader
+// Table. Non-fenced Active and Leaving slots pin their recorded generations;
+// slots are excluded only after graceful I/O drain or successful SAN fencing.
+func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained bool) (int,error) {
+ if readers==nil { return 0,errors.New("durable reader table is required") }
+ safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
+ return p.Collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
+}
+
 func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
  if p==nil{return 0,errors.New("nil persistent arena")}
  if !proof.IOsDrained||!proof.FencingConfirmed{return 0,ErrUnsafeReclaim}
