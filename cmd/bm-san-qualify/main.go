@@ -37,7 +37,7 @@ func collect(args []string)error{
 	if fs.NArg()!=0{return errors.New("unexpected positional arguments")}
 	if strings.TrimSpace(*device)==""||strings.TrimSpace(*pathsText)==""{return errors.New("--device and explicit --paths are required")}
 	paths:=strings.Split(*pathsText,",")
-	e,err:=(sanqual.Collector{Timeout:*timeout}).Collect(context.Background(),*device,"",*volume,*node,*boot,paths)
+	e,err:=(sanqual.Collector{Timeout:*timeout}).Collect(context.Background(),*device,*device,*volume,*node,*boot,paths)
 	if err!=nil{return err}
 	var dst *os.File
 	if *out==""{dst=os.Stdout}else{
