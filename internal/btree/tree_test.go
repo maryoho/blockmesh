@@ -487,3 +487,22 @@ func TestCOWDoesNotRetireDescendantsOfUnchangedInternalSubtree(t *testing.T) {
 		t.Fatalf("opaque subtree pages were incorrectly retired: %+v", pending)
 	}
 }
+
+func TestPersistentTreeRefreshSeesCommittedRootFromAnotherStore(t *testing.T) {
+	dev:=newMemoryDevice(128)
+	store,err:=metastore.Format(dev,metastore.Layout{
+		VolumeID:"persistent-refresh",TotalPages:128,ArenaStart:2,ArenaPages:124,
+		LifecycleStart:126,LifecyclePages:2,
+	})
+	if err!=nil{t.Fatal(err)}
+	if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
+	committer:=memoryCommitter{dev:dev}
+	reader,err:=OpenPersistent(store,committer);if err!=nil{t.Fatal(err)}
+	writerStore,err:=metastore.Open(dev,"persistent-refresh");if err!=nil{t.Fatal(err)}
+	writer,err:=OpenPersistent(writerStore,committer);if err!=nil{t.Fatal(err)}
+	if err=writer.Put(7,70);err!=nil{t.Fatal(err)}
+	if _,err=reader.Get(7);!errors.Is(err,ErrKeyNotFound){t.Fatalf("reader unexpectedly saw unrefreshed root: %v",err)}
+	if err=reader.Refresh();err!=nil{t.Fatal(err)}
+	got,err:=reader.Get(7);if err!=nil{t.Fatal(err)}
+	if got!=70{t.Fatalf("refreshed value=%d want 70",got)}
+}
