@@ -49,6 +49,7 @@ type Tree struct {
 	retire  *metastore.RetireQueue
 	journal metastore.Committer
 	persistentArena *metastore.PersistentArena
+	readerCoordinator metastore.ReaderCoordinator
 	root   uint64
 }
 
@@ -103,7 +104,32 @@ func OpenPersistent(store *metastore.Store, journal metastore.Committer, coordin
 	persistent, err := metastore.NewPersistentArena(store, t.pages, journal, coordinators...)
 	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
 	t.persistentArena = persistent
+	if len(coordinators)==1 { t.readerCoordinator=coordinators[0] }
 	return t, nil
+}
+
+// Refresh reloads the currently published root for an online-consistent
+// reader. Call it before advancing that reader's durable Root Generation.
+// Refresh is intended for read-only trees; outstanding local reservations
+// prevent replacing the allocator state.
+func (t *Tree) Refresh() error {
+	if t==nil { return errors.New("nil B+Tree") }
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.persistentArena==nil { return ErrPersistentArenaRequired }
+	if stats:=t.persistentArena.Stats();stats.ReservedPages!=0 {
+		return errors.New("cannot refresh B+Tree with outstanding metadata reservations")
+	}
+	if err:=t.store.Refresh();err!=nil{return err}
+	fresh,err:=openTree(t.store,true,t.journal)
+	if err!=nil{return fmt.Errorf("reload published B+Tree root: %w",err)}
+	persistent,err:=metastore.NewPersistentArena(t.store,fresh.pages,t.journal,t.readerCoordinator)
+	if err!=nil{return fmt.Errorf("rebuild persistent Arena after refresh: %w",err)}
+	t.root=fresh.root
+	t.items=append([]Item(nil),fresh.items...)
+	t.pages=append([]uint64(nil),fresh.pages...)
+	t.persistentArena=persistent
+	return nil
 }
 
 func loadNode(store *metastore.Store, id uint64, expectedLevel uint16, seen map[uint64]struct{}, live *[]uint64) ([]Item, error) {
