@@ -223,7 +223,10 @@ func (j *Journal) scanLocked() ([]journalTxn, uint64, uint64, error) {
 		if err != nil && err != io.EOF {
 			return nil, 0, 0, err
 		}
-		if allZero(header) {\n\t\t\tbreak\n\t\t}\n\t\tif binary.LittleEndian.Uint32(header[0:4]) != journalMagic ||
+		if allZero(header) {
+			break
+		}
+		if binary.LittleEndian.Uint32(header[0:4]) != journalMagic ||
 			binary.LittleEndian.Uint16(header[4:6]) != journalVersion {
 			return nil, 0, 0, ErrJournalCorrupt
 		}
