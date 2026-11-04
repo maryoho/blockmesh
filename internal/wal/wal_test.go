@@ -126,3 +126,71 @@ func TestOpenIgnoresIntentWithoutCommit(t *testing.T) {
 		if b != 0 { t.Fatalf("uncommitted intent modified target at byte %d", i) }
 	}
 }
+
+
+func TestCheckpointSwitchesBanksAndRecoversAfterReopen(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wal-checkpoint-*.img")
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	d, err := device.Open(f.Name(), true)
+	if err != nil { t.Fatal(err) }
+	defer d.Close()
+	sb, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	j, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	image1 := make([]byte, format.PageSize)
+	copy(image1, []byte("before-checkpoint"))
+	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset, Image: image1}}); err != nil { t.Fatal(err) }
+	oldBank := j.activeBank
+	oldGeneration := j.checkpointGeneration
+	if err = j.Checkpoint(); err != nil { t.Fatal(err) }
+	if j.activeBank == oldBank || j.checkpointGeneration != oldGeneration+1 || j.checkpointTxID != 1 || j.end != 0 {
+		t.Fatalf("checkpoint state not advanced: bank=%d generation=%d tx=%d end=%d", j.activeBank, j.checkpointGeneration, j.checkpointTxID, j.end)
+	}
+	image2 := make([]byte, format.PageSize)
+	copy(image2, []byte("after-checkpoint"))
+	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset+format.PageSize, Image: image2}}); err != nil { t.Fatal(err) }
+
+	// A fresh Journal must select the newer descriptor and replay only its
+	// active bank, retaining both checkpointed and post-checkpoint data.
+	reopened, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	if reopened.activeBank != j.activeBank || reopened.checkpointTxID != 1 {
+		t.Fatalf("reopen selected wrong checkpoint: bank=%d tx=%d", reopened.activeBank, reopened.checkpointTxID)
+	}
+	got := make([]byte, format.PageSize)
+	if n, readErr := d.ReadAt(got, int64(sb.MappingOffset)); readErr != nil || n != len(got) { t.Fatalf("read first page: %d %v", n, readErr) }
+	if string(got[:17]) != "before-checkpoint" { t.Fatalf("checkpointed data lost: %q", got[:17]) }
+	if n, readErr := d.ReadAt(got, int64(sb.MappingOffset+format.PageSize)); readErr != nil || n != len(got) { t.Fatalf("read second page: %d %v", n, readErr) }
+	if string(got[:16]) != "after-checkpoint" { t.Fatalf("post-checkpoint data lost: %q", got[:16]) }
+}
+
+func TestCheckpointDescriptorFallbackAfterTornNewSlot(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wal-checkpoint-torn-*.img")
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	d, err := device.Open(f.Name(), true)
+	if err != nil { t.Fatal(err) }
+	defer d.Close()
+	sb, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	j, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset, Image: make([]byte, format.PageSize)}}); err != nil { t.Fatal(err) }
+	if err = j.Checkpoint(); err != nil { t.Fatal(err) }
+	// Corrupt the newest descriptor. The older valid descriptor must remain
+	// selectable; its bank was not overwritten by the attempted switch.
+	newestOffset, err := checkpointOffset(sb, 0, j.checkpointSlot)
+	if err != nil { t.Fatal(err) }
+	bad := make([]byte, format.PageSize)
+	if n, writeErr := d.WriteAt(bad, int64(newestOffset)); writeErr != nil || n != len(bad) { t.Fatalf("corrupt descriptor: %d %v", n, writeErr) }
+	if err = d.Sync(); err != nil { t.Fatal(err) }
+	reopened, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	if reopened.activeBank == j.activeBank {
+		t.Fatal("expected fallback to previous checkpoint bank")
+	}
+}
