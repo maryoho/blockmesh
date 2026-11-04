@@ -21,10 +21,13 @@ lock.SanlockLocker holds a resource with sanlock client command and a long-runni
 
 ## 2. Reader join and lease-loss handling
 
-Use volume.ReaderLeaseConfig with a per-slot resource resolver and call metastore.JoinReaderSession:
+Use volume.ReaderLeaseConfig with a per-slot resource resolver and a
+fence.SCSIPRRegistrar configured with this node's local initiator keys.
+JoinReaderSession registers and verifies those keys before marking the slot
+Active:
 
     session, err := metastore.JoinReaderSession(
-        ctx, readerTable, readerLeaseConfig,
+        ctx, readerTable, readerLeaseConfig, prRegistrar,
         slot, nodeID, bootID, epoch,
         func(err error) {
             // Mandatory fail-stop action:
