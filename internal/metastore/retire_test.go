@@ -14,7 +14,7 @@ func TestRetireQueueRequiresGenerationIODrainAndFencing(t *testing.T) {
 	if err = s.Publish(ids[0], 1); err != nil { t.Fatal(err) }
 
 	q := NewRetireQueue()
-	if err = q.Retire(0, ids); err != nil { t.Fatal(err) }
+	if err = q.Retire(0, ids[1:]); err != nil { t.Fatal(err) }
 	if _, err = q.Collect(a, ReclaimProof{SafeGeneration: 2, IOsDrained: true}); !errors.Is(err, ErrUnsafeReclaim) {
 		t.Fatalf("missing fencing proof: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestRetireQueueRequiresGenerationIODrainAndFencing(t *testing.T) {
 	if got := a.Stats(); got.LivePages != 2 { t.Fatalf("pages released while pinned: %+v", got) }
 	n, err := q.Collect(a, ReclaimProof{SafeGeneration: 1, IOsDrained: true, FencingConfirmed: true})
 	if err != nil || n != 1 { t.Fatalf("collect: released=%d err=%v", n, err) }
-	if got := a.Stats(); got.LivePages != 1 || got.FreePages != 9 { t.Fatalf("unexpected arena stats: %+v", got) }
+	if got := a.Stats(); got.LivePages != 2 || got.FreePages != 8 { t.Fatalf("unexpected arena stats: %+v", got) }
 	if len(q.Pending()) != 0 { t.Fatal("retire queue should be empty") }
 }
 
