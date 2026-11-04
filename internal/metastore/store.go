@@ -233,6 +233,53 @@ func Open(dev Device, expectedVolumeID string) (*Store, error) {
 	return &Store{dev: dev, sb: best.sb, sbSlot: best.slot}, nil
 }
 
+// OwnerEpoch returns the durable Pool-backed owner fencing epoch. Legacy
+// standalone Stores do not carry a distributed owner epoch and return zero.
+func (s *Store) OwnerEpoch() uint64 {
+	if s == nil { return 0 }
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.poolBacked { return 0 }
+	return s.descriptor.OwnerEpoch
+}
+
+// AdvanceOwnerEpoch publishes a strictly newer owner epoch through the
+// cluster-safe AG WAL. It is called only after the distributed owner lease has
+// been acquired and the previous owner has been fenced. The descriptor is the
+// sole after-image and remains the final (and only) publication point.
+func (s *Store) AdvanceOwnerEpoch(epoch uint64, committer Committer) error {
+	if s == nil { return errors.New("nil metastore") }
+	if epoch == 0 || committer == nil { return errors.New("nonzero owner epoch and WAL committer are required") }
+	cluster, ok := committer.(ClusterSafeCommitter)
+	if !ok || !cluster.ClusterSafe() { return ErrClusterSafeCommitterRequired }
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.poolBacked { return errors.New("owner epoch is supported only by Pool-backed Volumes") }
+	if err := s.refreshLocked(); err != nil { return err }
+	if epoch <= s.descriptor.OwnerEpoch {
+		return fmt.Errorf("owner epoch %d must exceed durable epoch %d", epoch, s.descriptor.OwnerEpoch)
+	}
+	if s.descriptor.Generation == math.MaxUint64 || s.descriptor.VolumeSequence == math.MaxUint64 {
+		return errors.New("Volume Descriptor sequence exhausted")
+	}
+	next := s.descriptor
+	next.Generation++
+	next.VolumeSequence++
+	next.OwnerEpoch = epoch
+	image, err := next.Encode()
+	if err != nil { return err }
+	slot := uint64(1) - s.sbSlot
+	offset := s.descriptorPair + slot*PageSize
+	if err = committer.CommitImages([]PageImage{{Offset: offset, Data: image}}); err != nil {
+		return fmt.Errorf("commit owner epoch %d: %w", epoch, err)
+	}
+	s.descriptor = next
+	s.sb.Generation = next.Generation
+	s.sbSlot = slot
+	return nil
+}
+
 func (s *Store) Superblock() Superblock {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
