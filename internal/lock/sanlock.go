@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -31,7 +32,9 @@ type SanlockLocker struct {
 
 type sanlockLease struct {
 	cmd *exec.Cmd
-	wait chan error
+	done chan struct{}
+	waitErr error
+	mu sync.Mutex
 	marker string
 	resource string
 }
@@ -64,8 +67,14 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err = cmd.Start(); err != nil { return nil, fmt.Errorf("start sanlock client: %w", err) }
-	lease := &sanlockLease{cmd: cmd, wait: make(chan error, 1), marker: marker, resource: resource}
-	go func() { lease.wait <- cmd.Wait() }()
+	lease := &sanlockLease{cmd: cmd, done: make(chan struct{}), marker: marker, resource: resource}
+	go func() {
+		err := cmd.Wait()
+		lease.mu.Lock()
+		lease.waitErr = err
+		lease.mu.Unlock()
+		close(lease.done)
+	}()
 
 	deadline := time.NewTimer(l.StartupTimeout)
 	defer deadline.Stop()
@@ -76,7 +85,10 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 			return lease, nil
 		}
 		select {
-		case waitErr := <-lease.wait:
+		case <-lease.done:
+			lease.mu.Lock()
+			waitErr := lease.waitErr
+			lease.mu.Unlock()
 			_ = os.Remove(marker)
 			return nil, fmt.Errorf("sanlock failed to acquire %q: %w", resource, waitErr)
 		case <-ctx.Done():
@@ -101,7 +113,7 @@ func (l *SanlockLocker) Lock(ctx context.Context, resource string) (func() error
 func (l *sanlockLease) Resource() string { return l.resource }
 func (l *sanlockLease) Valid() bool {
 	select {
-	case <-l.wait:
+	case <-l.done:
 		return false
 	default:
 		return true
@@ -110,9 +122,16 @@ func (l *sanlockLease) Valid() bool {
 func (l *sanlockLease) Close() error {
 	if l == nil || l.cmd == nil || l.cmd.Process == nil { return nil }
 	select {
-	case err := <-l.wait:
+	case <-l.done:
+		l.mu.Lock()
+		err := l.waitErr
+		l.mu.Unlock()
 		_ = os.Remove(l.marker)
-		if err != nil { return err }
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) { return nil }
+			return err
+		}
 		return nil
 	default:
 	}
@@ -120,7 +139,10 @@ func (l *sanlockLease) Close() error {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
-	case err := <-l.wait:
+	case <-l.done:
+		l.mu.Lock()
+		err := l.waitErr
+		l.mu.Unlock()
 		_ = os.Remove(l.marker)
 		if err != nil {
 			var exitErr *exec.ExitError
@@ -130,7 +152,10 @@ func (l *sanlockLease) Close() error {
 		return nil
 	case <-timer.C:
 		_ = l.cmd.Process.Kill()
-		err := <-l.wait
+		<-l.done
+		l.mu.Lock()
+		err := l.waitErr
+		l.mu.Unlock()
 		_ = os.Remove(l.marker)
 		if err != nil {
 			var exitErr *exec.ExitError
