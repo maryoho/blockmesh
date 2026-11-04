@@ -102,7 +102,7 @@ func loadNode(store *metastore.Store, id uint64, expectedLevel uint16, seen map[
 		}
 		return out, nil
 	case internalPageType:
-		if level == 0 || (expectedLevel != math.MaxUint16 && expectedLevel != level) || count == 0 || count > maxInternalKeys || len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
+		if level == 0 || (expectedLevel != math.MaxUint16 && expectedLevel != level) || count > maxInternalKeys || len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
 			return nil, fmt.Errorf("%w: invalid internal page %d", ErrCorruptTree, id)
 		}
 		keys := make([]uint64, count)
@@ -155,25 +155,54 @@ func (t *Tree) Get(key uint64) (uint64, error) {
 func (t *Tree) Put(key, value uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	next := append([]Item(nil), t.items...)
 	i := sort.Search(len(next), func(i int) bool { return next[i].Key >= key })
+	if i < len(next) && next[i].Key == key && next[i].Value == value {
+		return nil
+	}
 	if i < len(next) && next[i].Key == key {
-		if next[i].Value == value {
-			return nil
-		}
 		next[i].Value = value
 	} else {
 		next = append(next, Item{})
 		copy(next[i+1:], next[i:])
 		next[i] = Item{Key: key, Value: value}
 	}
-	return t.publishItems(next)
+
+	var root *cowNode
+	if t.root == metastore.NoPage {
+		root = &cowNode{level: 0, leaf: true, dirty: true, items: []Item{{Key: key, Value: value}}}
+	} else {
+		var err error
+		root, err = loadCowNode(t.store, t.root)
+		if err != nil {
+			return err
+		}
+		roots, changed, err := insertCOW(t.store, root, key, value)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		if len(roots) == 1 {
+			root = roots[0]
+		} else {
+			children := make([]cowChild, len(roots))
+			for i, child := range roots {
+				children[i] = cowChild{id: child.id, minKey: child.minKey(), level: child.level, node: child}
+			}
+			root = &cowNode{level: roots[0].level + 1, dirty: true, children: children}
+		}
+	}
+	return t.publishCOW(root, next)
 }
 
 // Delete removes key and returns ErrKeyNotFound when it does not exist.
 func (t *Tree) Delete(key uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	i := sort.Search(len(t.items), func(i int) bool { return t.items[i].Key >= key })
 	if i == len(t.items) || t.items[i].Key != key {
 		return ErrKeyNotFound
@@ -181,7 +210,32 @@ func (t *Tree) Delete(key uint64) error {
 	next := make([]Item, 0, len(t.items)-1)
 	next = append(next, t.items[:i]...)
 	next = append(next, t.items[i+1:]...)
-	return t.publishItems(next)
+
+	root, err := loadCowNode(t.store, t.root)
+	if err != nil {
+		return err
+	}
+	root, changed, err := deleteCOW(t.store, root, key)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return ErrKeyNotFound
+	}
+	// A root with one child can be replaced by that child directly. Unary
+	// internal nodes below the root are retained to keep all leaves at the
+	// same depth; their zero-separator encoding is valid.
+	for root != nil && !root.leaf && len(root.children) == 1 {
+		child := root.children[0].node
+		if child == nil {
+			child, err = loadCowNode(t.store, root.children[0].id)
+			if err != nil {
+				return err
+			}
+		}
+		root = child
+	}
+	return t.publishCOW(root, next)
 }
 
 // Snapshot returns a stable, sorted copy of all key/value pairs.
