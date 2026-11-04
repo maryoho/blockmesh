@@ -15,9 +15,9 @@ import (
 const (
 	leafPageType     uint16 = 1
 	internalPageType uint16 = 2
-	nodeHeaderSize          = 8
+	nodeHeaderSize          = 12
 	maxLeafEntries           = (metastore.PagePayloadMax - nodeHeaderSize) / 16
-	maxInternalKeys          = (metastore.PagePayloadMax - 16) / 16
+	maxInternalKeys          = (metastore.PagePayloadMax - 20) / 16
 	maxInternalChildren      = maxInternalKeys + 1
 )
 
@@ -34,6 +34,7 @@ type Item struct {
 type nodeRef struct {
 	id     uint64
 	minKey uint64
+	level  uint16
 }
 
 type Tree struct {
@@ -56,7 +57,7 @@ func Open(store *metastore.Store) (*Tree, error) {
 	var live []uint64
 	if sb.RootPage != metastore.NoPage {
 		seen := make(map[uint64]struct{})
-		items, err := loadNode(store, sb.RootPage, 0, seen, &live)
+		items, err := loadNode(store, sb.RootPage, math.MaxUint16, seen, &live)
 		if err != nil {
 			return nil, err
 		}
@@ -85,9 +86,10 @@ func loadNode(store *metastore.Store, id uint64, expectedLevel uint16, seen map[
 		return nil, fmt.Errorf("%w: invalid node header at page %d", ErrCorruptTree, id)
 	}
 	count := int(binary.LittleEndian.Uint16(p.Payload[6:8]))
+	level := binary.LittleEndian.Uint16(p.Payload[8:10])
 	switch p.Type {
 	case leafPageType:
-		if expectedLevel != 0 || len(p.Payload) != nodeHeaderSize+count*16 || count == 0 || count > maxLeafEntries {
+		if level != 0 || (expectedLevel != math.MaxUint16 && expectedLevel != level) || len(p.Payload) != nodeHeaderSize+count*16 || count == 0 || count > maxLeafEntries {
 			return nil, fmt.Errorf("%w: invalid leaf page %d", ErrCorruptTree, id)
 		}
 		out := make([]Item, count)
@@ -100,12 +102,38 @@ func loadNode(store *metastore.Store, id uint64, expectedLevel uint16, seen map[
 		}
 		return out, nil
 	case internalPageType:
-		level := binary.LittleEndian.Uint16(p.Payload[4:6])
-		_ = level
-		// The node format stores the level in the reserved header word for internal pages.
-		level = binary.LittleEndian.Uint16(p.Payload[?])
-		_ = level
-		return nil, fmt.Errorf("%w: unsupported internal node", ErrCorruptTree)
+		if level == 0 || (expectedLevel != math.MaxUint16 && expectedLevel != level) || count == 0 || count > maxInternalKeys || len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
+			return nil, fmt.Errorf("%w: invalid internal page %d", ErrCorruptTree, id)
+		}
+		keys := make([]uint64, count)
+		off := nodeHeaderSize
+		for i := range keys {
+			keys[i] = binary.LittleEndian.Uint64(p.Payload[off : off+8])
+			if i > 0 && keys[i-1] >= keys[i] {
+				return nil, fmt.Errorf("%w: unsorted separators in page %d", ErrCorruptTree, id)
+			}
+			off += 8
+		}
+		children := make([]uint64, count+1)
+		for i := range children {
+			children[i] = binary.LittleEndian.Uint64(p.Payload[off : off+8])
+			off += 8
+		}
+		var out []Item
+		for i, child := range children {
+			part, childErr := loadNode(store, child, level-1, seen, live)
+			if childErr != nil {
+				return nil, childErr
+			}
+			if len(part) == 0 || (i > 0 && part[0].Key != keys[i-1]) {
+				return nil, fmt.Errorf("%w: separator mismatch in page %d", ErrCorruptTree, id)
+			}
+			if len(out) > 0 && out[len(out)-1].Key >= part[0].Key {
+				return nil, fmt.Errorf("%w: overlapping child ranges in page %d", ErrCorruptTree, id)
+			}
+			out = append(out, part...)
+		}
+		return out, nil
 	default:
 		return nil, fmt.Errorf("%w: unknown page type %d", ErrCorruptTree, p.Type)
 	}
@@ -208,7 +236,7 @@ func (t *Tree) publishItems(items []Item) error {
 		if err = t.store.WritePage(metastore.Page{ID: id, Type: leafPageType, Generation: sequence, Payload: payload}); err != nil {
 			return fmt.Errorf("write leaf page %d: %w", id, err)
 		}
-		leaves = append(leaves, nodeRef{id: id, minKey: items[start].Key})
+		leaves = append(leaves, nodeRef{id: id, minKey: items[start].Key, level: 0})
 		allPages = append(allPages, id)
 		start = end
 	}
@@ -223,11 +251,11 @@ func (t *Tree) publishItems(items []Item) error {
 			offset += groupSize
 			id := ids[cursor]
 			cursor++
-			payload := encodeInternal(children)
+			payload := encodeInternal(children, children[0].level+1)
 			if err = t.store.WritePage(metastore.Page{ID: id, Type: internalPageType, Generation: sequence, Payload: payload}); err != nil {
 				return fmt.Errorf("write internal page %d: %w", id, err)
 			}
-			next = append(next, nodeRef{id: id, minKey: children[0].minKey})
+			next = append(next, nodeRef{id: id, minKey: children[0].minKey, level: children[0].level + 1})
 			allPages = append(allPages, id)
 		}
 		level = next
@@ -283,6 +311,7 @@ func encodeLeaf(items []Item) []byte {
 	copy(b[:4], "BMTN")
 	binary.LittleEndian.PutUint16(b[4:6], 1)
 	binary.LittleEndian.PutUint16(b[6:8], uint16(len(items)))
+	binary.LittleEndian.PutUint16(b[8:10], 0)
 	for i, item := range items {
 		off := nodeHeaderSize + i*16
 		binary.LittleEndian.PutUint64(b[off:off+8], item.Key)
@@ -291,12 +320,13 @@ func encodeLeaf(items []Item) []byte {
 	return b
 }
 
-func encodeInternal(children []nodeRef) []byte {
+func encodeInternal(children []nodeRef, level uint16) []byte {
 	keys := len(children) - 1
 	b := make([]byte, nodeHeaderSize+keys*8+len(children)*8)
 	copy(b[:4], "BMTN")
 	binary.LittleEndian.PutUint16(b[4:6], 1)
 	binary.LittleEndian.PutUint16(b[6:8], uint16(keys))
+	binary.LittleEndian.PutUint16(b[8:10], level)
 	off := nodeHeaderSize
 	for i := 1; i < len(children); i++ {
 		binary.LittleEndian.PutUint64(b[off:off+8], children[i].minKey)
