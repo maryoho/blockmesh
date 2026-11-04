@@ -17,7 +17,7 @@ A Reader Slot resource is stable across BootID/Epoch reuse. The durable Reader T
 
 Resource strings use sanlock's lockspace:resource_name:path:offset format. All nodes must resolve the same logical resource names to the same shared lease LUN and offsets. Do not use FileLocker on multiple SAN-connected hosts.
 
-lock.SanlockLocker holds a resource with sanlock client command and a long-running helper. The helper is started through setpriv --pdeathsig TERM, so death of the BlockMesh process terminates the helper and releases its sanlock resource. The host's sanlock daemon must be healthy and the lockspace joined. Configure HelperBinary if setpriv is not in PATH.
+lock.SanlockLocker holds a resource with sanlock client command and a long-running helper. The helper is cmd/bm-lock-helper. It sets PR_SET_PDEATHSIG and checks the expected parent PID before announcing readiness, so death of the BlockMesh process terminates the helper and releases its sanlock resource. Build and install this helper on every host; configure HelperBinary if it is not in PATH. The host's sanlock daemon must be healthy and the lockspace joined.
 
 ## 2. Reader join and lease-loss handling
 
@@ -34,7 +34,7 @@ Use volume.ReaderLeaseConfig with a per-slot resource resolver and call metastor
 
 The callback is mandatory. Detecting local sanlock lease loss is not enough: the node must stop issuing new reads immediately. Other nodes must not mark the reader Fenced until they acquire the same slot lease and complete SAN PR fencing.
 
-Call session.Heartbeat() periodically. Heartbeat does not advance the reader generation. After Tree.Refresh(), stop old-generation reads, drain all in-flight I/O, then call session.AdvanceGeneration(newSequence, true). Graceful shutdown calls session.CloseDrained(true) only after the same stop-and-drain sequence.
+Call session.Heartbeat() periodically. Heartbeat does not advance the reader generation. After Tree.Refresh(), stop old-generation reads, drain all in-flight I/O, then call session.AdvanceGeneration(newSequence, true). Graceful shutdown calls session.CloseDrained(ctx, true), which unregisters local PR keys, persists Closed, and releases the slot lease, only after the same stop-and-drain sequence.
 
 ## 3. SCSI-3 PR fencing
 
