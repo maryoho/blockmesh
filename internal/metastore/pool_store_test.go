@@ -45,10 +45,12 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 
 	pair, err := format.VolumeDescriptorPairOffset(pool, 3)
 	if err != nil { t.Fatal(err) }
+	slotBytes := (pool.MetadataSize-pool.ReservedOffset)/uint64(format.MaxVolumeDescriptors)/format.PageSize*format.PageSize
+	arenaStart := pool.ReservedOffset/format.PageSize + 3*(slotBytes/format.PageSize)
 	desc := format.VolumeDescriptor{
 		VolumeID: "pool-volume-3", AG: 0, Generation: 1, VolumeSequence: 1,
 		MappingRootOffset: pool.MappingOffset, BitmapSequence: 1, OwnerEpoch: 9,
-		ArenaStart: pool.ReservedOffset / format.PageSize, ArenaPages: 256,
+		ArenaStart: arenaStart, ArenaPages: 256,
 		RootPage: ^uint64(0),
 	}
 	image, err := desc.Encode()
