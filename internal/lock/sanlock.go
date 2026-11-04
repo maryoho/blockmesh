@@ -64,10 +64,11 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 	if err = markerFile.Close(); err != nil { _ = os.Remove(marker); return nil, err }
 	if err = os.Remove(marker); err != nil { return nil, err }
 
-	script := "umask 077; : > " + shellQuote(marker) + "; exec sleep 2147483647"
 	helper := l.HelperBinary
-	if helper == "" { helper = "setpriv" }
-	cmd := exec.Command(binary, "client", "command", "-r", spec, "-c", helper, "--pdeathsig", "TERM", "/bin/sh", "-c", script)
+	if helper == "" { helper = "bm-lock-helper" }
+	parentPID := strconv.Itoa(os.Getpid())
+	cmd := exec.Command(binary, "client", "command", "-r", spec, "-c", helper,
+		"--parent-pid", parentPID, "--ready-file", marker)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err = cmd.Start(); err != nil { return nil, fmt.Errorf("start sanlock client: %w", err) }
@@ -105,8 +106,6 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 		}
 	}
 }
-
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
 func (l *SanlockLocker) Lock(ctx context.Context, resource string) (func() error, error) {
 	lease, err := l.Acquire(ctx, resource)
