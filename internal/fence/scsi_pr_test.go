@@ -17,18 +17,28 @@ type fakePRRunner struct {
 func (r *fakePRRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
 	device := ""
 	var target uint64
+	var reservation uint64
 	preempt := false
+	register := false
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--device=") { device = strings.TrimPrefix(arg, "--device=") }
 		if strings.HasPrefix(arg, "--param-sark=") {
 			target, _ = strconv.ParseUint(strings.TrimPrefix(arg, "--param-sark="), 16, 64)
 		}
+		if strings.HasPrefix(arg, "--param-rk=") {
+			reservation, _ = strconv.ParseUint(strings.TrimPrefix(arg, "--param-rk="), 16, 64)
+		}
 		if arg == "--preempt-abort" { preempt = true }
+		if arg == "--register" { register = true }
 	}
 	if device == r.failDevice { return []byte("path failure"), errors.New("injected path error") }
 	if preempt {
 		delete(r.keys[device], target)
 		return []byte("preempted"), nil
+	}
+	if register {
+		if target == 0 { delete(r.keys[device], reservation) } else { r.keys[device][target] = true }
+		return []byte("registered"), nil
 	}
 	var output strings.Builder
 	for key := range r.keys[device] { if r.keys[device][key] { fmt.Fprintf(&output, "Key=0x%x\n", key) } }
@@ -75,4 +85,17 @@ func TestParsePRKeysDoesNotTreatGenerationAsRegistration(t *testing.T) {
 	if _,ok:=keys[0x22];ok {t.Fatal("PR generation parsed as registration")}
 	if _,ok:=keys[0x11];!ok {t.Fatal("Key= line not parsed")}
 	if _,ok:=keys[0x33];!ok {t.Fatal("plain key line not parsed")}
+}
+
+
+func TestSCSIPRRegistrarRegistersAndUnregistersAllLocalPaths(t *testing.T) {
+	runner:=&fakePRRunner{keys:map[string]map[uint64]bool{
+		"/dev/a":{},
+		"/dev/b":{},
+	}}
+	registrar:=&SCSIPRRegistrar{Paths:[]PRPath{{Device:"/dev/a",LocalKey:0xa1},{Device:"/dev/b",LocalKey:0xb2}},Runner:runner}
+	if err:=registrar.RegisterReader(context.Background(),"node-a","boot-a");err!=nil{t.Fatal(err)}
+	if !runner.keys["/dev/a"][0xa1]||!runner.keys["/dev/b"][0xb2]{t.Fatal("local keys were not registered")}
+	if err:=registrar.UnregisterReader(context.Background(),"node-a","boot-a");err!=nil{t.Fatal(err)}
+	if runner.keys["/dev/a"][0xa1]||runner.keys["/dev/b"][0xb2]{t.Fatal("local keys were not unregistered")}
 }
