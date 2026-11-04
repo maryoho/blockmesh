@@ -253,116 +253,11 @@ func (t *Tree) RootPage() uint64 {
 
 func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
 
-func (t *Tree) publishItems(items []Item) error {
-	sb := t.store.Superblock()
-	if sb.MappingSequence == ^uint64(0) {
-		return errors.New("B+Tree mapping sequence exhausted")
-	}
-	sequence := sb.MappingSequence + 1
-	if len(items) == 0 {
-		if err := t.store.Publish(metastore.NoPage, sequence); err != nil {
-			return err
-		}
-		t.items, t.pages, t.root = nil, nil, metastore.NoPage
-		return nil
-	}
 
-	pageCount := countPages(len(items))
-	reservation, err := t.arena.Reserve(uint64(pageCount))
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = reservation.Abort()
-		}
-	}()
-	ids := reservation.Pages()
-	cursor := 0
-	allPages := make([]uint64, 0, pageCount)
-	leaves := make([]nodeRef, 0, (len(items)+maxLeafEntries-1)/maxLeafEntries)
-	for start := 0; start < len(items); {
-		end := min(start+maxLeafEntries, len(items))
-		id := ids[cursor]
-		cursor++
-		payload := encodeLeaf(items[start:end])
-		if err = t.store.WritePage(metastore.Page{ID: id, Type: leafPageType, Generation: sequence, Payload: payload}); err != nil {
-			return fmt.Errorf("write leaf page %d: %w", id, err)
-		}
-		leaves = append(leaves, nodeRef{id: id, minKey: items[start].Key, level: 0})
-		allPages = append(allPages, id)
-		start = end
-	}
 
-	level := leaves
-	for len(level) > 1 {
-		groups := partition(len(level), maxInternalChildren)
-		next := make([]nodeRef, 0, len(groups))
-		offset := 0
-		for _, groupSize := range groups {
-			children := level[offset : offset+groupSize]
-			offset += groupSize
-			id := ids[cursor]
-			cursor++
-			payload := encodeInternal(children, children[0].level+1)
-			if err = t.store.WritePage(metastore.Page{ID: id, Type: internalPageType, Generation: sequence, Payload: payload}); err != nil {
-				return fmt.Errorf("write internal page %d: %w", id, err)
-			}
-			next = append(next, nodeRef{id: id, minKey: children[0].minKey, level: children[0].level + 1})
-			allPages = append(allPages, id)
-		}
-		level = next
-	}
-	if cursor != len(ids) {
-		return fmt.Errorf("internal error: used %d of %d reserved pages", cursor, len(ids))
-	}
-	if err = t.store.Sync(); err != nil {
-		return fmt.Errorf("sync B+Tree pages: %w", err)
-	}
-	root := level[0].id
-	if err = t.store.Publish(root, sequence); err != nil {
-		// Publish may have written the inactive superblock before Sync failed.
-		// Its durability is therefore ambiguous; never return these pages to
-		// the allocator until recovery has inspected the selected superblock.
-		committed = true
-		return fmt.Errorf("publish B+Tree root (reservation retained for recovery): %w", err)
-	}
-	// A failure here is not safely abortable: the durable root already points
-	// at these pages. Keep the reservation owned and report the invariant break.
-	if err = reservation.Commit(); err != nil {
-		committed = true
-		return fmt.Errorf("root published but arena commit failed: %w", err)
-	}
-	committed = true
-	t.items = append([]Item(nil), items...)
-	t.pages = allPages
-	t.root = root
-	return nil
-}
 
-func countPages(items int) int {
-	leaves := (items + maxLeafEntries - 1) / maxLeafEntries
-	total, level := leaves, leaves
-	for level > 1 {
-		level = (level + maxInternalChildren - 1) / maxInternalChildren
-		total += level
-	}
-	return total
-}
 
-func partition(n, maxSize int) []int {
-	groups := (n + maxSize - 1) / maxSize
-	base, extra := n/groups, n%groups
-	out := make([]int, groups)
-	for i := range out {
-		out[i] = base
-		if i < extra {
-			out[i]++
-		}
-	}
-	return out
-}
+
 
 func encodeLeaf(items []Item) []byte {
 	b := make([]byte, nodeHeaderSize+len(items)*16)
