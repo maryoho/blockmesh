@@ -75,6 +75,14 @@ func InitDevice(d device.Device, dataStartSector uint64, force bool) error {
 	if size < 0 || uint64(size) < format.MetadataSize {
 		return fmt.Errorf("metadata device too small: have %d bytes, need at least %d", d.Size(), format.MetadataSize)
 	}
+	// Invalidate redundant Pool Superblocks before writing the new generation,
+	// so an interrupted reformat can never select a stale higher-generation copy.
+	if err := writeAtFull(d, make([]byte, 2*format.PageSize), 0); err != nil { return err }
+	if err := d.Sync(); err != nil { return err }
+	// Volume identities and checkpoint descriptors are Pool-scoped. Clear
+	// them before publishing the new Pool Superblocks.
+	if err := zeroRegion(d, format.NodeTableOffset, format.NodeTableSize); err != nil { return err }
+	if err := zeroRegion(d, format.CheckpointOffset, format.CheckpointSize); err != nil { return err }
 	if !force {
 		buf := make([]byte, format.PageSize)
 		if readAtFull(d, buf, 0) == nil {
@@ -250,4 +258,17 @@ func writeAtFull(d device.Device, b []byte, off int64) error {
 		return io.ErrShortWrite
 	}
 	return nil
+}
+
+func zeroRegion(d device.Device, offset, length uint64) error {
+	const chunk = uint64(1 << 20)
+	zero := make([]byte, chunk)
+	for length > 0 {
+		n := length
+		if n > chunk { n = chunk }
+		if err := writeAtFull(d, zero[:n], int64(offset)); err != nil { return err }
+		offset += n
+		length -= n
+	}
+	return d.Sync()
 }
