@@ -13,6 +13,8 @@ import (
 	"math"
 	"strings"
 	"sync"
+
+	"blockmesh/internal/format"
 )
 
 const (
@@ -136,6 +138,15 @@ func Format(dev Device, l Layout) (*Store, error) {
 	}
 	if err := validateLayout(l); err != nil {
 		return nil, err
+	}
+	// Never let the legacy standalone Volume format overwrite a Pool v2 device.
+	for _, off := range []uint64{format.SuperAOffset,format.SuperBOffset} {
+		page:=make([]byte,format.PageSize)
+		if err:=readFullAt(dev,page,int64(off));err==nil {
+			if _,poolErr:=format.DecodeSuperblock(page);poolErr==nil {
+				return nil, errors.New("refusing legacy metastore format on a BMPOOL02 Pool device")
+			}
+		}
 	}
 	// Invalidate both old copies first. Otherwise a stale superblock left by a
 	// previous format could have a larger generation and win during Open if
