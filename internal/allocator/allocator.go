@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"hash/crc32"
 
-	"bblockmesh/internal/format"
-	"bblockmesh/internal/lock"
-	"bblockmesh/internal/metadata"
-	"bblockmesh/internal/wal"
+	"blockmesh/internal/format"
+	"blockmesh/internal/lock"
+	"blockmesh/internal/metadata"
+	"blockmesh/internal/wal"
 )
 
 const bitmapDescriptorMagic = uint64(0x424D424D41503031) // BMBMAP01
