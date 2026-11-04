@@ -42,7 +42,7 @@ func TestCollectCapturesEveryPathAndOnlyUsesReadCommands(t *testing.T){
 }
 func TestCollectRejectsMissingOrDuplicatePaths(t *testing.T){
 	c:=testCollector(&fakeRunner{})
-	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","","","","");err==nil{t.Fatal("expected missing paths error")}
+	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","","","",nil);err==nil{t.Fatal("expected missing paths error")}
 	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","","","",[]string{"/dev/sda","/dev/sda"});err==nil{t.Fatal("expected duplicate path error")}
 }
 func TestVerifyTargetKeyAbsentRequiresEveryPathReadable(t *testing.T){
