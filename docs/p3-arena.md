@@ -66,7 +66,9 @@ service must serialize slot assignment; two nodes must never register into the
 same slot concurrently.
 
 Each record stores NodeID, BootID, monotonically increasing Reader Epoch,
-Root Generation, heartbeat sequence, and state:
+Root Generation, heartbeat sequence, and state. A joining reader must refresh
+the committed superblock and register at exactly the current Mapping Sequence
+before it begins issuing reads; it cannot join using a stale root generation.
 - Active: participates in the minimum safe generation.
 - Leaving: still pins its generation until clean I/O drain or fencing.
 - Fenced: excluded only after the SAN fencer succeeds.
