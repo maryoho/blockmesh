@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 )
 
 var (
@@ -74,6 +75,24 @@ func (d *FileDevice) WriteAt(p []byte, off int64) (int, error) {
 		return 0, ErrReadOnly
 	}
 	return d.f.WriteAt(p, off)
+}
+
+// Discard punches a hole in a regular-file metadata image without
+// materializing zero-filled blocks. It is an optimization for sparse test and
+// development images only; production block-device backends must implement
+// their own discard/zero semantics and do not use FileDevice.
+func (d *FileDevice) Discard(offset, length uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed { return ErrClosed }
+	if d.readOnly { return ErrReadOnly }
+	if offset > uint64(^uint64(0)>>1) || length > uint64(^uint64(0)>>1)-offset {
+		return errors.New("discard range overflows file offset")
+	}
+	info, err := d.f.Stat()
+	if err != nil { return err }
+	if !info.Mode().IsRegular() { return errors.New("discard is supported only for regular files") }
+	return syscall.Fallocate(int(d.f.Fd()), 0x01|0x02, int64(offset), int64(length))
 }
 
 func (d *FileDevice) Sync() error {
