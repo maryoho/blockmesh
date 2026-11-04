@@ -136,7 +136,7 @@ func (c *ReaderRecoveryController) clearAttempt(key readerRecoveryKey) {
 func (c *ReaderRecoveryController) RecoverOnce(ctx context.Context) (ReaderRecoveryReport,error) {
 	var report ReaderRecoveryReport
 	if err:=c.validate();err!=nil{return report,err}
-	readers,err:=c.Table.Snapshot()
+	readers,err:=c.Table.SnapshotContext(ctx)
 	if err!=nil{return report,err}
 	report.Scanned=len(readers)
 	now:=c.now()
@@ -179,7 +179,7 @@ func (c *ReaderRecoveryController) RecoverOnce(ctx context.Context) (ReaderRecov
 		} else if err:=c.Drain.WaitForMetadataIOsDrained(ctx,c.Table.store.Superblock().VolumeID);err!=nil {
 			failures=append(failures,fmt.Errorf("wait for metadata I/O drain: %w",err))
 		} else {
-			n,collectErr:=c.Arena.CollectWithReaders(c.Table,true)
+			n,collectErr:=c.Arena.CollectWithReadersContext(ctx,c.Table,true)
 			report.ReclaimedPages=n
 			if collectErr!=nil { failures=append(failures,fmt.Errorf("collect retired metadata pages: %w",collectErr)) }
 		}
