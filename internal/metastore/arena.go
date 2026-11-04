@@ -227,7 +227,10 @@ func (a *Arena) takeFreeLocked() (uint64, bool) {
 }
 
 func (a *Arena) rollbackLocked(r *Reservation) {
-	for _, id := range r.pages {
+	// takeFreeLocked pops from the end of the free slice. Append in reverse
+	// order so an aborted reservation is returned in its original order.
+	for i := len(r.pages) - 1; i >= 0; i-- {
+		id := r.pages[i]
 		delete(a.reserved, id)
 		a.free = append(a.free, id)
 	}
