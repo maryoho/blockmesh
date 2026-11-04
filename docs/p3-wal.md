@@ -53,12 +53,19 @@ mutex:
 4. Sync the descriptor.
 5. Switch the in-memory append position to the new bank.
 
-The order is deliberate. Before step 4 is durable, the old descriptor still
-selects the untouched old active bank. The inactive bank may be cleared
-because it is not selected. After step 4, the new descriptor selects a bank
-that was already fully cleared and synced. Thus recovery always has one valid
-descriptor pointing at a complete WAL bank, even if power fails during
-rotation. The previous descriptor remains intact as fallback.
+The order is deliberate. Before the new descriptor is durable, the old
+descriptor still selects the untouched old active bank. The inactive bank may
+be cleared because it is not selected. After the new descriptor is durable,
+the new descriptor selects a bank that was already fully cleared and synced.
+The new descriptor is then mirrored to the other slot and synced BEFORE
+Checkpoint returns and before another Commit can run. This prevents the
+older slot from pointing at a stale bank after new transactions begin.
+
+If power fails between the first descriptor sync and the mirror sync, the
+new descriptor is already valid and the old descriptor still selects the
+untouched old bank. On the next open, the highest valid generation is chosen
+and copied to the other slot before the Journal is returned. If one copy is
+later unreadable, the remaining mirrored copy still selects the active bank.
 
 The checkpoint transaction ID advances only across transactions whose
 after-images were applied and synced by Commit (or replayed and synced by
@@ -66,9 +73,12 @@ Recover). Recovery scans only the selected bank; all transactions at or below
 the checkpoint high-water mark are represented by already-durable metadata
 pages and need not be replayed.
 
-A full active bank returns `ErrJournalFull`. The caller should quiesce
-transactions and call Checkpoint, then retry. Checkpoint is explicit in this
-stage; automatic background checkpoint scheduling is not included.
+A full active bank returns `ErrJournalFull`. This is a known no-write result
+for the failed append and does not poison the Journal. The caller should
+quiesce transactions, call Checkpoint (which discards any uncommitted Intent
+tail while retaining the last committed high-water mark), then retry.
+Checkpoint is explicit in this stage; automatic background checkpoint
+scheduling is not included.
 
 ## Important boundaries
 
