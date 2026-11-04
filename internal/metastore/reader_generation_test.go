@@ -2,6 +2,8 @@ package metastore
 
 import (
 	"context"
+	"encoding/binary"
+	"hash/crc32"
 	"errors"
 	"sync"
 	"testing"
@@ -156,6 +158,7 @@ type testReaderLeaseProbe struct {
 	acquired bool
 	err error
 	released bool
+	releaseErr error
 }
 
 func (p *testReaderLeaseProbe) AcquireExpiredReader(_ context.Context, _ string, record ReaderRecord) (func() error, error) {
@@ -164,7 +167,7 @@ func (p *testReaderLeaseProbe) AcquireExpiredReader(_ context.Context, _ string,
 	}
 	if p.err != nil { return nil, p.err }
 	p.acquired = true
-	return func() error { p.released = true; return nil }, nil
+	return func() error { p.released = true; return p.releaseErr }, nil
 }
 
 func TestFenceExpiredReaderRequiresLeaseProbeBeforeFencing(t *testing.T) {
@@ -292,4 +295,39 @@ func TestReaderRecoveryControllerSkipsLegacyAndFutureHeartbeat(t *testing.T) {
 		Config:ReaderRecoveryConfig{HeartbeatTimeout:time.Second,MaxClockSkew:time.Second,Clock:func()time.Time{return now}}}
 	report,err:=controller.RecoverOnce(context.Background())
 	if err!=nil||report.SkippedClockSkew!=1||report.Fenced!=0 {t.Fatalf("future heartbeat must fail closed: %+v %v",report,err)}
+}
+
+
+func TestReaderRecordV1DecodesWithoutTrustedHeartbeatTime(t *testing.T) {
+	record:=ReaderRecord{Slot:3,NodeID:"legacy-node",BootID:"legacy-boot",Epoch:7,
+		RootGeneration:11,HeartbeatSequence:19,HeartbeatUnixNano:time.Now().UnixNano(),State:ReaderActive}
+	page,err:=encodeReaderRecord(record)
+	if err!=nil {t.Fatal(err)}
+	binary.LittleEndian.PutUint32(page[8:12],1)
+	for i:=304;i<312;i++ {page[i]=0}
+	binary.LittleEndian.PutUint32(page[PageSize-4:],crc32.Checksum(page[:PageSize-4],crcTable))
+	decoded,err:=decodeReaderRecord(3,page)
+	if err!=nil {t.Fatal(err)}
+	if decoded.HeartbeatUnixNano!=0 {t.Fatalf("legacy page must not invent heartbeat timestamp: %d",decoded.HeartbeatUnixNano)}
+}
+
+func TestFenceExpiredReaderPropagatesProbeReleaseFailure(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-probe-release",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil {t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil {t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	table,err:=NewReaderTable(s,18,2,committer,coordinator)
+	if err!=nil {t.Fatal(err)}
+	if err=table.Register(0,"node-fenced","boot-fenced",4,1);err!=nil {t.Fatal(err)}
+	probe:=&testReaderLeaseProbe{releaseErr:errors.New("probe release failed")}
+	fencer:=testFenceFunc(func(context.Context,string,string)error{return nil})
+	if err=table.FenceExpiredReader(context.Background(),0,"node-fenced","boot-fenced",4,probe,fencer);err==nil {
+		t.Fatal("probe release failure must be reported")
+	}
+	snapshot,err:=table.Snapshot()
+	if err!=nil {t.Fatal(err)}
+	if len(snapshot)!=0 {t.Fatalf("successful PR fencing must remain durably fenced despite release error: %+v",snapshot)}
 }
