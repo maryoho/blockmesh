@@ -101,6 +101,17 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	}
 	desc, slot, err := j.loadCheckpoint(ag, sb)
 	if err != nil { return nil, fmt.Errorf("load AG %d checkpoint: %w", ag, err) }
+	// Before accepting new transactions, repair the redundant descriptor
+	// copy. This is important after a crash between descriptor switch and
+	// mirroring: the older slot may still describe the previous bank.
+	mirrorOffset, err := checkpointOffset(sb, ag, uint32(1)-slot)
+	if err != nil { return nil, err }
+	if err = writeAtFull(dev, encodeCheckpoint(desc), int64(mirrorOffset)); err != nil {
+		return nil, fmt.Errorf("repair AG %d checkpoint descriptor mirror: %w", ag, err)
+	}
+	if err = dev.Sync(); err != nil {
+		return nil, fmt.Errorf("sync AG %d checkpoint descriptor mirror: %w", ag, err)
+	}
 	j.activeBank, j.checkpointSlot = desc.ActiveBank, slot
 	j.checkpointGeneration, j.checkpointTxID = desc.Generation, desc.CheckpointTxID
 	j.lastTx = desc.CheckpointTxID
@@ -223,6 +234,22 @@ func (j *Journal) Checkpoint() error {
 	if err = j.dev.Sync(); err != nil {
 		j.poisoned = true
 		return fmt.Errorf("sync checkpoint descriptor: %w", err)
+	}
+	// Mirror the new descriptor before allowing another Commit. Otherwise
+	// the older slot could point at a bank that no longer contains the latest
+	// committed transactions if the new descriptor later becomes unreadable.
+	mirrorOff, mirrorErr := checkpointOffsetForJournal(j, desc.AG, j.checkpointSlot)
+	if mirrorErr != nil {
+		j.poisoned = true
+		return mirrorErr
+	}
+	if err = writeAtFull(j.dev, encodeCheckpoint(desc), int64(mirrorOff)); err != nil {
+		j.poisoned = true
+		return fmt.Errorf("write checkpoint descriptor mirror: %w", err)
+	}
+	if err = j.dev.Sync(); err != nil {
+		j.poisoned = true
+		return fmt.Errorf("sync checkpoint descriptor mirror: %w", err)
 	}
 	j.activeBank = nextBank
 	j.base = nextBase
