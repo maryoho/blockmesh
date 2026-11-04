@@ -14,6 +14,9 @@ const (
 	BitmapPages     = BitmapBytes / PageSize
 	MetadataSize    = uint64(16) * 1024 * 1024 * 1024
 	NodeTableSize   = uint64(1) * 1024 * 1024
+	// ReaderTablePages reserves one durable 4KiB slot per supported reader
+	// in every bootstrap Volume slot. Its location is derived from slot geometry.
+	ReaderTablePages = uint64(128)
 	WALSegmentSize  = uint64(16) * 1024 * 1024
 	MappingSize     = uint64(5) * 1024 * 1024 * 1024
 	CheckpointSize  = uint64(64) * 1024 * 1024
