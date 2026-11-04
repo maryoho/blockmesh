@@ -87,8 +87,8 @@ func runFormat(args []string) error {
 	if *path == "" || *volumeID == "" || *arenaPages == 0 {
 		return errors.New("--device, --volume-id and --arena-pages are required")
 	}
-	if (*lifecyclePages == 0) != (*lifecycleStart == 0) {
-		return errors.New("--lifecycle-start and --lifecycle-pages must be specified together")
+	if *lifecycleStart == 0 || *lifecyclePages < 2 {
+		return errors.New("--lifecycle-start and --lifecycle-pages are required; lifecycle pages must be at least 2")
 	}
 	dev, err := device.OpenBlockDevice(*path, true, true)
 	if err != nil {
