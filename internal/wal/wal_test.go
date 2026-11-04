@@ -294,3 +294,21 @@ func TestMissingDescriptorsNeverAssumeInactiveBankIsEmpty(t *testing.T) {
 		t.Fatalf("expected ErrCheckpointMissing, got %v", err)
 	}
 }
+
+
+func TestPoolSuperblocksCannotBeWALTargets(t *testing.T) {
+	f,err:=os.CreateTemp(t.TempDir(),"wal-pool-superblock-*.img")
+	if err!=nil { t.Fatal(err) }
+	defer f.Close()
+	if err=f.Truncate(int64(format.MetadataSize));err!=nil { t.Fatal(err) }
+	d,err:=device.Open(f.Name(),true);if err!=nil { t.Fatal(err) };defer d.Close()
+	sb,err:=format.NewSuperblock(0);if err!=nil { t.Fatal(err) }
+	if _,err=d.WriteAt(sb.Encode(),int64(format.SuperAOffset));err!=nil { t.Fatal(err) }
+	sb.Generation=2
+	if _,err=d.WriteAt(sb.Encode(),int64(format.SuperBOffset));err!=nil { t.Fatal(err) }
+	if err=d.Sync();err!=nil { t.Fatal(err) }
+	j,err:=New(d,sb,0);if err!=nil { t.Fatal(err) }
+	if err=j.Commit([]PageUpdate{{Offset:format.SuperAOffset,Image:make([]byte,format.PageSize)}});err==nil {
+		t.Fatal("WAL overwrote Pool Superblock")
+	}
+}
