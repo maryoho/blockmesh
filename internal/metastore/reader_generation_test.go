@@ -26,16 +26,22 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 	d:=newMemdev(32)
 	s,err:=Format(d,Layout{VolumeID:"reader-test",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
 	if err!=nil {t.Fatal(err)}
-	if err=s.Publish(NoPage,12);err!=nil{t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
 	committer:=testCommitter{d:d}
 	coordinator:=&testReaderCoordinator{}
+	pa,err:=NewPersistentArena(s,nil,committer,coordinator);if err!=nil{t.Fatal(err)}
+	for seq:=uint64(2);seq<=12;seq++ {
+		if err=pa.CommitPagesAndPublish(nil,nil,nil,NoPage,seq,seq-1,nil);err!=nil{t.Fatal(err)}
+	}
 	readers,err:=NewReaderTable(s,18,4,committer,coordinator);if err!=nil{t.Fatal(err)}
 	if err=readers.Register(0,"node-a","boot-a",1,12);err!=nil{t.Fatal(err)}
 	if err=readers.Register(1,"node-b","boot-b",1,12);err!=nil{t.Fatal(err)}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("safe generation=%d err=%v",got,err)}
 
 	remote,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
-	if err=remote.Publish(NoPage,13);err!=nil{t.Fatal(err)}
+	remoteArena,err:=NewPersistentArena(remote,nil,committer,coordinator);if err!=nil{t.Fatal(err)}
+	if err=remoteArena.CommitPagesAndPublish(nil,nil,nil,NoPage,13,12,nil);err!=nil{t.Fatal(err)}
 	if err=readers.Heartbeat(0,"node-a","boot-a",1,12);err!=nil{t.Fatal(err)}
 	if err=readers.AdvanceGeneration(0,"node-a","boot-a",1,13,false);err==nil{t.Fatal("generation advance without old I/O drain must fail")}
 	if err=readers.AdvanceGeneration(1,"node-b","boot-b",1,13,true);err!=nil{t.Fatal(err)}
