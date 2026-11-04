@@ -28,14 +28,19 @@ right. Internal nodes hold at most 252 separators (253 children).
 
 ## Publication protocol
 
-A mutation builds a new immutable tree in reserved arena pages:
+A mutation builds only the changed path in reserved arena pages:
 
-1. Reserve all pages needed for the new tree.
-2. Write leaf pages and then internal pages, each tagged with the next mapping
-   sequence as its generation.
-3. Call `Store.Sync()`.
-4. Publish the new root through the inactive redundant superblock.
-5. Commit the arena reservation.
+1. Read the root and descend to the target leaf; untouched subtrees remain
+   references to their existing immutable pages.
+2. Apply the leaf change. If it overflows, split it and propagate the new child
+   reference upward. Internal overflow is split in the same way.
+3. Count dirty nodes, reserve exactly that many pages, and write dirty nodes
+   bottom-up with the next mapping sequence as their generation.
+4. Call `Store.Sync()`.
+5. Publish the new root through the inactive redundant superblock.
+6. Commit the arena reservation. If deletion collapses the root to an
+   unchanged child, publish that existing child page without allocating a
+   metadata page.
 
 A failed page write or pre-publication Sync aborts the reservation. If
 `Store.Publish` returns an error, the reservation is intentionally retained:
