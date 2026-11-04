@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -11,6 +12,15 @@ import (
 	"blockmesh/internal/lock"
 	"blockmesh/internal/metastore"
 )
+
+type testSharedLocker struct { inner *lock.FileLocker }
+func (l testSharedLocker) Distributed() bool { return l.inner != nil }
+func (l testSharedLocker) Acquire(ctx context.Context, resource string) (lock.Lease, error) {
+	return l.inner.Acquire(ctx, resource)
+}
+func (l testSharedLocker) Lock(ctx context.Context, resource string) (func() error, error) {
+	return l.inner.Lock(ctx, resource)
+}
 
 func TestSharedCommitterReloadsJournalForEveryProcessLikeWriter(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "shared-wal-*.img")
@@ -26,9 +36,10 @@ func TestSharedCommitterReloadsJournalForEveryProcessLikeWriter(t *testing.T) {
 
 	locker, err := lock.NewFileLocker(t.TempDir())
 	if err != nil { t.Fatal(err) }
-	a, err := NewSharedCommitter(d,sb,0,locker,"pool-ag0-wal")
+	sharedLocker := testSharedLocker{inner:locker}
+	a, err := NewSharedCommitter(d,sb,0,sharedLocker,"pool-ag0-wal")
 	if err != nil { t.Fatal(err) }
-	b, err := NewSharedCommitter(d,sb,0,locker,"pool-ag0-wal")
+	b, err := NewSharedCommitter(d,sb,0,sharedLocker,"pool-ag0-wal")
 	if err != nil { t.Fatal(err) }
 
 	const writes = 20
