@@ -117,7 +117,7 @@ func NewInClusterKubernetesOwnerRecordStore() (*KubernetesOwnerRecordStore, erro
 
 func ownerLeaseName(volumeID string) string {
 	sum := sha256.Sum256([]byte(volumeID))
-	return "blockmesh-owner-" + hex.EncodeToString(sum[:])[:32]
+	return "blockmesh-owner-" + hex.EncodeToString(sum[:])
 }
 
 func (s *KubernetesOwnerRecordStore) collectionURL() string {
