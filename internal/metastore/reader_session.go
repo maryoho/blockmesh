@@ -30,7 +30,7 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 	if table == nil { return nil, errors.New("reader table is required") }
 	if err := table.store.Refresh(); err != nil { return nil, err }
 	rootGeneration := table.store.Superblock().MappingSequence
-	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, nodeID, bootID, epoch, onLeaseLost)
+	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, slot, nodeID, bootID, epoch, onLeaseLost)
 	if err != nil { return nil, err }
 	if err = table.Register(slot, nodeID, bootID, epoch, rootGeneration); err != nil {
 		_ = lease.Close()
