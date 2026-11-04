@@ -108,3 +108,29 @@ func TestKubernetesOwnerRecordStoreRejectsMalformedAndUnsafeConfig(t *testing.T)
 		t.Fatalf("malformed identity error=%v",err)
 	}
 }
+
+func TestKubernetesOwnerRecordStoreRefusesUpdateWithoutResourceVersion(t *testing.T) {
+	record:=OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:2}
+	api:=&ownerLeaseAPIServer{object:map[string]any{
+		"apiVersion":"coordination.k8s.io/v1","kind":"Lease",
+		"metadata":map[string]any{"name":ownerLeaseName("vol-a"),"namespace":"blockmesh-system","annotations":map[string]any{
+			ownerVolumeAnnotation:record.VolumeID,ownerNodeAnnotation:record.NodeID,
+			ownerBootAnnotation:record.BootID,ownerEpochAnnotation:"2",
+		}},
+		"spec":map[string]any{"holderIdentity":"node-a/boot-a"},
+	}}
+	store,server:=newTestKubernetesOwnerRecordStore(t,api);defer server.Close()
+	next:=OwnerRecord{VolumeID:"vol-a",NodeID:"node-b",BootID:"boot-b",Epoch:3}
+	if err:=store.CompareAndSwap(context.Background(),"vol-a",&record,next);err==nil||!strings.Contains(err.Error(),"resourceVersion") {
+		t.Fatalf("missing resourceVersion error=%v",err)
+	}
+}
+
+func TestKubernetesOwnerRecordStoreCreateRaceMapsConflict(t *testing.T) {
+	api:=&ownerLeaseAPIServer{object:map[string]any{}}
+	store,server:=newTestKubernetesOwnerRecordStore(t,api);defer server.Close()
+	record:=OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:2}
+	if err:=store.CompareAndSwap(context.Background(),"vol-a",nil,record);!errors.Is(err,ErrOwnerRecordConflict) {
+		t.Fatalf("create race error=%v",err)
+	}
+}
