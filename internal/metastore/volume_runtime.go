@@ -412,6 +412,7 @@ func (m *VolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID st
 		rt.metadata = nil
 	}
 	if rt.owner != nil {
+		stopOwnerLeaseMonitor(rt)
 		if err := rt.owner.Close(); err != nil {
 			return fmt.Errorf("release Volume Owner Lease: %w", err)
 		}
@@ -465,7 +466,7 @@ func (m *VolumeRuntimeManager) ActiveVolumes() []string {
 	defer m.mu.Unlock()
 	ids := make([]string, 0, len(m.runtimes))
 	for id, rt := range m.runtimes {
-		if rt.enabled {
+		if rt.enabled && !rt.ownerLost.Load() {
 			ids = append(ids, id)
 		}
 	}
