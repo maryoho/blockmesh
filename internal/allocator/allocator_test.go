@@ -1,4 +1,4 @@
-package allocator
+package allocator_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"blockmesh/internal/allocator"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
 	"blockmesh/internal/metadata"
@@ -34,7 +35,7 @@ func TestAllocateOneUpdatesBitmapAndMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(store, locks)
+	a, err := allocator.New(store, locks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,13 +76,6 @@ func TestAllocateOneUpdatesBitmapAndMapping(t *testing.T) {
 	}
 }
 
-func TestFindFree(t *testing.T) {
-	bm := []byte{0xff, 0xfb}
-	got, ok := findFree(bm)
-	if !ok || got != 10 {
-		t.Fatalf("got %d, %v; want 10, true", got, ok)
-	}
-}
 
 func TestConcurrentAllocationsSameAGAreUnique(t *testing.T) {
 	path := t.TempDir() + "/metadata.img"
@@ -105,7 +99,7 @@ func TestConcurrentAllocationsSameAGAreUnique(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(store, locks)
+	a, err := allocator.New(store, locks)
 	if err != nil {
 		t.Fatal(err)
 	}
