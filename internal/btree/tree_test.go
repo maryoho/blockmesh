@@ -277,7 +277,7 @@ func TestDeleteQueuesSupersededPagesWithoutReleasingThem(t *testing.T) {
 	if err := tree.Put(1, 10); err != nil { t.Fatal(err) }
 	oldRoot := tree.RootPage()
 	if err := tree.Put(2, 20); err != nil { t.Fatal(err) }
-	pending := tree.RetireQueue().Pending()
+	pending := tree.RetiredPages()
 	if len(pending) != 1 || len(pending[0].PageIDs) != 1 || pending[0].PageIDs[0] != oldRoot {
 		t.Fatalf("unexpected retire queue: %+v oldRoot=%d", pending, oldRoot)
 	}
