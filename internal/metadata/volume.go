@@ -28,9 +28,9 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 	// a bootstrap allocator; later Pool extent management may replace it.
 	reservedBytes:=sb.MetadataSize-sb.ReservedOffset
 	slotBytes:=(reservedBytes/uint64(format.MaxVolumeDescriptors))/format.PageSize*format.PageSize
-	if slotBytes/format.PageSize<=lifecyclePages+1 { return zero,errors.New("reserved Pool metadata is too small for a Volume extent") }
+	if slotBytes/format.PageSize<=lifecyclePages+format.ReaderTablePages+1 { return zero,errors.New("reserved Pool metadata is too small for Arena, Lifecycle and Reader Table extents") }
 	start:=sb.ReservedOffset+uint64(index)*slotBytes
-	arenaPages:=slotBytes/format.PageSize-lifecyclePages
+	arenaPages:=slotBytes/format.PageSize-lifecyclePages-format.ReaderTablePages
 	arenaStart:=start/format.PageSize
 	lifecycleStart:=arenaStart+arenaPages
 	for slot:=uint64(0);slot<2;slot++ {
