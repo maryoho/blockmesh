@@ -277,7 +277,7 @@ func persistCOW(store *metastore.Store, n *cowNode, ids []uint64, cursor *int, s
 		return 0, fmt.Errorf("COW reservation exhausted")
 	}
 	id := ids[*cursor]
-	*cursor++
+	*cursor = *cursor + 1
 	var payload []byte
 	var pageType uint16
 	if n.leaf {
@@ -314,7 +314,15 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 
 	pageCount := countDirty(root)
 	if pageCount == 0 {
-		return fmt.Errorf("internal error: COW mutation has no dirty pages")
+		// Deleting the final key in one root child may collapse the root to
+		// an unchanged sibling. Publishing that existing page needs no COW
+		// page allocation, but still advances the mapping sequence.
+		if err := t.store.Publish(root.id, sequence); err != nil {
+			return fmt.Errorf("publish collapsed B+Tree root: %w", err)
+		}
+		t.items = append([]Item(nil), items...)
+		t.root = root.id
+		return nil
 	}
 	reservation, err := t.arena.Reserve(uint64(pageCount))
 	if err != nil {
