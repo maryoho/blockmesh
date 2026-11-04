@@ -38,7 +38,7 @@ func (p *SanlockReaderLeaseProbe) AcquireExpiredReader(ctx context.Context, volu
 // fencing, and only then persists ReaderFenced. All steps are serialized
 // against registration, root publication, and reclamation by ReaderCoordinator.
 func (t *ReaderTable) FenceExpiredReader(ctx context.Context, slot uint32, nodeID, bootID string, epoch uint64,
-	probe ReaderLeaseProbe, fencer fence.Fencer) error {
+	probe ReaderLeaseProbe, fencer fence.Fencer) (retErr error) {
 	if probe == nil || fencer == nil { return ErrReaderNotFenced }
 	if t.coordinator == nil { return ErrReaderCoordinatorRequired }
 	unlock, err := t.lockReaderSet()
@@ -55,7 +55,7 @@ func (t *ReaderTable) FenceExpiredReader(ctx context.Context, slot uint32, nodeI
 	releaseProbe, err := probe.AcquireExpiredReader(ctx, t.store.Superblock().VolumeID, reader)
 	if err != nil { return err }
 	if releaseProbe == nil { return errors.New("reader lease probe returned a nil release function") }
-	defer func() { _ = releaseProbe() }()
+	defer func() { retErr = errors.Join(retErr, releaseProbe()) }()
 
 	if err = fencer.FenceNode(ctx, nodeID, bootID); err != nil {
 		return fmt.Errorf("fence expired reader %s/%s: %w", nodeID, bootID, err)
