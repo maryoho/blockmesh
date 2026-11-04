@@ -33,6 +33,10 @@ type ReaderLease struct {
 }
 
 func (l *ReaderLease) Lost() <-chan struct{} { return l.lost }
+func (l *ReaderLease) Valid() bool {
+	if l == nil || l.lease == nil { return false }
+	select { case <-l.lost: return false; default: return l.lease.Valid() }
+}
 func (l *ReaderLease) Err() error {
 	l.errMu.Lock()
 	defer l.errMu.Unlock()
