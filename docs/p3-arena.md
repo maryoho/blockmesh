@@ -21,10 +21,11 @@ The two 4 KiB pages contain:
 - `BMRETR01`: a CRC32C-protected list of retired page IDs and their retire
   generations.
 
-The on-disk superblock stores the lifecycle region geometry in previously
-reserved bytes, preserving the existing format version. Old superblocks with
-zero lifecycle geometry remain readable but cannot be opened with
-`btree.OpenPersistent`.
+Lifecycle-enabled metastore superblocks use format version 2 and store the
+lifecycle region geometry in previously reserved bytes. Version-1 superblocks
+remain readable with the legacy process-local API; a version-1 superblock
+cannot be opened with `btree.OpenPersistent`. Older binaries reject version 2,
+preventing an unsafe downgrade that would ignore persistent retire records.
 
 ## Allocation and recovery
 
