@@ -51,7 +51,7 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 		VolumeID: "pool-volume-3", AG: 0, Generation: 1, VolumeSequence: 1,
 		MappingRootOffset: pool.MappingOffset, BitmapSequence: 1, OwnerEpoch: 9,
 		ArenaStart: arenaStart, ArenaPages: 256,
-		RootPage: ^uint64(0),
+		RootPage: ^uint64(0), LifecycleStart: arenaStart + 256, LifecyclePages: 8,
 	}
 	image, err := desc.Encode()
 	if err != nil { t.Fatal(err) }
@@ -65,10 +65,15 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 
 	// The Pool-backed Store uses absolute Pool page IDs. The Volume's Arena
 	// starts at the descriptor's ArenaStart, not at a private device LBA 2.
-	root := desc.ArenaStart
-	page := metastore.Page{ID: root, Type: 7, Generation: 2, Payload: []byte("pool-backed-cow-root")}
+	if err = metastore.FormatLifecycle(store); err != nil { t.Fatal(err) }
 	committer := &poolImageCommitter{dev: dev, fail: true}
-	if err = store.CommitPagesAndPublish([]metastore.Page{page}, root, 1, committer); err == nil {
+	arena, err := metastore.NewPersistentArena(store, nil, committer)
+	if err != nil { t.Fatal(err) }
+	reservation, err := arena.Reserve(1)
+	if err != nil { t.Fatal(err) }
+	root := reservation.Pages()[0]
+	page := metastore.Page{ID: root, Type: 7, Generation: 2, Payload: []byte("pool-backed-cow-root")}
+	if err = arena.CommitPagesAndPublish(reservation, []metastore.Page{page}, []uint64{root}, root, 1, 0, nil); err == nil {
 		t.Fatal("expected injected WAL failure")
 	}
 	if got := store.Superblock().Generation; got != 1 {
@@ -76,11 +81,11 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	}
 
 	committer.fail = false
-	if err = store.CommitPagesAndPublish([]metastore.Page{page}, root, 1, committer); err != nil {
+	if err = arena.CommitPagesAndPublish(reservation, []metastore.Page{page}, []uint64{root}, root, 1, 0, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(committer.images) != 2 {
-		t.Fatalf("expected COW page plus final Volume Descriptor, got %d images", len(committer.images))
+	if len(committer.images) != 10 {
+		t.Fatalf("expected COW page + 8 lifecycle pages + final Volume Descriptor, got %d images", len(committer.images))
 	}
 	last := committer.images[len(committer.images)-1]
 	if last.Offset != descPairOffset(t, pool, 3)+format.PageSize {
@@ -100,6 +105,11 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if string(got.Payload) != string(page.Payload) {
 		t.Fatalf("unexpected COW page payload %q", got.Payload)
+	}
+	reopenedArena, err := metastore.NewPersistentArena(reopened, nil, &poolImageCommitter{dev: dev})
+	if err != nil { t.Fatalf("reopen Pool-backed PersistentArena: %v", err) }
+	if stats := reopenedArena.Stats(); stats.LivePages != 1 {
+		t.Fatalf("reopened PersistentArena live pages=%d, want 1", stats.LivePages)
 	}
 
 	// Neither root publication nor COW page writes may alter Pool Superblocks.
