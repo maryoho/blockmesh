@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"bblockmesh/internal/format"
+	"blockmesh/internal/format"
 )
 
 func TestInitInspectBitmap(t *testing.T) {
@@ -21,7 +21,7 @@ func TestInitInspectBitmap(t *testing.T) {
 	if err = Init(p, 4096, false); err != nil {
 		t.Fatal(err)
 	}
-	s, err := OpenWritable(p)
+	s, err := OpenStoreWritable(p)
 	if err != nil {
 		t.Fatal(err)
 	}
