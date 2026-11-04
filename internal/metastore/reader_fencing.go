@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"blockmesh/internal/fence"
 	"blockmesh/internal/lock"
@@ -32,13 +33,32 @@ func (p *SanlockReaderLeaseProbe) AcquireExpiredReader(ctx context.Context, volu
 	return lease.Close, nil
 }
 
-// FenceExpiredReader is the recovery-controller path. It first acquires the
+var ErrReaderNotStale = errors.New("reader heartbeat is not stale at fencing time")
+
+// FenceExpiredReader is the trusted low-level recovery path. Automated
+// controllers should call FenceExpiredReaderIfStale so heartbeat expiry is
+// revalidated after taking the distributed reader-set barrier.
+// It first acquires the
 // same exclusive sanlock resource as the reader (which must succeed only after
 // the reader lease is gone), keeps that probe lease held, performs SCSI PR
 // fencing, and only then persists ReaderFenced. All steps are serialized
 // against registration, root publication, and reclamation by ReaderCoordinator.
 func (t *ReaderTable) FenceExpiredReader(ctx context.Context, slot uint32, nodeID, bootID string, epoch uint64,
-	probe ReaderLeaseProbe, fencer fence.Fencer) (retErr error) {
+	probe ReaderLeaseProbe, fencer fence.Fencer) error {
+	return t.fenceExpiredReader(ctx,slot,nodeID,bootID,epoch,time.Time{},probe,fencer)
+}
+
+// FenceExpiredReaderIfStale rechecks the heartbeat while holding the shared
+// reader-set barrier. This closes the scan-to-fence race with a concurrent
+// heartbeat: a reader that renewed after the scan must not be fenced.
+func (t *ReaderTable) FenceExpiredReaderIfStale(ctx context.Context, slot uint32, nodeID, bootID string, epoch uint64,
+	staleBefore time.Time, probe ReaderLeaseProbe, fencer fence.Fencer) error {
+	if staleBefore.IsZero() { return ErrReaderNotStale }
+	return t.fenceExpiredReader(ctx,slot,nodeID,bootID,epoch,staleBefore,probe,fencer)
+}
+
+func (t *ReaderTable) fenceExpiredReader(ctx context.Context, slot uint32, nodeID, bootID string, epoch uint64,
+	staleBefore time.Time, probe ReaderLeaseProbe, fencer fence.Fencer) (retErr error) {
 	if probe == nil || fencer == nil { return ErrReaderNotFenced }
 	if t.coordinator == nil { return ErrReaderCoordinatorRequired }
 	unlock, err := t.lockReaderSet()
@@ -50,6 +70,7 @@ func (t *ReaderTable) FenceExpiredReader(ctx context.Context, slot uint32, nodeI
 	t.mu.Unlock()
 	if err != nil { return err }
 	if reader.State != ReaderActive && reader.State != ReaderLeaving { return ErrReaderIdentity }
+	if !staleBefore.IsZero() && (reader.HeartbeatUnixNano<=0 || !time.Unix(0,reader.HeartbeatUnixNano).Before(staleBefore)) { return ErrReaderNotStale }
 	if reader.NodeID != nodeID || reader.BootID != bootID || reader.Epoch != epoch { return ErrReaderIdentity }
 
 	releaseProbe, err := probe.AcquireExpiredReader(ctx, t.store.Superblock().VolumeID, reader)
