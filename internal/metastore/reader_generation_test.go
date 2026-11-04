@@ -332,3 +332,30 @@ func TestFenceExpiredReaderPropagatesProbeReleaseFailure(t *testing.T) {
 	if err!=nil {t.Fatal(err)}
 	if len(snapshot)!=0 {t.Fatalf("successful PR fencing must remain durably fenced despite release error: %+v",snapshot)}
 }
+
+
+func TestFenceExpiredReaderIfStaleRechecksHeartbeatUnderBarrier(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-heartbeat-race",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil {t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil {t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	table,err:=NewReaderTable(s,18,2,committer,coordinator)
+	if err!=nil {t.Fatal(err)}
+	if err=table.Register(0,"node-live","boot-live",5,1);err!=nil {t.Fatal(err)}
+	now:=time.Now()
+	table.mu.Lock()
+	record,err:=table.readLocked(0)
+	if err==nil {record.HeartbeatUnixNano=now.UnixNano();err=table.writeLocked(record)}
+	table.mu.Unlock()
+	if err!=nil {t.Fatal(err)}
+	probe:=&testReaderLeaseProbe{}
+	fencerCalls:=0
+	fencer:=testFenceFunc(func(context.Context,string,string)error{fencerCalls++;return nil})
+	err=table.FenceExpiredReaderIfStale(context.Background(),0,"node-live","boot-live",5,
+		now.Add(-time.Minute),probe,fencer)
+	if !errors.Is(err,ErrReaderNotStale) {t.Fatalf("fresh heartbeat must cancel fencing: %v",err)}
+	if probe.acquired||fencerCalls!=0 {t.Fatalf("fresh reader reached fencing path: probe=%v fencerCalls=%d",probe.acquired,fencerCalls)}
+}
