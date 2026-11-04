@@ -161,7 +161,7 @@ func (b *PoolVolumeRuntimeBackend) JoinReader(ctx context.Context, spec VolumeRu
 			b.cfg.OnReaderLeaseLost(context.Background(), spec, cause)
 		})
 	if err != nil { return nil, err }
-	return startPoolReaderHeartbeat(ctx, session, spec, b.cfg.ReaderHeartbeatInterval, b.cfg.OnReaderLeaseLost), nil
+	return startPoolReaderHeartbeat(context.Background(), session, spec, b.cfg.ReaderHeartbeatInterval, b.cfg.OnReaderLeaseLost), nil
 }
 
 type poolRuntimeDrain struct { drain func(context.Context, string) error }
