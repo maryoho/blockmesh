@@ -46,11 +46,11 @@ func newOwnerTestCoordinator(t *testing.T, record *OwnerRecord, descriptorEpoch 
 }
 
 func TestOwnerCoordinatorFirstOwnerUsesDescriptorEpoch(t *testing.T){
-	c,records,lease:=newOwnerTestCoordinator(t,nil,7,&ownerTestFencer{},&ownerTestBarrier{})
+	c,records,lease:=newOwnerTestCoordinator(t,nil,1,&ownerTestFencer{},&ownerTestBarrier{})
 	got,err:=c.AcquireOwner(context.Background(),"vol","node-b","boot-b")
 	if err!=nil{t.Fatal(err)}
-	if got.Epoch()!=8{t.Fatalf("epoch=%d want 8",got.Epoch())}
-	if records.record.NodeID!="node-b"||records.record.BootID!="boot-b"||records.record.Epoch!=8{t.Fatalf("record=%+v",records.record)}
+	if got.Epoch()!=2{t.Fatalf("epoch=%d want 2",got.Epoch())}
+	if records.record.NodeID!="node-b"||records.record.BootID!="boot-b"||records.record.Epoch!=2{t.Fatalf("record=%+v",records.record)}
 	if err=got.Close();err!=nil{t.Fatal(err)}
 	if !lease.closed{t.Fatal("sanlock lease was not released")}
 }
@@ -111,3 +111,19 @@ func TestOwnerLeaseReportsSanlockLoss(t *testing.T){
 
 var _ fence.Fencer=(*ownerTestFencer)(nil)
 var _ lock.DistributedLocker=(*ownerTestLocker)(nil)
+
+func TestOwnerCoordinatorRejectsMissingHistoryAfterFirstOwnerEpoch(t *testing.T) {
+	c,records,lease:=newOwnerTestCoordinator(t,nil,4,&ownerTestFencer{},&ownerTestBarrier{})
+	if _,err:=c.AcquireOwner(context.Background(),"vol","node-b","boot-b");err==nil{
+		t.Fatal("missing previous Owner identity accepted for an already-used Volume")
+	}
+	if records.writes!=0||!lease.closed{t.Fatal("missing-history takeover changed record or leaked lease")}
+}
+
+func TestOwnerLeaseCloseIsIdempotent(t *testing.T) {
+	underlying:=&ownerTestLease{valid:true}
+	lease:=newOwnerLease(underlying,2,time.Millisecond)
+	if err:=lease.Close();err!=nil{t.Fatal(err)}
+	if err:=lease.Close();err!=nil{t.Fatal(err)}
+	if !underlying.closed{t.Fatal("underlying lease was not closed")}
+}
