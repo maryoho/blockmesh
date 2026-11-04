@@ -20,6 +20,7 @@ const (
 	Superblock0    = uint64(0)
 	Superblock1    = uint64(1)
 	FormatVersion  = uint16(1)
+	LifecycleFormatVersion = uint16(2)
 	PageHeaderSize = 32
 	PagePayloadMax = PageSize - PageHeaderSize
 	NoPage         = uint64(math.MaxUint64)
@@ -366,6 +367,8 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 	if len(s.VolumeID) == 0 || len(s.VolumeID) > 64 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages || s.ArenaPages > s.TotalPages-s.ArenaStart {
 		return nil, ErrGeometry
 	}
+	if version==FormatVersion && (s.LifecycleStart!=0||s.LifecyclePages!=0) {return Superblock{},ErrCorrupt}
+	if version==LifecycleFormatVersion && s.LifecyclePages<2 {return Superblock{},ErrGeometry}
 	if s.LifecyclePages != 0 {
 		if s.LifecyclePages < 2 || s.LifecycleStart < 2 || s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart { return nil, ErrGeometry }
 		arenaEnd,lifecycleEnd:=s.ArenaStart+s.ArenaPages,s.LifecycleStart+s.LifecyclePages
@@ -373,7 +376,9 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 	}
 	b := make([]byte, PageSize)
 	copy(b[0:8], []byte{'B', 'M', 'M', 'E', 'T', 'A', '0', '1'})
-	binary.LittleEndian.PutUint16(b[8:10], FormatVersion)
+	version:=FormatVersion
+	if s.LifecyclePages!=0 {version=LifecycleFormatVersion}
+	binary.LittleEndian.PutUint16(b[8:10], version)
 	binary.LittleEndian.PutUint16(b[10:12], PageSize)
 	binary.LittleEndian.PutUint64(b[16:24], s.Generation)
 	binary.LittleEndian.PutUint64(b[24:32], s.TotalPages)
@@ -389,7 +394,8 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 }
 
 func decodeSuperblock(b []byte) (Superblock, error) {
-	if len(b) != PageSize || string(b[:8]) != "BMMETA01" || binary.LittleEndian.Uint16(b[8:10]) != FormatVersion || binary.LittleEndian.Uint16(b[10:12]) != PageSize {
+	version:=binary.LittleEndian.Uint16(b[8:10])
+	if len(b) != PageSize || string(b[:8]) != "BMMETA01" || (version != FormatVersion && version != LifecycleFormatVersion) || binary.LittleEndian.Uint16(b[10:12]) != PageSize {
 		return Superblock{}, ErrCorrupt
 	}
 	if crc32.Checksum(b[:PageSize-4], crcTable) != binary.LittleEndian.Uint32(b[PageSize-4:]) {
