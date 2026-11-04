@@ -5,17 +5,18 @@ import (
 	"errors"
 	"sync"
 
+	"blockmesh/internal/fence"
 	"blockmesh/internal/volume"
 )
 
 var ErrReaderLeaseLost = errors.New("reader sanlock lease is no longer valid")
 
-// ReaderSession couples the durable Reader Table slot to a live sanlock
-// resource lease. The caller must wire onLeaseLost to stop new I/O and suspend
-// the local data path; this callback is deliberately mandatory.
+// ReaderSession couples a durable Reader Table slot, local SCSI PR
+// registration, and a process-lifetime sanlock resource lease.
 type ReaderSession struct {
 	table *ReaderTable
 	lease *volume.ReaderLease
+	registrar fence.ReaderRegistrar
 	slot uint32
 	nodeID string
 	bootID string
@@ -26,17 +27,23 @@ type ReaderSession struct {
 }
 
 func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volume.ReaderLeaseConfig,
-	slot uint32, nodeID, bootID string, epoch uint64, onLeaseLost func(error)) (*ReaderSession, error) {
-	if table == nil { return nil, errors.New("reader table is required") }
+	registrar fence.ReaderRegistrar, slot uint32, nodeID, bootID string, epoch uint64,
+	onLeaseLost func(error)) (*ReaderSession, error) {
+	if table == nil || registrar == nil { return nil, errors.New("reader table and SCSI PR registrar are required") }
 	if err := table.store.Refresh(); err != nil { return nil, err }
 	rootGeneration := table.store.Superblock().MappingSequence
 	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, slot, nodeID, bootID, epoch, onLeaseLost)
 	if err != nil { return nil, err }
-	if err = table.Register(slot, nodeID, bootID, epoch, rootGeneration); err != nil {
+	if err = registrar.RegisterReader(ctx,nodeID,bootID); err != nil {
 		_ = lease.Close()
 		return nil, err
 	}
-	return &ReaderSession{table:table, lease:lease, slot:slot, nodeID:nodeID, bootID:bootID, epoch:epoch, rootGeneration:rootGeneration}, nil
+	if err = table.Register(slot, nodeID, bootID, epoch, rootGeneration); err != nil {
+		cleanupErr:=registrar.UnregisterReader(ctx,nodeID,bootID)
+		if cleanupErr==nil { _ = lease.Close() }
+		return nil, errors.Join(err,cleanupErr)
+	}
+	return &ReaderSession{table:table,lease:lease,registrar:registrar,slot:slot,nodeID:nodeID,bootID:bootID,epoch:epoch,rootGeneration:rootGeneration},nil
 }
 
 func (s *ReaderSession) checkLeaseLocked() error {
@@ -63,13 +70,15 @@ func (s *ReaderSession) AdvanceGeneration(newGeneration uint64, oldGenerationIOs
 	return nil
 }
 
-// CloseDrained persists Closed only after the caller has stopped new reads
-// and drained every in-flight I/O, then releases the sanlock reader resource.
-func (s *ReaderSession) CloseDrained(ioDrained bool) error {
+// CloseDrained unregisters the local PR keys, persists Closed, and releases
+// the sanlock slot lease. The caller must stop new reads and drain all I/O.
+func (s *ReaderSession) CloseDrained(ctx context.Context, ioDrained bool) error {
 	if s == nil { return nil }
 	s.mu.Lock(); defer s.mu.Unlock()
 	if s.closed { return nil }
-	if err := s.table.CloseDrained(s.slot,s.nodeID,s.bootID,s.epoch,ioDrained); err != nil { return err }
+	if !ioDrained { return ErrUnsafeReclaim }
+	if err:=s.registrar.UnregisterReader(ctx,s.nodeID,s.bootID);err!=nil{return err}
+	if err := s.table.CloseDrained(s.slot,s.nodeID,s.bootID,s.epoch,true); err != nil { return err }
 	s.closed = true
 	return s.lease.Close()
 }
