@@ -47,6 +47,7 @@ type Tree struct {
 	pages  []uint64
 	retire  *metastore.RetireQueue
 	journal metastore.Committer
+	persistentArena *metastore.PersistentArena
 	root   uint64
 }
 
@@ -82,6 +83,20 @@ func Open(store *metastore.Store, journals ...metastore.Committer) (*Tree, error
 		return nil, err
 	}
 	t.arena = arena
+	return t, nil
+}
+
+// OpenPersistent opens a tree whose Arena and retire queue are persisted
+// in the lifecycle region configured in metastore.Layout. The caller must
+// recover the WAL before calling this function.
+func OpenPersistent(store *metastore.Store, journal metastore.Committer) (*Tree, error) {
+	if journal == nil { return nil, errors.New("nil WAL committer") }
+	t, err := Open(store, journal)
+	if err != nil { return nil, err }
+	persistent, err := metastore.NewPersistentArena(store, t.pages, journal)
+	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
+	t.persistentArena = persistent
+	t.arena = persistent.Arena()
 	return t, nil
 }
 
@@ -271,13 +286,17 @@ func (t *Tree) RootPage() uint64 {
 func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
 
 // RetiredPages returns a snapshot of process-local retirement batches.
-func (t *Tree) RetiredPages() []metastore.RetireBatch { return t.retire.Pending() }
+func (t *Tree) RetiredPages() []metastore.RetireBatch {
+	if t.persistentArena != nil { return t.persistentArena.Pending() }
+	return t.retire.Pending()
+}
 
 // CollectRetired applies an externally established reader/fencing proof.
 // It serializes reclamation with root publication in this Tree instance.
 func (t *Tree) CollectRetired(proof metastore.ReclaimProof) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.persistentArena != nil { return t.persistentArena.Collect(proof) }
 	return t.retire.Collect(t.arena, proof)
 }
 
