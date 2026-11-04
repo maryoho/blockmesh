@@ -132,9 +132,24 @@ func (t *ReaderTable) Heartbeat(slot uint32,nodeID,bootID string,epoch,rootGener
 	if err:=t.store.Refresh();err!=nil{return err}
 	r,err:=t.readLocked(slot);if err!=nil{return err}
 	if r.State!=ReaderActive || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
-	if rootGeneration<r.RootGeneration || rootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
+	if rootGeneration!=r.RootGeneration { return ErrReaderGeneration }
 	if r.HeartbeatSequence==math.MaxUint64 { return errors.New("reader heartbeat sequence exhausted") }
-	r.RootGeneration=rootGeneration;r.HeartbeatSequence++
+	r.HeartbeatSequence++
+	return t.writeLocked(r)
+}
+
+// AdvanceGeneration is called only after the reader has stopped issuing I/O
+// against its old root, drained every in-flight request that may reference
+// that generation, and refreshed its B+Tree to the new committed root.
+func (t *ReaderTable) AdvanceGeneration(slot uint32,nodeID,bootID string,epoch,newRootGeneration uint64,oldGenerationIOsDrained bool) error {
+	t.mu.Lock();defer t.mu.Unlock()
+	if err:=t.store.Refresh();err!=nil{return err}
+	r,err:=t.readLocked(slot);if err!=nil{return err}
+	if r.State!=ReaderActive || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
+	if !oldGenerationIOsDrained || newRootGeneration<=r.RootGeneration ||
+		newRootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
+	if r.HeartbeatSequence==math.MaxUint64 { return errors.New("reader heartbeat sequence exhausted") }
+	r.RootGeneration=newRootGeneration;r.HeartbeatSequence++
 	return t.writeLocked(r)
 }
 
