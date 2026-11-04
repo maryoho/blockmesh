@@ -11,7 +11,12 @@ type Bitmap struct {
 	total uint64
 }
 
-func New(total uint64) *Bitmap  { return &Bitmap{bits: make([]byte, (total+7)/8), total: total} }
+// NewBitmap constructs an empty bitmap. New is reserved for the Allocator
+// transaction manager in allocator.go.
+func NewBitmap(total uint64) *Bitmap {
+	return &Bitmap{bits: make([]byte, (total+7)/8), total: total}
+}
+
 func (b *Bitmap) Total() uint64 { return b.total }
 func (b *Bitmap) Allocated(id uint64) bool {
 	if id >= b.total {
