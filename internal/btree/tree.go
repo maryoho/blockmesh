@@ -283,7 +283,7 @@ func encodeInternal(children []nodeRef, level uint16) []byte {
 	keys := len(children) - 1
 	b := make([]byte, nodeHeaderSize+keys*8+len(children)*8)
 	copy(b[:4], "BMTN")
-	binary.LittleEndian.PutUint16(b[4:6], 1)
+	binary.LittleEndian.PutUint16(b[4:6], nodeFormatVersion)
 	binary.LittleEndian.PutUint16(b[6:8], uint16(keys))
 	binary.LittleEndian.PutUint16(b[8:10], level)
 	off := nodeHeaderSize
