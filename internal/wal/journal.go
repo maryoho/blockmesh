@@ -194,7 +194,7 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 }
 
 func (j *Journal) appendLocked(record []byte) error {
-	if uint64(len(record)) > j.size-j.end {
+	if j.end > j.size || uint64(len(record)) > j.size-j.end {
 		return ErrJournalFull
 	}
 	if err := writeAtFull(j.dev, record, int64(j.base+j.end)); err != nil {
@@ -212,16 +212,19 @@ func (j *Journal) scanLocked() ([]journalTxn, uint64, uint64, error) {
 	nextTx := uint64(1)
 	for offset < j.size {
 		header := make([]byte, journalHeaderSize)
+		if j.size-offset < journalHeaderSize {
+			break
+		}
 		n, err := j.dev.ReadAt(header, int64(j.base+offset))
-		if n == 0 && (err == io.EOF || err == nil) {
+		if err != nil && err != io.EOF {
+			return nil, 0, 0, err
+		}
+		if n == 0 && err == io.EOF {
 			break
 		}
 		if n < len(header) {
 			// A torn final header is not committed; the next append overwrites it.
 			break
-		}
-		if err != nil && err != io.EOF {
-			return nil, 0, 0, err
 		}
 		if allZero(header) {
 			break
@@ -243,11 +246,11 @@ func (j *Journal) scanLocked() ([]journalTxn, uint64, uint64, error) {
 		payload := make([]byte, int(payloadLen))
 		if payloadLen != 0 {
 			n, err = j.dev.ReadAt(payload, int64(j.base+offset+journalHeaderSize))
-			if n < len(payload) {
-				break
-			}
 			if err != nil && err != io.EOF {
 				return nil, 0, 0, err
+			}
+			if n < len(payload) {
+				break
 			}
 		}
 		if crc32.Checksum(payload, journalCRC) != binary.LittleEndian.Uint32(header[20:24]) {
