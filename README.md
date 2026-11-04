@@ -29,7 +29,7 @@ See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md]
 
 * `internal/device`: random-access durable device interface and file-backed test device.
 * `internal/metastore`: fixed-LBA 4 KiB metadata pages, redundant superblocks, process-local and WAL-persisted Arena lifecycle, multi-page Retire Queue, and durable Reader Generation slots.
-* `internal/wal`: per-AG fixed-LBA CRC32C redo WAL with Intent/Commit, recovery-before-open, dual-bank checkpoint rotation, and `CommitImages` for atomic COW page/root publication.
+* `internal/wal`: per-AG fixed-LBA CRC32C redo WAL with Intent/Commit, recovery-before-open, dual-bank checkpoint rotation, and `SharedCommitter` for cross-process AG serialization.
 * `internal/metadata`: current JSON-backed reference engine, descriptor and retire queue.
 * `internal/allocator`: 4 MiB allocation bitmap and per-AG WAL transaction publishing Bitmap, immutable Mapping COW page, and Volume Descriptor.
 * `internal/fence`: SCSI PR registration, PREEMPT AND ABORT fencing, and test-only no-op implementation.
