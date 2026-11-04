@@ -31,10 +31,10 @@ bad CRC fails closed. Queue capacity is
 4 KiB queue page). A full queue rejects root publication with
 `ErrRetireQueueFull`; records are never dropped to make room.
 
-P3-3.5's one-page queue encoding remains readable when the lifecycle region
-contains exactly two pages. New writes use the paged encoding. Lifecycle
-superblocks remain format version 2; the queue page encoding has its own
-version.
+P3-3.5's one-page queue encoding remains readable when the first queue page
+uses the legacy version and any additional reserved queue pages are blank.
+New writes use the paged encoding. Lifecycle superblocks remain format version
+2; the queue page encoding has its own version.
 
 ## Allocation and recovery
 
@@ -73,8 +73,9 @@ Root Generation, heartbeat sequence, and state:
   close path confirms the caller has stopped new reads and drained all I/O.
 
 A new process instance must use a new BootID and a strictly higher Epoch before
-reusing a fenced slot. Heartbeats may advance Root Generation but cannot move
-it backwards. `SafeGeneration()` returns the minimum Root Generation across
+reusing a fenced slot. Heartbeats refresh the local redundant superblock view
+before accepting a new Root Generation; they may advance that generation but
+cannot move it backwards. `SafeGeneration()` returns the minimum Root Generation across
 all non-fenced slots, or MaxUint64 if there are none.
 
 Use `FenceAndClose` to call the configured `fence.Fencer`; the durable slot
