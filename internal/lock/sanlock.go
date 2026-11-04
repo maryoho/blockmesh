@@ -37,37 +37,38 @@ type sanlockLease struct {
 	mu sync.Mutex
 	marker string
 	resource string
-}
-
-func (l *SanlockLocker) defaults() {
-	if l.Binary == "" { l.Binary = "sanlock" }
-	if l.ReadyDir == "" { l.ReadyDir = os.TempDir() }
-	if l.StartupTimeout <= 0 { l.StartupTimeout = 30 * time.Second }
-	if l.StopTimeout <= 0 { l.StopTimeout = 5 * time.Second }
+	stopTimeout time.Duration
 }
 
 func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, error) {
 	if l == nil || l.ResourceFor == nil { return nil, errors.New("sanlock resource resolver is required") }
-	l.defaults()
+	binary := l.Binary
+	if binary == "" { binary = "sanlock" }
+	readyDir := l.ReadyDir
+	if readyDir == "" { readyDir = os.TempDir() }
+	startupTimeout := l.StartupTimeout
+	if startupTimeout <= 0 { startupTimeout = 30 * time.Second }
+	stopTimeout := l.StopTimeout
+	if stopTimeout <= 0 { stopTimeout = 5 * time.Second }
 	if strings.TrimSpace(resource) == "" { return nil, errors.New("empty lock resource") }
 	spec, err := l.ResourceFor(resource)
 	if err != nil { return nil, err }
 	if strings.TrimSpace(spec) == "" || strings.ContainsAny(spec, "\r\n") {
 		return nil, errors.New("invalid sanlock RESOURCE specification")
 	}
-	if err = os.MkdirAll(l.ReadyDir, 0700); err != nil { return nil, err }
-	markerFile, err := os.CreateTemp(l.ReadyDir, "blockmesh-sanlock-*.ready")
+	if err = os.MkdirAll(readyDir, 0700); err != nil { return nil, err }
+	markerFile, err := os.CreateTemp(readyDir, "blockmesh-sanlock-*.ready")
 	if err != nil { return nil, err }
 	marker := markerFile.Name()
 	if err = markerFile.Close(); err != nil { _ = os.Remove(marker); return nil, err }
 	if err = os.Remove(marker); err != nil { return nil, err }
 
 	script := "umask 077; : > " + shellQuote(marker) + "; exec sleep 2147483647"
-	cmd := exec.Command(l.Binary, "client", "command", "-r", spec, "-c", "/bin/sh", "-c", script)
+	cmd := exec.Command(binary, "client", "command", "-r", spec, "-c", "/bin/sh", "-c", script)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err = cmd.Start(); err != nil { return nil, fmt.Errorf("start sanlock client: %w", err) }
-	lease := &sanlockLease{cmd: cmd, done: make(chan struct{}), marker: marker, resource: resource}
+	lease := &sanlockLease{cmd: cmd, done: make(chan struct{}), marker: marker, resource: resource, stopTimeout: stopTimeout}
 	go func() {
 		err := cmd.Wait()
 		lease.mu.Lock()
@@ -76,7 +77,7 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 		close(lease.done)
 	}()
 
-	deadline := time.NewTimer(l.StartupTimeout)
+	deadline := time.NewTimer(startupTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -136,7 +137,9 @@ func (l *sanlockLease) Close() error {
 	default:
 	}
 	_ = l.cmd.Process.Signal(syscall.SIGTERM)
-	timer := time.NewTimer(5 * time.Second)
+	timeout := l.stopTimeout
+	if timeout <= 0 { timeout = 5 * time.Second }
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-l.done:
