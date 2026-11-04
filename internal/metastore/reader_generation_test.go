@@ -82,6 +82,11 @@ func TestPersistentRetireQueueSpansMultiplePages(t *testing.T) {
 	if err!=nil{t.Fatal(err)}
 	if generation!=7 || len(batches)!=1 || len(batches[0].PageIDs)!=600 {t.Fatalf("decoded queue generation=%d batches=%+v",generation,batches)}
 	if batches[0].PageIDs[0]!=2 || batches[0].PageIDs[599]!=601 {t.Fatal("queue page ordering was not preserved")}
+	if err=writeFullAt(d,encodeLifecycleState(7,2),int64(800*PageSize));err!=nil{t.Fatal(err)}
+	if err=d.Sync();err!=nil{t.Fatal(err)}
+	pa,err:=NewPersistentArena(s,nil,testCommitter{d:d});if err!=nil{t.Fatal(err)}
+	if stats:=pa.Stats();stats.LivePages!=600{t.Fatalf("multi-page retire records not pinned after reopen: %+v",stats)}
+	if pending:=pa.Pending();len(pending)!=1||len(pending[0].PageIDs)!=600{t.Fatalf("multi-page queue recovery mismatch: %+v",pending)}
 }
 
 func TestReaderTableRejectsOverlappingReservedRegions(t *testing.T) {
