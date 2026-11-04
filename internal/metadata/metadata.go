@@ -27,9 +27,16 @@ func OpenStoreWritable(path string) (*Store, error) {
 
 func openWithMode(path string, writable bool) (*Store, error) {
 	d, err := device.Open(path, writable)
-	if err != nil {
-		return nil, err
-	}
+	if err != nil { return nil, err }
+	s, err := OpenStoreDevice(d)
+	if err != nil { _ = d.Close(); return nil, err }
+	return s, nil
+}
+
+// OpenStoreDevice reads and validates the BMPOOL02 redundant superblock pair.
+// The caller owns the supplied device.
+func OpenStoreDevice(d device.Device) (*Store, error) {
+	if d == nil { return nil, fmt.Errorf("nil metadata device") }
 	var a, b []byte
 	a = make([]byte, format.PageSize)
 	b = make([]byte, format.PageSize)
