@@ -1,7 +1,7 @@
-// Package metastore implements the fixed-LBA, 4 KiB-page metadata format and
-// process-local Metadata Arena allocation. Callers may publish through the
-// legacy page-write/Sync path or commit page images and the root descriptor
-// together through a WAL Committer.
+// Package metastore implements the fixed-LBA, 4 KiB-page metadata format,
+// process-local reservations, and optional WAL-persisted Arena lifecycle.
+// Callers may publish through the legacy page-write/Sync path or commit page,
+// lifecycle, and root images together through a WAL Committer.
 package metastore
 
 import (
