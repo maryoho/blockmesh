@@ -54,15 +54,17 @@ func openWithMode(path string, writable bool) (*Store, error) {
 }
 
 func Init(path string, dataStartSector uint64, force bool) error {
-	if err := format.ValidateLayout(); err != nil {
-		return err
-	}
-	// Existing regular files are never silently truncated. Device contents are overwritten only with --force.
 	d, err := device.Open(path, true)
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	defer d.Close()
+	return InitDevice(d, dataStartSector, force)
+}
+
+// InitDevice initializes the Pool-level BMPOOL02 superblock pair and AG
+// bitmaps on an already-open metadata device. The caller owns device lifecycle.
+func InitDevice(d device.Device, dataStartSector uint64, force bool) error {
+	if d == nil { return fmt.Errorf("nil metadata device") }
+	if err := format.ValidateLayout(); err != nil { return err }
 	size := d.Size()
 	if size < 0 || uint64(size) < format.MetadataSize {
 		return fmt.Errorf("metadata device too small: have %d bytes, need at least %d", d.Size(), format.MetadataSize)
