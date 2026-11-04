@@ -76,7 +76,7 @@ func InitDevice(d device.Device, dataStartSector uint64, force bool) error {
 		return fmt.Errorf("metadata device too small: have %d bytes, need at least %d", d.Size(), format.MetadataSize)
 	}
 	if !force {
-		buf := make([]byte, format.PageSize)
+		buf := make([]byte, 2*format.PageSize)
 		if readAtFull(d, buf, 0) == nil {
 			for _, v := range buf {
 				if v != 0 {
@@ -95,9 +95,8 @@ func InitDevice(d device.Device, dataStartSector uint64, force bool) error {
 	if err := zeroRegion(d, format.WALOffset, format.WALSize); err != nil { return err }
 	if err := zeroRegion(d, format.CheckpointOffset, format.CheckpointSize); err != nil { return err }
 	sb, err := format.NewSuperblock(dataStartSector)
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
+	if err = sb.Validate(); err != nil { return fmt.Errorf("invalid generated Pool geometry: %w",err) }
 	// Initialize every AG descriptor and its eight 4KiB bitmap data pages.
 	for ag := uint32(0); ag < format.AGCount; ag++ {
 		base := format.BitmapOffset + uint64(ag)*format.AGBitmapStride
