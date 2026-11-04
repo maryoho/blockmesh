@@ -50,6 +50,7 @@ func TestPersistentArenaFailsClosedOnLifecycleCorruption(t *testing.T){
  s,err:=Format(d,Layout{VolumeID:"bad-life",TotalPages:12,ArenaStart:2,ArenaPages:8,LifecycleStart:10,LifecyclePages:2})
  if err!=nil{t.Fatal(err)}
  if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+ if err=FormatLifecycle(s);!errors.Is(err,ErrLifecycleAlreadyInitialized){t.Fatalf("expected reinitialization guard, got %v",err)}
  d.corrupt(int(10*PageSize+100))
  if _,err=NewPersistentArena(s,nil,testCommitter{d:d});!errors.Is(err,ErrLifecycleCorrupt){t.Fatalf("expected lifecycle corruption, got %v",err)}
 }
