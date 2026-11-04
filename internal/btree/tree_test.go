@@ -12,6 +12,7 @@ import (
 type memoryDevice struct {
 	mu sync.Mutex
 	b  []byte
+	writes int
 }
 
 func newMemoryDevice(pages int) *memoryDevice {
@@ -35,6 +36,7 @@ func (d *memoryDevice) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 || off+int64(len(p)) > int64(len(d.b)) {
 		return 0, io.ErrShortWrite
 	}
+	d.writes++
 	return copy(d.b[off:], p), nil
 }
 func (d *memoryDevice) Sync() error { return nil }
@@ -142,5 +144,61 @@ func TestOpenRejectsCorruptRootPage(t *testing.T) {
 	}
 	if _, err = Open(store); err == nil {
 		t.Fatal("expected corrupt root page error")
+	}
+}
+
+
+func TestPathCopyUpdateWritesOnlySearchPath(t *testing.T) {
+	_, tree, dev := newTree(t, 2048)
+	for i := uint64(0); i < 270; i++ {
+		if err := tree.Put(i*3, i+1); err != nil {
+			t.Fatalf("Put(%d): %v", i*3, err)
+		}
+	}
+	dev.mu.Lock()
+	dev.writes = 0
+	dev.mu.Unlock()
+
+	if err := tree.Put(450, 99999); err != nil {
+		t.Fatal(err)
+	}
+	dev.mu.Lock()
+	writes := dev.writes
+	dev.mu.Unlock()
+	// Two B+Tree pages (leaf + root) and one superblock publication.
+	if writes > 3 {
+		t.Fatalf("single-key update wrote %d times; want at most 3 writes", writes)
+	}
+	if got, err := tree.Get(450); err != nil || got != 99999 {
+		t.Fatalf("Get(450) = %d, %v", got, err)
+	}
+}
+
+func TestDeleteAllKeysAcrossLeafBoundary(t *testing.T) {
+	_, tree, dev := newTree(t, 2048)
+	const count = 270
+	for i := uint64(0); i < count; i++ {
+		if err := tree.Put(i, i+10); err != nil {
+			t.Fatalf("Put(%d): %v", i, err)
+		}
+	}
+	for i := uint64(0); i < count; i++ {
+		if err := tree.Delete(i); err != nil {
+			t.Fatalf("Delete(%d): %v", i, err)
+		}
+	}
+	if tree.RootPage() != metastore.NoPage {
+		t.Fatalf("root=%d, want NoPage", tree.RootPage())
+	}
+	reopenedStore, err := metastore.Open(dev, "btree-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(reopenedStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened.Snapshot()) != 0 {
+		t.Fatalf("expected empty tree, got %d items", len(reopened.Snapshot()))
 	}
 }
