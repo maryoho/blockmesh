@@ -89,8 +89,9 @@ scheduling is not included.
   must track an explicit durable applied-LSN before advancing the checkpoint.
 - `btree.Open(store, journal)` routes COW page after-images and the inactive
   root superblock descriptor through one WAL transaction. `btree.Open(store)`
-  remains a compatibility path without WAL protection. Bitmap, Volume Descriptor,
-  retire-queue and distributed owner-epoch updates are not yet integrated.
+  remains a compatibility path without WAL protection. P3-3.4 adds the
+  per-AG Bitmap/Mapping/Volume Descriptor transaction path; P3-3.5/3.6 add
+  persistent Arena lifecycle, Retire Queue, and Reader Generation pages.
 - WAL records are not yet bound to `volume_id`, `volume_sequence`, or
   `owner_epoch`; distributed fencing and multi-writer exclusion remain
   integration work.
@@ -154,3 +155,30 @@ The lifecycle pages must be configured outside the Arena and outside the
 per-AG WAL/checkpoint regions. Recover the relevant WAL before opening the
 persistent tree. The lifecycle checkpoint and queue pages carry matching
 generations; a mismatch fails closed.
+
+
+## P3-3.6: multi-page Retire Queue and Reader Generations
+
+The lifecycle region reserves page 0 for the lifecycle checkpoint and pages
+1..N-1 for a fixed-capacity paged Retire Queue. Every queue page carries the
+same queue generation plus its page index/count and CRC32C. Root publication
+and queue collection update the lifecycle page and all queue pages in one WAL
+transaction. A partial replay cannot be accepted: mismatched generations,
+missing pages, invalid indexes, or duplicate retired IDs fail closed. The
+single queue page written by P3-3.5 remains readable for a two-page lifecycle
+region.
+
+Reader records use one dedicated 4 KiB page per slot in a separately reserved
+metadata range. Reader page updates are WAL after-images. Records contain
+NodeID, BootID, Reader Epoch, Root Generation, heartbeat sequence, and
+Active/Leaving/Fenced state. Active and Leaving readers contribute to the
+minimum safe generation. A slot becomes excluded only after a successful
+fencer call or a caller-confirmed graceful I/O drain. The Reader Table does
+not implement cluster-wide slot allocation or lease expiry; those must be
+serialized by the deployment's lease/lock service.
+
+The reader page range must be outside the Arena, lifecycle, WAL, checkpoint,
+and other metadata regions. Its geometry is deployment configuration and
+must be consistent on all nodes. A production fencer must revoke every SAN
+path before a failed reader is marked Fenced. Heartbeat timeout alone never
+permits reclamation.
