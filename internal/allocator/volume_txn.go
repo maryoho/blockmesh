@@ -12,60 +12,18 @@ import (
  "blockmesh/internal/wal"
 )
 
-const (
- volumeDescriptorMagic = "BMDVOL01"
- volumeDescriptorVersion = uint32(1)
- volumeDescriptorCRCOffset = int(format.PageSize)-4
- VolumeDescriptorPairSize = 2*format.PageSize
- MaxVolumeDescriptors = format.NodeTableSize/VolumeDescriptorPairSize
-)
+const VolumeDescriptorPairSize = format.VolumeDescriptorPairSize
+const MaxVolumeDescriptors = format.MaxVolumeDescriptors
 
-var errVolumeDescriptor = errors.New("invalid Volume Descriptor")
+var errVolumeDescriptor = format.ErrVolumeDescriptor
 
-type VolumeDescriptor struct {
- VolumeID string
- AG uint32
- Generation uint64
- VolumeSequence uint64
- MappingRootOffset uint64
- BitmapSequence uint64
- OwnerEpoch uint64
+type VolumeDescriptor = format.VolumeDescriptor
+
+func VolumeDescriptorPairOffset(sb format.Superblock,index uint32)(uint64,error) {
+	return format.VolumeDescriptorPairOffset(sb,index)
 }
-
-func VolumeDescriptorPairOffset(sb format.Superblock,index uint32)(uint64,error){
- if uint64(index)>=MaxVolumeDescriptors{return 0,fmt.Errorf("Volume Descriptor index %d exceeds capacity %d",index,MaxVolumeDescriptors)}
- return sb.NodeTableOffset+uint64(index)*VolumeDescriptorPairSize,nil
-}
-
-func EncodeVolumeDescriptor(d VolumeDescriptor)([]byte,error){
- if d.VolumeID==""||len(d.VolumeID)>64||d.Generation==0||d.VolumeSequence==0||d.OwnerEpoch==0{return nil,errVolumeDescriptor}
- b:=make([]byte,format.PageSize);copy(b[:8],volumeDescriptorMagic)
- binary.LittleEndian.PutUint32(b[8:12],volumeDescriptorVersion)
- binary.LittleEndian.PutUint32(b[12:16],d.AG)
- binary.LittleEndian.PutUint64(b[16:24],d.Generation)
- binary.LittleEndian.PutUint64(b[24:32],d.VolumeSequence)
- binary.LittleEndian.PutUint64(b[32:40],d.MappingRootOffset)
- binary.LittleEndian.PutUint64(b[40:48],d.BitmapSequence)
- binary.LittleEndian.PutUint64(b[48:56],d.OwnerEpoch)
- copy(b[56:120],d.VolumeID)
- binary.LittleEndian.PutUint32(b[volumeDescriptorCRCOffset:],crc32.Checksum(b[:volumeDescriptorCRCOffset],castagnoli))
- return b,nil
-}
-
-func DecodeVolumeDescriptor(b []byte)(VolumeDescriptor,error){
- var d VolumeDescriptor
- if len(b)!=int(format.PageSize)||string(b[:8])!=volumeDescriptorMagic||binary.LittleEndian.Uint32(b[8:12])!=volumeDescriptorVersion||crc32.Checksum(b[:volumeDescriptorCRCOffset],castagnoli)!=binary.LittleEndian.Uint32(b[volumeDescriptorCRCOffset:]){return d,errVolumeDescriptor}
- name:=b[56:120];end:=len(name)
- for i,c:=range name{if c==0{end=i;break}}
- for _,c:=range name[end:]{if c!=0{return d,errVolumeDescriptor}}
- d.VolumeID=string(name[:end])
- for _,c:=range b[120:volumeDescriptorCRCOffset]{if c!=0{return VolumeDescriptor{},errVolumeDescriptor}}
- d.AG=binary.LittleEndian.Uint32(b[12:16]);d.Generation=binary.LittleEndian.Uint64(b[16:24])
- d.VolumeSequence=binary.LittleEndian.Uint64(b[24:32]);d.MappingRootOffset=binary.LittleEndian.Uint64(b[32:40])
- d.BitmapSequence=binary.LittleEndian.Uint64(b[40:48]);d.OwnerEpoch=binary.LittleEndian.Uint64(b[48:56])
- if d.VolumeID==""||d.Generation==0||d.VolumeSequence==0||d.OwnerEpoch==0{return VolumeDescriptor{},errVolumeDescriptor}
- return d,nil
-}
+func EncodeVolumeDescriptor(d VolumeDescriptor)([]byte,error) { return d.Encode() }
+func DecodeVolumeDescriptor(b []byte)(VolumeDescriptor,error) { return format.DecodeVolumeDescriptor(b) }
 
 func readVolumeDescriptorPair(store MetadataStore,pairOffset uint64,volumeID string)(VolumeDescriptor,uint64,error){
  sb:=store.Superblock();nodeEnd:=sb.NodeTableOffset+format.NodeTableSize
