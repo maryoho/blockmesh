@@ -168,3 +168,48 @@ func TestVolumeRuntimeActivationFailureRollsBack(t *testing.T) {
 }
 type runtimeFailingWALBackend struct { *runtimeTestBackend; err error }
 func (b *runtimeFailingWALBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,RuntimeMetadataDevice)error{b.add("wal-recover");return b.err}
+
+type runtimeMonitoredOwnerLease struct {
+	*runtimeTestOwnerLease
+	lost chan error
+}
+func (l *runtimeMonitoredOwnerLease) Lost() <-chan error { return l.lost }
+
+type runtimeOwnerLossBackend struct {
+	*runtimeTestBackend
+	lease *runtimeMonitoredOwnerLease
+	lossHandled chan struct{}
+}
+func (b *runtimeOwnerLossBackend) AcquireOwnerLease(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease,error) {
+	b.add("owner-acquire")
+	return b.lease,nil
+}
+func (b *runtimeOwnerLossBackend) HandleOwnerLeaseLost(ctx context.Context, spec VolumeRuntimeSpec, cause error) error {
+	b.add("owner-fail-stop")
+	close(b.lossHandled)
+	if err:=b.StopRequests(ctx,spec.VolumeID);err!=nil{return err}
+	return b.DrainMetadataIO(ctx,spec.VolumeID)
+}
+
+func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
+	base:=&runtimeTestBackend{}
+	lease:=&runtimeMonitoredOwnerLease{
+		runtimeTestOwnerLease:&runtimeTestOwnerLease{
+			closer:runtimeTestCloser{events:&base.events,mu:&base.mu,name:"owner-release"},epoch:10,
+		},
+		lost:make(chan error,1),
+	}
+	backend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{})}
+	m,err:=NewVolumeRuntimeManager(backend)
+	if err!=nil{t.Fatal(err)}
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second)
+	defer cancel()
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));err!=nil{t.Fatal(err)}
+	waitRuntimeRecovery(t,base)
+	lease.lost<-errors.New("sanlock helper exited")
+	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("owner lease loss handler was not called")}
+	if got:=m.ActiveVolumes();len(got)!=0{t.Fatalf("lease-lost Owner still reported active: %v",got)}
+	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
+	events:=base.snapshot()
+	assertRuntimeEventOrder(t,events,"owner-acquire","wal-recover","owner-epoch-publish","requests-enable","owner-fail-stop","requests-stop","io-drain","owner-release")
+}
