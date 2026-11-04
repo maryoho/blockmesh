@@ -29,6 +29,13 @@ type Locker interface {
 	Lock(ctx context.Context, resource string) (unlock func() error, err error)
 }
 
+// DistributedLocker is required for shared-SAN metadata. FileLocker deliberately
+// does not implement this marker because flock only coordinates one host.
+type DistributedLocker interface {
+	Locker
+	Distributed() bool
+}
+
 type FileLocker struct{ Dir string }
 
 type fileLease struct {
