@@ -181,6 +181,72 @@ func (j *Journal) Commit(updates []PageUpdate) error {
 	return nil
 }
 
+// Checkpoint durably advances the per-AG checkpoint and switches to the
+// alternate WAL bank. The inactive bank is cleared and synced BEFORE the
+// descriptor switch; therefore a crash before descriptor durability leaves
+// the old active bank intact, while a crash after it selects an already-empty
+// bank. Since Commit syncs every applied after-image before returning,
+// checkpointTxID represents fully-applied transactions.
+func (j *Journal) Checkpoint() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.poisoned {
+		return errors.New("WAL journal requires recovery before checkpoint")
+	}
+	if j.checkpointGeneration == math.MaxUint64 {
+		return errors.New("WAL checkpoint generation exhausted")
+	}
+	nextBank := uint32(1) - j.activeBank
+	nextBase := j.segmentBase + uint64(nextBank)*walBankSize
+	zero := make([]byte, int(walBankSize))
+	if err := writeAtFull(j.dev, zero, int64(nextBase)); err != nil {
+		return fmt.Errorf("clear inactive WAL bank: %w", err)
+	}
+	if err := j.dev.Sync(); err != nil {
+		return fmt.Errorf("sync cleared WAL bank: %w", err)
+	}
+	desc := checkpointDescriptor{
+		Generation: j.checkpointGeneration + 1,
+		CheckpointTxID: j.lastTx,
+		ActiveBank: nextBank,
+		AG: uint32((j.segmentBase-j.walStart)/format.WALSegmentSize),
+	}
+	nextSlot := uint32(1) - j.checkpointSlot
+	off, err := checkpointOffsetForJournal(j, desc.AG, nextSlot)
+	if err != nil { return err }
+	if err = writeAtFull(j.dev, encodeCheckpoint(desc), int64(off)); err != nil {
+		j.poisoned = true
+		return fmt.Errorf("write checkpoint descriptor: %w", err)
+	}
+	if err = j.dev.Sync(); err != nil {
+		j.poisoned = true
+		return fmt.Errorf("sync checkpoint descriptor: %w", err)
+	}
+	j.activeBank = nextBank
+	j.base = nextBase
+	j.size = walBankSize
+	j.end = 0
+	j.checkpointSlot = nextSlot
+	j.checkpointGeneration = desc.Generation
+	j.checkpointTxID = desc.CheckpointTxID
+	j.nextTx = desc.CheckpointTxID + 1
+	if j.nextTx == 0 {
+		j.poisoned = true
+		return errors.New("WAL transaction ID exhausted")
+	}
+	return nil
+}
+
+func checkpointOffsetForJournal(j *Journal, ag, slot uint32) (uint64, error) {
+	if slot >= 2 { return 0, errors.New("checkpoint slot out of range") }
+	rel := (uint64(ag)*checkpointSlotsPerAG + uint64(slot))*checkpointDescriptorSize
+	if j.checkpointStart > math.MaxUint64-rel || j.checkpointStart+rel > j.checkpointEnd ||
+		checkpointDescriptorSize > j.checkpointEnd-(j.checkpointStart+rel) {
+		return 0, errors.New("checkpoint descriptor outside reserved region")
+	}
+	return j.checkpointStart+rel, nil
+}
+
 // Recover replays all committed transactions in this AG segment. Replaying
 // after-images is idempotent, so recovery may safely repeat after a crash.
 func (j *Journal) Recover() (bool, error) {
