@@ -26,6 +26,7 @@ const (
 	ReaderActive
 	ReaderLeaving
 	ReaderFenced
+	ReaderClosed
 )
 
 var (
@@ -96,7 +97,7 @@ func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGenera
 	if slot>=t.slots || nodeID=="" || bootID=="" || len(nodeID)>readerIdentitySize || len(bootID)>readerIdentitySize || epoch==0 { return ErrReaderSlot }
 	if rootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
 	old,err:=t.readLocked(slot);if err!=nil{return err}
-	if old.State!=ReaderEmpty && old.State!=ReaderFenced { return ErrReaderSlot }
+	if old.State!=ReaderEmpty && old.State!=ReaderFenced && old.State!=ReaderClosed { return ErrReaderSlot }
 	if old.Epoch>=epoch { return ErrReaderIdentity }
 	return t.writeLocked(ReaderRecord{Slot:slot,NodeID:nodeID,BootID:bootID,Epoch:epoch,RootGeneration:rootGeneration,HeartbeatSequence:1,State:ReaderActive})
 }
@@ -127,7 +128,7 @@ func (t *ReaderTable) CloseDrained(slot uint32,nodeID,bootID string,epoch uint64
 	t.mu.Lock();defer t.mu.Unlock()
 	r,err:=t.readLocked(slot);if err!=nil{return err}
 	if (r.State!=ReaderActive && r.State!=ReaderLeaving) || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
-	r.State=ReaderFenced
+	r.State=ReaderClosed
 	return t.writeLocked(r)
 }
 
@@ -156,7 +157,7 @@ func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
 	out:=make([]ReaderRecord,0,t.slots)
 	for i:=uint32(0);i<t.slots;i++ {
 		r,err:=t.readLocked(i);if err!=nil{return nil,err}
-		if r.State!=ReaderEmpty && r.State!=ReaderFenced { out=append(out,r) }
+		if r.State!=ReaderEmpty && r.State!=ReaderFenced && r.State!=ReaderClosed { out=append(out,r) }
 	}
 	return out,nil
 }
@@ -173,7 +174,7 @@ func (t *ReaderTable) SafeGeneration() (uint64,error) {
 
 func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
 	if r.NodeID=="" || r.BootID=="" || len(r.NodeID)>readerIdentitySize || len(r.BootID)>readerIdentitySize ||
-		r.Epoch==0 || (r.State!=ReaderActive && r.State!=ReaderLeaving && r.State!=ReaderFenced) { return nil,ErrReaderSlot }
+		r.Epoch==0 || (r.State!=ReaderActive && r.State!=ReaderLeaving && r.State!=ReaderFenced && r.State!=ReaderClosed) { return nil,ErrReaderSlot }
 	b:=make([]byte,PageSize);copy(b[:8],readerPageMagic)
 	binary.LittleEndian.PutUint32(b[8:12],readerPageVersion)
 	binary.LittleEndian.PutUint32(b[12:16],uint32(r.State))
