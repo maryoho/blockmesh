@@ -40,7 +40,8 @@ type journalTxn struct {
 }
 
 // Journal is an append-only redo journal in one AG's fixed metadata-device
-// WAL segment. A transaction is durable only after its Commit record is synced.
+// WAL segment, split into two checkpoint-switched banks. A transaction is
+// durable only after its Commit record is synced.
 type Journal struct {
 	mu sync.Mutex
 	dev device.Device
@@ -279,8 +280,8 @@ func checkpointOffsetForJournal(j *Journal, ag, slot uint32) (uint64, error) {
 	return j.checkpointStart+rel, nil
 }
 
-// Recover replays all committed transactions in this AG segment. Replaying
-// after-images is idempotent, so recovery may safely repeat after a crash.
+// Recover replays all committed transactions in the selected AG WAL bank.
+// Replaying after-images is idempotent, so recovery may safely repeat after a crash.
 func (j *Journal) Recover() (bool, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
