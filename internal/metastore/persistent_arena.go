@@ -128,6 +128,10 @@ func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
 func NewPersistentArena(store *Store,livePages []uint64,committer Committer,coordinators ...ReaderCoordinator)(*PersistentArena,error){
  if len(coordinators)>1{return nil,errors.New("at most one reader coordinator may be supplied")}
  if store==nil||committer==nil{return nil,errors.New("store and WAL committer are required")}
+ if len(coordinators)==1 && coordinators[0]!=nil {
+  clusterCommitter,ok:=committer.(ClusterSafeCommitter)
+  if !ok || !clusterCommitter.ClusterSafe() { return nil,ErrClusterSafeCommitterRequired }
+ }
  stateOff,_,err:=lifecycleOffsets(store.Superblock());if err!=nil{return nil,err}
  stateImage:=make([]byte,PageSize);if err=readFullAt(store.dev,stateImage,int64(stateOff));err!=nil{return nil,err}
  generation,rootSequence,err:=decodeLifecycleState(stateImage);if err!=nil{return nil,err}
