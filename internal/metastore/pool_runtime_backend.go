@@ -22,6 +22,16 @@ type PoolOwnerLeaseAcquirer interface {
 	AcquireFencedOwner(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease, error)
 }
 
+// PoolOwnerCoordinator adapts the shared-SAN OwnerCoordinator to the Pool
+// runtime. The coordinator owns sanlock acquisition, old-owner PR fencing,
+// all-path verification, old-owner I/O barrier and authoritative identity CAS.
+type PoolOwnerCoordinator struct { Coordinator *volume.OwnerCoordinator }
+
+func (p PoolOwnerCoordinator) AcquireFencedOwner(ctx context.Context, spec VolumeRuntimeSpec) (RuntimeOwnerLease, error) {
+	if p.Coordinator == nil { return nil, errors.New("OwnerCoordinator is required") }
+	return p.Coordinator.AcquireOwner(ctx, spec.VolumeID, spec.NodeID, spec.BootID)
+}
+
 // PoolRuntimeConfig wires the Pool-backed metadata objects to the platform
 // services. All callbacks are mandatory: silently substituting local locks,
 // no-op fencing, or no-op I/O admission would make shared-SAN operation unsafe.
@@ -40,6 +50,9 @@ type PoolRuntimeConfig struct {
 	RecoveryConfig ReaderRecoveryConfig
 	ReaderHeartbeatInterval time.Duration
 	OnReaderLeaseLost func(context.Context, VolumeRuntimeSpec, error)
+	// OnOwnerLeaseLost must synchronously fence/suspend the local data path.
+	// Returning is allowed only after new and in-flight data I/O are blocked.
+	OnOwnerLeaseLost func(context.Context, VolumeRuntimeSpec, error) error
 
 	// LivePages must return every page reachable from the current B+Tree root
 	// except the root itself. It is mandatory because omitting a live page
@@ -63,7 +76,7 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 		!cfg.Locker.Distributed() || cfg.OpenPoolSuperblock == nil || cfg.CommitterForAG == nil || cfg.RecoverAG == nil ||
 		cfg.ReaderSetResource == nil || cfg.ReaderSlotResource == nil ||
 		cfg.PRRegistrar == nil || cfg.ReaderRecoveryProbe == nil ||
-		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.OnReaderLeaseLost == nil ||
+		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.OnReaderLeaseLost == nil || cfg.OnOwnerLeaseLost == nil ||
 		cfg.EnableRequests == nil || cfg.StopRequests == nil ||
 		cfg.DrainMetadataIO == nil || cfg.CloseMetadata == nil {
 		return nil, errors.New("Pool runtime requires device, fenced owner, distributed sanlock/WAL, reader lease/fencing, live-page, recovery and I/O hooks")
@@ -85,6 +98,19 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 	return &PoolVolumeRuntimeBackend{cfg: cfg, coordinator: coordinator}, nil
 }
 
+
+func (b *PoolVolumeRuntimeBackend) HandleOwnerLeaseLost(ctx context.Context, spec VolumeRuntimeSpec, cause error) error {
+	if cause == nil { cause = errors.New("Owner Lease lost") }
+	// This hook is the synchronous hardware/data-path fail-stop. The ordinary
+	// StopRequests and DrainMetadataIO hooks then establish software admission
+	// closure and an explicit completion barrier before cleanup can release
+	// metadata resources.
+	failStopErr := b.cfg.OnOwnerLeaseLost(ctx, spec, cause)
+	stopErr := b.cfg.StopRequests(ctx, spec.VolumeID)
+	drainErr := b.cfg.DrainMetadataIO(ctx, spec.VolumeID)
+	return errors.Join(failStopErr, stopErr, drainErr)
+}
+
 func (b *PoolVolumeRuntimeBackend) OpenDevice(ctx context.Context, spec VolumeRuntimeSpec) (RuntimeMetadataDevice, error) {
 	return b.cfg.OpenDevice(ctx, spec)
 }
@@ -96,6 +122,10 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 	if lease == nil || lease.Epoch() == 0 {
 		if lease != nil { _ = lease.Close() }
 		return nil, errors.New("fenced owner provider returned an invalid lease epoch")
+	}
+	if _, ok := lease.(RuntimeOwnerLeaseMonitor); !ok {
+		_ = lease.Close()
+		return nil, errors.New("Pool Owner provider must return a monitored sanlock Owner Lease")
 	}
 	return lease, nil
 }
