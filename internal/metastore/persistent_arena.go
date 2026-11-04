@@ -204,5 +204,3 @@ func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
  p.stateGeneration++;p.batches=kept
  return len(release),nil
 }
-
-var _ = fmt.Sprintf
