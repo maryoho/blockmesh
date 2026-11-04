@@ -113,7 +113,8 @@ func (r *SCSIPRRegistrar) UnregisterReader(ctx context.Context, nodeID, bootID s
 }
 
 func (r *SCSIPRRegistrar) RegisterReader(ctx context.Context, nodeID, bootID string) error {
-	if r == nil || len(r.Paths) == 0 { return errors.New("SCSI PR registrar requires local paths") }
+	if r == nil { return errors.New("SCSI PR registrar requires local paths") }
+	if err:=validatePRPaths(r.Paths);err!=nil{return err}
 	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(bootID) == "" { return errors.New("reader identity is required") }
 	binary:=r.Binary
 	if binary=="" { binary="sg_persist" }
@@ -167,14 +168,16 @@ func (f *SCSIPRFencer) FenceNode(ctx context.Context, nodeID, bootID string) err
 	if err != nil { return fmt.Errorf("resolve PR keys for %s/%s: %w", nodeID, bootID, err) }
 	if len(targetKeys) == 0 { return ErrPRKeyUnknown }
 	unique := make(map[uint64]struct{}, len(targetKeys))
+	localKeys:=make(map[uint64]struct{},len(f.Paths))
+	for _,path:=range f.Paths { localKeys[path.LocalKey]=struct{}{} }
 	for _, key := range targetKeys {
 		if key == 0 { return errors.New("zero SCSI PR registration key is invalid") }
+		if _, local := localKeys[key]; local { return fmt.Errorf("target PR key %x collides with a local initiator key",key) }
 		if _, exists := unique[key]; exists { return errors.New("duplicate SCSI PR registration key") }
 		unique[key] = struct{}{}
 	}
 	for _, path := range f.Paths {
 		for targetKey := range unique {
-			if targetKey == path.LocalKey { return fmt.Errorf("refusing to preempt local registration key %x",targetKey) }
 			present, readErr := f.keyPresent(ctx, runner, binary, path.Device, targetKey)
 			if readErr != nil { return fmt.Errorf("read PR keys on %s: %w", path.Device, readErr) }
 			if !present { continue }
@@ -192,6 +195,11 @@ func (f *SCSIPRFencer) FenceNode(ctx context.Context, nodeID, bootID string) err
 		}
 	}
 	for _, path := range f.Paths {
+		for _, localPath := range f.Paths {
+			present, verifyErr := f.keyPresent(ctx,runner,binary,path.Device,localPath.LocalKey)
+			if verifyErr != nil { return fmt.Errorf("verify local PR key on %s: %w",path.Device,verifyErr) }
+			if !present { return fmt.Errorf("local PR key %x disappeared from %s during fencing",localPath.LocalKey,path.Device) }
+		}
 		output, readErr := runner.Run(ctx, binary, "--in", "--read-keys", "--device="+path.Device)
 		if readErr != nil {
 			return fmt.Errorf("verify PR registrations on %s: %w: %s", path.Device, readErr, strings.TrimSpace(string(output)))
