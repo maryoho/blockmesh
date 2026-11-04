@@ -24,6 +24,7 @@ import (
 // joined that lockspace with sanlock client add_lockspace.
 type SanlockLocker struct {
 	Binary string
+	HelperBinary string
 	ReadyDir string
 	ResourceFor func(string) (string, error)
 	StartupTimeout time.Duration
@@ -64,7 +65,9 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 	if err = os.Remove(marker); err != nil { return nil, err }
 
 	script := "umask 077; : > " + shellQuote(marker) + "; exec sleep 2147483647"
-	cmd := exec.Command(binary, "client", "command", "-r", spec, "-c", "/bin/sh", "-c", script)
+	helper := l.HelperBinary
+	if helper == "" { helper = "setpriv" }
+	cmd := exec.Command(binary, "client", "command", "-r", spec, "-c", helper, "--pdeathsig", "TERM", "/bin/sh", "-c", script)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err = cmd.Start(); err != nil { return nil, fmt.Errorf("start sanlock client: %w", err) }
