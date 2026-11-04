@@ -182,9 +182,8 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
   if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
  }}
  retiredSeen:=make(map[uint64]struct{},len(retired))
- currentRoot:=p.store.Superblock().RootPage
  for _,id:=range retired {
-  if id<p.arena.start||id-p.arena.start>=p.arena.pages||id==currentRoot {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages||id==rootPage {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=retiredSeen[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet};retiredSeen[id]=struct{}{}
   if _,ok:=queuedPages[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
