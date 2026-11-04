@@ -96,11 +96,11 @@ func openTree(store *metastore.Store, allowPersistent bool, journals ...metastor
 // OpenPersistent opens a tree whose Arena and retire queue are persisted
 // in the lifecycle region configured in metastore.Layout. The caller must
 // recover the WAL before calling this function.
-func OpenPersistent(store *metastore.Store, journal metastore.Committer) (*Tree, error) {
+func OpenPersistent(store *metastore.Store, journal metastore.Committer, coordinators ...metastore.ReaderCoordinator) (*Tree, error) {
 	if journal == nil { return nil, errors.New("nil WAL committer") }
 	t, err := openTree(store, true, journal)
 	if err != nil { return nil, err }
-	persistent, err := metastore.NewPersistentArena(store, t.pages, journal)
+	persistent, err := metastore.NewPersistentArena(store, t.pages, journal, coordinators...)
 	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
 	t.persistentArena = persistent
 	return t, nil
