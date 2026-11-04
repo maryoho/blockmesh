@@ -85,11 +85,11 @@ func openTree(store *metastore.Store, allowPersistent bool, journals ...metastor
 		t.items = items
 		t.pages = append([]uint64(nil), live...)
 	}
-	arena, err := metastore.NewArena(store, live)
-	if err != nil {
-		return nil, err
+	if !allowPersistent {
+		arena, err := metastore.NewArena(store, live)
+		if err != nil { return nil, err }
+		t.arena = arena
 	}
-	t.arena = arena
 	return t, nil
 }
 
