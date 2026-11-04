@@ -11,12 +11,14 @@ import (
 )
 
 type supervisorTestController struct {
+	volumeID string
 	validateErr error
 	runErr error
 	started chan struct{}
 	runs atomic.Int32
 }
 
+func (c *supervisorTestController) VolumeID() string { return c.volumeID }
 func (c *supervisorTestController) ValidateProduction() error { return c.validateErr }
 func (c *supervisorTestController) Run(ctx context.Context) error {
 	c.runs.Add(1)
@@ -27,7 +29,7 @@ func (c *supervisorTestController) Run(ctx context.Context) error {
 }
 
 func TestReaderRecoverySupervisorActivateDeactivate(t *testing.T) {
-	controller := &supervisorTestController{started: make(chan struct{})}
+	controller := &supervisorTestController{volumeID: "vol-a", started: make(chan struct{})}
 	factoryCalls := atomic.Int32{}
 	s, err := NewReaderRecoverySupervisor(func(string) (ManagedReaderRecovery, error) {
 		factoryCalls.Add(1)
@@ -49,7 +51,7 @@ func TestReaderRecoverySupervisorActivateDeactivate(t *testing.T) {
 
 func TestReaderRecoverySupervisorRejectsUnsafeController(t *testing.T) {
 	wantErr := errors.New("NoopFencer is forbidden")
-	controller := &supervisorTestController{validateErr: wantErr}
+	controller := &supervisorTestController{volumeID: "vol-a", validateErr: wantErr}
 	s, err := NewReaderRecoverySupervisor(func(string) (ManagedReaderRecovery, error) { return controller, nil })
 	if err != nil { t.Fatal(err) }
 	if err = s.Activate(context.Background(), "vol-a"); !errors.Is(err, wantErr) {
@@ -60,8 +62,8 @@ func TestReaderRecoverySupervisorRejectsUnsafeController(t *testing.T) {
 
 func TestReaderRecoverySupervisorShutdownAllVolumes(t *testing.T) {
 	// Use separate start channels to avoid depending on goroutine scheduling.
-	c1 := &supervisorTestController{started: make(chan struct{})}
-	c2 := &supervisorTestController{started: make(chan struct{})}
+	c1 := &supervisorTestController{volumeID: "a", started: make(chan struct{})}
+	c2 := &supervisorTestController{volumeID: "b", started: make(chan struct{})}
 	s, err := NewReaderRecoverySupervisor(func(volumeID string) (ManagedReaderRecovery, error) {
 		if volumeID == "a" { return c1, nil }
 		return c2, nil
@@ -81,7 +83,7 @@ func TestReaderRecoverySupervisorShutdownAllVolumes(t *testing.T) {
 }
 
 func TestReaderRecoverySupervisorParentCancellation(t *testing.T) {
-	controller := &supervisorTestController{started: make(chan struct{})}
+	controller := &supervisorTestController{volumeID: "vol-a", started: make(chan struct{})}
 	s, err := NewReaderRecoverySupervisor(func(string) (ManagedReaderRecovery, error) { return controller, nil })
 	if err != nil { t.Fatal(err) }
 	parent, cancelParent := context.WithCancel(context.Background())
