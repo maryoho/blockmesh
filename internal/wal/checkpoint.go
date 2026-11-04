@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash/crc32"
 
+	"blockmesh/internal/device"
+
 	"blockmesh/internal/format"
 )
 
@@ -89,10 +91,12 @@ func (j *Journal) loadCheckpoint(ag uint32, sb format.Superblock) (checkpointDes
 	}
 	if len(valid) == 0 {
 		if nonzero { return checkpointDescriptor{}, 0, ErrCheckpointCorrupt }
-		// Do not silently reinterpret an existing v1 WAL as an empty bank.
-		probe := make([]byte, journalHeaderSize)
-		if err := readAtFull(j.dev, probe, int64(j.segmentBase)); err != nil { return checkpointDescriptor{}, 0, err }
-		if !allZero(probe) { return checkpointDescriptor{}, 0, ErrCheckpointMissing }
+		// Do not silently reinterpret an existing WAL as empty. Check BOTH
+		// banks: after a previous rotation the active log may be in bank 1
+		// while bank 0 is completely blank.
+		blank, err := zeroRange(j.dev, j.segmentBase, format.WALSegmentSize)
+		if err != nil { return checkpointDescriptor{}, 0, err }
+		if !blank { return checkpointDescriptor{}, 0, ErrCheckpointMissing }
 		d := checkpointDescriptor{Generation:1, AG:ag, ActiveBank:0}
 		off, err := checkpointOffset(sb, ag, 0)
 		if err != nil { return checkpointDescriptor{}, 0, err }
@@ -108,4 +112,19 @@ func (j *Journal) loadCheckpoint(ag uint32, sb format.Superblock) (checkpointDes
 		return checkpointDescriptor{}, 0, fmt.Errorf("%w: conflicting descriptors at generation %d", ErrCheckpointCorrupt, best.d.Generation)
 	}
 	return best.d, best.slot, nil
+}
+
+
+func zeroRange(dev device.Device, offset, size uint64) (bool, error) {
+	const chunkSize = uint64(64 * 1024)
+	buf := make([]byte, int(chunkSize))
+	for done := uint64(0); done < size; {
+		n := chunkSize
+		if size-done < n { n = size-done }
+		part := buf[:int(n)]
+		if err := readAtFull(dev, part, int64(offset+done)); err != nil { return false, err }
+		if !allZero(part) { return false, nil }
+		done += n
+	}
+	return true, nil
 }
