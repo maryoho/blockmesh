@@ -45,7 +45,9 @@ func (l *integrationSanlockLocker) Acquire(ctx context.Context,name string)(lock
 	case <-ch:
 		n:=l.active.Add(1)
 		for old:=l.maxActive.Load();n>old&&!l.maxActive.CompareAndSwap(old,n);old=l.maxActive.Load() {}
-		return &integrationSanlockLease{resource:name,gate:ch,locker:l},nil
+		lease:=&integrationSanlockLease{resource:name,gate:ch,locker:l}
+		lease.valid.Store(true)
+		return lease,nil
 	}
 }
 func (l *integrationSanlockLocker) Lock(ctx context.Context,name string)(func()error,error) {
@@ -107,7 +109,7 @@ func newIntegrationKubernetesStore(t *testing.T,handler http.Handler,timeout tim
 	t.Helper()
 	server:=httptest.NewServer(handler)
 	store,err:=NewKubernetesOwnerRecordStore(KubernetesOwnerRecordStoreConfig{
-		BaseURL:server.URL,Namespace:"blockmesh-system",BearerToken:"integration-token",
+		BaseURL:server.URL,Namespace:"blockmesh-system",BearerToken:"test-token",
 		HTTPClient:&http.Client{Transport:server.Client().Transport,Timeout:timeout},
 	})
 	if err!=nil{server.Close();t.Fatal(err)}
