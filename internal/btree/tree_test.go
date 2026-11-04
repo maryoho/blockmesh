@@ -3,6 +3,7 @@ package btree
 import (
 	"errors"
 	"io"
+	"sort"
 	"sync"
 	"testing"
 
