@@ -275,6 +275,7 @@ const persistentQueueFormatVersion = uint32(2)
 // accepted after recovery.
 func encodeRetireQueuePages(batches []RetireBatch, generation, pageCount uint64) ([][]byte, error) {
  if pageCount == 0 { return nil, ErrLifecycleUnformatted }
+ if pageCount>uint64(^uint32(0)) { return nil,ErrGeometry }
  total:=0
  for _,batch:=range batches {
   if len(batch.PageIDs)>math.MaxInt-total { return nil, ErrRetireQueueFull }
@@ -310,6 +311,7 @@ func readRetireQueuePages(store *Store) ([]RetireBatch,uint64,error) {
  sb:=store.Superblock()
  if sb.LifecyclePages<2 { return nil,0,ErrLifecycleUnformatted }
  pageCount:=sb.LifecyclePages-1
+ if pageCount>uint64(^uint32(0)) { return nil,0,ErrLifecycleCorrupt }
  // Backward compatibility for P3-3.5's single-page queue format. Older
  // builds may have reserved more than two lifecycle pages but only wrote the
  // first queue page; every remaining page must therefore still be blank.
