@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync"
 	"testing"
+
+	"blockmesh/internal/format"
 )
 
 type memdev struct {
@@ -94,4 +96,13 @@ func TestPublishRequiresIncreasingMappingSequence(t *testing.T) {
 	s, err := Format(d, Layout{VolumeID: "v", TotalPages: 16, ArenaStart: 2, ArenaPages: 14})
 	if err != nil { t.Fatal(err) }
 	if err = s.Publish(NoPage, 0); err == nil { t.Fatal("expected non-increasing sequence rejection") }
+}
+
+func TestLegacyFormatRefusesPoolV2Device(t *testing.T) {
+	d:=newMemdev(64)
+	sb,err:=format.NewSuperblock(0);if err!=nil{t.Fatal(err)}
+	if _,err=d.WriteAt(sb.Encode(),0);err!=nil{t.Fatal(err)}
+	if _,err=Format(d,Layout{VolumeID:"legacy",TotalPages:64,ArenaStart:2,ArenaPages:62});err==nil{
+		t.Fatal("legacy metastore format overwrote BMPOOL02 device")
+	}
 }
