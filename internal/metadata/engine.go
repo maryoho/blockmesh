@@ -35,7 +35,7 @@ type Config struct {
 	Fencer                               fence.Fencer
 }
 
-func Open(cfg Config) (*Engine, error) {
+func OpenEngine(cfg Config) (*Engine, error) {
 	if cfg.VolumeID == "" || cfg.NodeID == "" || cfg.StatePath == "" || cfg.WALPath == "" || cfg.TotalBlocks == 0 {
 		return nil, errors.New("incomplete engine config")
 	}
@@ -57,7 +57,7 @@ func Open(cfg Config) (*Engine, error) {
 		l.Close()
 		return nil, e
 	} else {
-		bm := allocator.New(cfg.TotalBlocks)
+		bm := allocator.NewBitmap(cfg.TotalBlocks)
 		en.state = diskState{Descriptor: Descriptor{VolumeID: cfg.VolumeID, MappingSequence: 0, RootGeneration: 0}, TotalBlocks: cfg.TotalBlocks, Bitmap: bm.Bytes()}
 		if e = en.persistLocked(); e != nil {
 			l.Close()
