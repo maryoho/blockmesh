@@ -1,6 +1,7 @@
 // Package metastore implements the fixed-LBA, 4 KiB-page metadata format and
-// process-local Metadata Arena allocation. Callers must persist new metadata
-// pages and Sync before publishing a new superblock root.
+// process-local Metadata Arena allocation. Callers may publish through the
+// legacy page-write/Sync path or commit page images and the root descriptor
+// together through a WAL Committer.
 package metastore
 
 import (
