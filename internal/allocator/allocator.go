@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
@@ -73,7 +74,7 @@ func (a *Allocator) AllocateOne(ctx context.Context, volumeLease lock.Lease, vol
 
 	base := a.Store.SB.BitmapOffset + uint64(ag)*format.AGBitmapStride
 	desc := make([]byte, format.PageSize)
-	if err = a.Store.Device().ReadAt(desc, int64(base)); err != nil {
+	if err = readDeviceAtFull(a.Store.Device(), desc, int64(base)); err != nil {
 		return 0, err
 	}
 	if binary.LittleEndian.Uint64(desc[0:8]) != bitmapDescriptorMagic || binary.LittleEndian.Uint32(desc[8:12]) != ag {
@@ -81,7 +82,7 @@ func (a *Allocator) AllocateOne(ctx context.Context, volumeLease lock.Lease, vol
 	}
 	seq := binary.LittleEndian.Uint64(desc[16:24])
 	bitmap := make([]byte, format.BitmapBytes)
-	if err = a.Store.Device().ReadAt(bitmap, int64(base+format.PageSize)); err != nil {
+	if err = readDeviceAtFull(a.Store.Device(), bitmap, int64(base+format.PageSize)); err != nil {
 		return 0, err
 	}
 	if crc32.Checksum(bitmap, castagnoli) != binary.LittleEndian.Uint32(desc[24:28]) {
@@ -174,4 +175,15 @@ func (a *Allocator) RecoverAll(ctx context.Context) (int, error) {
 		}
 	}
 	return replayed, nil
+}
+
+func readDeviceAtFull(r io.ReaderAt, p []byte, off int64) error {
+	n, err := r.ReadAt(p, off)
+	if err != nil && !(err == io.EOF && n == len(p)) {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
