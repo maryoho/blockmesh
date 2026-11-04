@@ -100,7 +100,11 @@ root publication acquires it so a reader cannot register on the old root
 between the generation snapshot and reclamation. Reader registration acquires
 the same barrier and joins at the current root. This barrier must be backed by
 the distributed lease/lock service; a process-local mutex is not sufficient.
-Every reader that can access the LUN must be represented in the table, and
+The Reader Table committer must also route all slot updates through one
+cluster-safe WAL commit service (for example, the metadata owner daemon).
+Independent per-node `wal.Journal` instances must not append to the same AG
+segment: their in-memory append positions are not coordinated across
+processes. Every reader that can access the LUN must be represented in the table, and
 Fenced state must only be written by the trusted SAN fencer. The lower-level
 `Collect(ReclaimProof)` remains a trusted integration API; callers can violate
 safety if they fabricate its proof or bypass the coordinator.
