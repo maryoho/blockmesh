@@ -367,6 +367,15 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 		images = append(images, PageImage{Offset: image.Offset, Data: append([]byte(nil), image.Data...)})
 	}
 
+	if s.sb.LifecyclePages != 0 {
+		if uint64(len(extra)) != s.sb.LifecyclePages {
+			return ErrPersistentArenaRequired
+		}
+		for page:=s.sb.LifecycleStart;page<s.sb.LifecycleStart+s.sb.LifecyclePages;page++ {
+			if _,ok:=seen[page];!ok { return fmt.Errorf("missing lifecycle after-image for page %d",page) }
+		}
+	}
+
 	next := s.sb
 	next.Generation++
 	next.RootPage = rootPage
