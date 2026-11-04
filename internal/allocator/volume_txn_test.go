@@ -25,7 +25,7 @@ func TestAllocateOneTxnPublishesAllMetadata(t *testing.T) {
  locks,err:=lock.NewFileLocker(t.TempDir()+"/locks"); if err!=nil { t.Fatal(err) }
  lease,err:=locks.Acquire(context.Background(),"volume:vol-atomic"); if err!=nil { t.Fatal(err) }; defer lease.Close()
  a,err:=allocator.New(store,locks); if err!=nil { t.Fatal(err) }
- off:=store.SB.MappingOffset
+ off:=store.SB.MappingOffset+format.PageSize
  physical,err:=a.AllocateOneTxn(context.Background(),lease,"vol-atomic",7,0,off,pair,func(old []byte,p uint64)([]byte,error){
   next:=append([]byte(nil),old...); copy(next[:8],[]byte("BMMAP001")); binary.LittleEndian.PutUint64(next[8:16],99); binary.LittleEndian.PutUint64(next[16:24],p); return next,nil
  })
@@ -34,5 +34,6 @@ func TestAllocateOneTxnPublishesAllMetadata(t *testing.T) {
  mapping,err:=store.ReadPage(off); if err!=nil { t.Fatal(err) }; if string(mapping[:8])!="BMMAP001" || binary.LittleEndian.Uint64(mapping[16:24])!=physical { t.Fatal("mapping not committed") }
  image:=make([]byte,format.PageSize); if n,e:=store.Device().ReadAt(image,int64(pair+format.PageSize)); e!=nil || n!=len(image) { t.Fatalf("read descriptor n=%d err=%v",n,e) }
  vd,err:=allocator.DecodeVolumeDescriptor(image); if err!=nil { t.Fatal(err) }
+ if vd.MappingRootOffset!=off { t.Fatalf("descriptor root=%d want=%d",vd.MappingRootOffset,off) }
  if vd.VolumeID!="vol-atomic" || vd.VolumeSequence!=2 || vd.Generation!=2 || vd.MappingRootOffset!=off || vd.BitmapSequence!=2 || vd.OwnerEpoch!=7 { t.Fatalf("unexpected descriptor: %+v",vd) }
 }
