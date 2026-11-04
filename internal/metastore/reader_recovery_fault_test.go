@@ -188,3 +188,65 @@ func TestP339TwoRecoveryControllersFenceOneReaderOnlyOnce(t *testing.T) {
 	if got := fenceCalls.Load(); got != 1 { t.Fatalf("same reader fenced %d times, want once", got) }
 	if got := p339ReadRecord(t, tableA); got.State != ReaderFenced { t.Fatalf("reader not durably fenced: %+v", got) }
 }
+
+
+func TestP339PRFencingFailureKeepsReaderGenerationPinned(t *testing.T) {
+	d, table, _, _, now := p339Fixture(t)
+	_ = d
+	fenceErr := errors.New("injected PR PREEMPT AND ABORT/path verification failure")
+	fencer := testFenceFunc(func(context.Context, string, string) error { return fenceErr })
+	controller := p339Controller(table, &testReaderLeaseProbe{}, fencer, now)
+	report, err := controller.RecoverOnce(context.Background())
+	if err == nil || report.Failed != 1 { t.Fatalf("PR failure must be reported: report=%+v err=%v", report, err) }
+	if got := p339ReadRecord(t, table); got.State != ReaderActive {
+		t.Fatalf("PR failure must leave reader generation-pinning: %+v", got)
+	}
+
+	fencer = testFenceFunc(func(context.Context, string, string) error { return nil })
+	controller.Fencer = fencer
+	report, err = controller.RecoverOnce(context.Background())
+	if err != nil || report.Fenced != 1 { t.Fatalf("successful retry did not fence reader: report=%+v err=%v", report, err) }
+	if got := p339ReadRecord(t, table); got.State != ReaderFenced { t.Fatalf("reader not durably fenced after retry: %+v", got) }
+}
+
+func TestP339DrainFailureRetainsRetireQueueAndRetries(t *testing.T) {
+	d := newMemdev(32)
+	store, err := Format(d, Layout{VolumeID: "p339-drain-retry", TotalPages: 32, ArenaStart: 2, ArenaPages: 12, LifecycleStart: 16, LifecyclePages: 2})
+	if err != nil { t.Fatal(err) }
+	if err = store.WritePage(Page{ID: 2, Type: 1, Generation: 1, Payload: []byte("old-root")}); err != nil { t.Fatal(err) }
+	if err = store.Sync(); err != nil { t.Fatal(err) }
+	if err = store.Publish(2, 1); err != nil { t.Fatal(err) }
+	if err = FormatLifecycle(store); err != nil { t.Fatal(err) }
+
+	committer := testCommitter{d: d}
+	coordinator := &testReaderCoordinator{}
+	arena, err := NewPersistentArena(store, []uint64{2}, committer, coordinator)
+	if err != nil { t.Fatal(err) }
+	table, err := NewReaderTable(store, 18, 2, committer, coordinator)
+	if err != nil { t.Fatal(err) }
+	reservation, err := arena.Reserve(1)
+	if err != nil { t.Fatal(err) }
+	newRoot := reservation.Pages()[0]
+	if err = arena.CommitPagesAndPublish(reservation,
+		[]Page{{ID: newRoot, Type: 1, Generation: 2, Payload: []byte("new-root")}},
+		[]uint64{newRoot}, newRoot, 2, 1, []uint64{2}); err != nil { t.Fatal(err) }
+	if err = reservation.Commit(); err != nil { t.Fatal(err) }
+
+	drain := &recordingMetadataDrain{err: errors.New("injected DM metadata I/O drain timeout")}
+	controller := &ReaderRecoveryController{
+		Table: table, Probe: &testReaderLeaseProbe{},
+		Fencer: testFenceFunc(func(context.Context, string, string) error { return nil }),
+		Arena: arena, Drain: drain,
+		Config: ReaderRecoveryConfig{HeartbeatTimeout: time.Minute},
+	}
+	report, err := controller.RecoverOnce(context.Background())
+	if err == nil || report.ReclaimedPages != 0 || len(arena.Pending()) == 0 {
+		t.Fatalf("failed drain must retain retire queue: report=%+v err=%v pending=%+v", report, err, arena.Pending())
+	}
+
+	drain.err = nil
+	report, err = controller.RecoverOnce(context.Background())
+	if err != nil || report.ReclaimedPages != 1 || len(arena.Pending()) != 0 {
+		t.Fatalf("drain retry did not reclaim pending page: report=%+v err=%v pending=%+v", report, err, arena.Pending())
+	}
+}
