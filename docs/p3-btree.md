@@ -100,5 +100,6 @@ error.
   currently published root. Reopen/reclamation with concurrent old-root
   readers is not production-safe until the persistent retire queue and reader
   fencing protocol are implemented.
-- This package is a metadata-engine building block; it is not yet wired into
-  the JSON reference `metadata.Engine`, WAL transaction layer, or DM target.
+- This package is a metadata-engine building block. Its COW page/root publication
+  can use the per-AG WAL, but it is not yet wired into the JSON reference
+  `metadata.Engine`, bitmap transactions, distributed lease/fencing layer, or DM target.
