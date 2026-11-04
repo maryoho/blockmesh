@@ -176,8 +176,10 @@ generation. Retry backoff is process-local; after controller restart, stale
 candidates are reconsidered immediately, which is safe because every attempt
 repeats the sanlock probe and PR verification.
 
-If Arena is configured, a successful fencing pass is followed by the
-configured MetadataIODrainBarrier and then CollectWithReaders. The drain
+If Arena is configured and the persistent Retire Queue is non-empty, every
+scan (including scans after controller restart) retries the configured
+MetadataIODrainBarrier and then CollectWithReaders. This recovers a crash
+between durable ReaderFenced and Retire Queue collection. The drain
 barrier must cover metadata-page IOs and must be an independently trusted
 cluster-wide proof; SAN PREEMPT AND ABORT alone is not sufficient. If no
 drain barrier is configured, fencing may complete but reclamation is skipped.
