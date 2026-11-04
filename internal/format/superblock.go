@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	SuperMagic     = uint64(0x424D4D4554413031) // BMMETA01
-	SuperVersion   = uint32(1)
+	SuperMagic     = uint64(0x424D504F4F4C3032) // BMPOOL02
+	SuperVersion   = uint32(2)
 	SuperCRCOffset = 160
 )
 
@@ -128,11 +128,45 @@ func DecodeSuperblock(b []byte) (Superblock, error) {
 	s.CheckpointSize = binary.LittleEndian.Uint64(b[144:152])
 	s.ReservedOffset = binary.LittleEndian.Uint64(b[152:160])
 	s.Generation = binary.LittleEndian.Uint64(b[168:176])
-	if s.PoolSize == 0 || s.TotalBlocks != s.PoolSize/BlockSize || s.AGCount == 0 {
-		return s, fmt.Errorf("invalid geometry in superblock")
-	}
-	if s.ReservedOffset > s.MetadataSize {
-		return s, fmt.Errorf("metadata regions exceed metadata size")
-	}
+	if err := s.Validate(); err != nil { return s, err }
 	return s, nil
+
+}
+
+// Validate rejects malformed or overlapping Pool metadata regions before any
+// offset from the on-disk superblock is used for I/O.
+func (s Superblock) Validate() error {
+	if s.Generation == 0 || s.PoolUUID == ([16]byte{}) || s.PoolSize == 0 ||
+		s.TotalBlocks != s.PoolSize/BlockSize || s.PoolSize%BlockSize != 0 ||
+		s.AGCount == 0 || s.AGSizeBlocks == 0 ||
+		uint64(s.AGSizeBlocks)*BlockSize == 0 ||
+		uint64(s.AGCount)*uint64(s.AGSizeBlocks) != s.TotalBlocks ||
+		s.MetadataSize < 2*PageSize || s.MetadataSize > uint64(^uint64(0)>>1) {
+		return fmt.Errorf("invalid Pool geometry")
+	}
+	regions := [][3]uint64{
+		{NodeTableOffset, s.NodeTableOffset, NodeTableSize},
+		{WALOffset, s.WALOffset, s.WALSize},
+		{BitmapOffset, s.BitmapOffset, s.BitmapSize},
+		{MappingOffset, s.MappingOffset, s.MappingSize},
+		{CheckpointOffset, s.CheckpointOffset, s.CheckpointSize},
+		{ReservedOffset, s.ReservedOffset, s.MetadataSize-s.ReservedOffset},
+	}
+	for _, r := range regions {
+		if r[1]%PageSize != 0 || r[1] > s.MetadataSize || r[2] > s.MetadataSize-r[1] {
+			return fmt.Errorf("metadata region %d outside or misaligned", r[0])
+		}
+	}
+	for i:=0;i<len(regions);i++ { for k:=i+1;k<len(regions);k++ {
+		a,b:=regions[i],regions[k]
+		if a[2]!=0 && b[2]!=0 && a[1]<b[1]+b[2] && b[1]<a[1]+a[2] {
+			return fmt.Errorf("metadata regions %d and %d overlap",a[0],b[0])
+		}
+	}}
+	if s.WALSize < uint64(s.AGCount)*WALSegmentSize ||
+		s.BitmapSize < uint64(s.AGCount)*AGBitmapStride ||
+		s.CheckpointSize < uint64(s.AGCount)*2*PageSize {
+		return fmt.Errorf("Pool metadata regions are undersized")
+	}
+	return nil
 }
