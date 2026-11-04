@@ -54,7 +54,11 @@ Before marking a failed Reader slot Fenced, use ReaderTable.FenceExpiredReader w
 - if the old reader still holds it, acquisition fails/times out and fencing does not begin;
 - if acquisition succeeds, the recovery controller holds that resource while it preempts the target's PR keys and persists ReaderFenced.
 
-This prevents a new process from reusing the same slot while fencing is in progress. The reader-set barrier serializes this operation against registration, root publication, generation updates, and retire collection.
+This prevents a new process from reusing the same slot while fencing is in progress. The slot lease is acquired before the reader-set barrier, matching the join
+path and avoiding lock inversion. Once the barrier is held, recovery rereads
+the slot and revalidates the heartbeat cutoff before issuing PR fencing. The
+barrier serializes fencing against registration, root publication, generation
+updates, and retire collection.
 
 ## 4. Multi-process AG WAL serialization
 
@@ -62,7 +66,12 @@ Do not share a long-lived wal.Journal object between processes. Its append offse
 
 Use wal.SharedCommitter on every node that can commit into the same AG WAL. It acquires one exclusive sanlock resource for that AG, opens a fresh Journal (which reloads the checkpoint descriptor and replays committed records), then commits and releases the resource. Checkpoint and recovery use the same lock. Every process must use the same resource name for the same AG. Do not mix SharedCommitter and direct Journal.Commit against one AG segment.
 
-Use a different sanlock resource for the reader-set barrier and for each AG WAL lock. Lock ordering in metadata paths is reader-set barrier first, AG WAL resource second.
+Use a different sanlock resource for the reader-set barrier and for each AG WAL lock. Lock ordering for reader-session and recovery paths is slot sanlock lease first,
+reader-set barrier second, AG WAL resource third. Recovery must acquire the
+slot lease before the reader-set barrier, matching Join/Heartbeat/Close; the
+reverse order can deadlock a joining reader against its recovery worker.
+Root publication and collection take the reader-set barrier before the AG
+WAL lock because they do not acquire a reader slot lease.
 
 ## 5. Reclamation sequence
 
