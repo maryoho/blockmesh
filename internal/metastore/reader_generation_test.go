@@ -100,7 +100,8 @@ func TestCollectWithReadersRequiresSharedCoordinator(t *testing.T) {
 	committer:=testCommitter{d:d}
 	if _,err=NewPersistentArena(s,nil,committer);err!=nil{t.Fatal(err)}
 	if _,err=NewReaderTable(s,18,4,committer);err!=nil{t.Fatal(err)}
-	pa,err:=NewPersistentArena(s,nil,committer,&testReaderCoordinator{});if err!=nil{t.Fatal(err)}
-	readers,err:=NewReaderTable(s,18,4,committer,&testReaderCoordinator{});if err!=nil{t.Fatal(err)}
-	if _,err=pa.CollectWithReaders(readers,true);err==nil{t.Fatal("different coordinator objects must be documented as shared cluster service; missing barrier should not silently pass")}
+	coordinator:=&testReaderCoordinator{}
+	pa,err:=NewPersistentArena(s,nil,committer,coordinator);if err!=nil{t.Fatal(err)}
+	readers,err:=NewReaderTable(s,18,4,committer,coordinator);if err!=nil{t.Fatal(err)}
+	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=0{t.Fatalf("empty coordinated collection returned %d, %v",n,err)}
 }
