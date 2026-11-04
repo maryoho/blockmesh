@@ -95,6 +95,10 @@ func NewReaderTable(store *Store, startPage uint64, slots uint32, committer Comm
 	}
 	var coordinator ReaderCoordinator
 	if len(coordinators)==1 { coordinator=coordinators[0] }
+	if coordinator!=nil {
+		clusterCommitter,ok:=committer.(ClusterSafeCommitter)
+		if !ok || !clusterCommitter.ClusterSafe() { return nil,ErrClusterSafeCommitterRequired }
+	}
 	return &ReaderTable{store:store,startPage:startPage,slots:slots,committer:committer,coordinator:coordinator},nil
 }
 
