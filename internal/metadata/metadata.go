@@ -92,32 +92,23 @@ func InitDevice(d device.Device, dataStartSector uint64, force bool) error {
 	// Volume identities and checkpoint descriptors are Pool-scoped. Clear
 	// them before publishing the new Pool Superblocks.
 	if err := zeroRegion(d, format.NodeTableOffset, format.NodeTableSize); err != nil { return err }
+	if err := zeroRegion(d, format.WALOffset, format.WALSize); err != nil { return err }
 	if err := zeroRegion(d, format.CheckpointOffset, format.CheckpointSize); err != nil { return err }
 	sb, err := format.NewSuperblock(dataStartSector)
 	if err != nil {
-		return err
-	}
-	if err = writeAtFull(d, sb.Encode(), int64(format.SuperAOffset)); err != nil {
-		return err
-	}
-	if err = d.Sync(); err != nil {
-		return err
-	}
-	sb.Generation = 2
-	if err = writeAtFull(d, sb.Encode(), int64(format.SuperBOffset)); err != nil {
-		return err
-	}
-	if err = d.Sync(); err != nil {
 		return err
 	}
 	// Initialize every AG descriptor and its eight 4KiB bitmap data pages.
 	for ag := uint32(0); ag < format.AGCount; ag++ {
 		base := format.BitmapOffset + uint64(ag)*format.AGBitmapStride
 		bitmap := make([]byte, format.BitmapBytes)
-		if err = writeBitmap(d, ag, base, bitmap, 1); err != nil {
-			return err
-		}
+		if err = writeBitmap(d, ag, base, bitmap, 1); err != nil { return err }
 	}
+	// Publish the Pool Superblock pair only after every Pool-owned region is initialized.
+	if err = writeAtFull(d, sb.Encode(), int64(format.SuperAOffset)); err != nil { return err }
+	if err = d.Sync(); err != nil { return err }
+	sb.Generation = 2
+	if err = writeAtFull(d, sb.Encode(), int64(format.SuperBOffset)); err != nil { return err }
 	return d.Sync()
 }
 
