@@ -19,6 +19,14 @@ type SanlockReaderCoordinator struct {
 }
 
 func (c *SanlockReaderCoordinator) LockReaderSet(volumeID string) (func(), error) {
+	timeout := 30 * time.Second
+	if c != nil && c.Timeout > 0 { timeout = c.Timeout }
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.LockReaderSetContext(ctx, volumeID)
+}
+
+func (c *SanlockReaderCoordinator) LockReaderSetContext(parent context.Context, volumeID string) (func(), error) {
 	if c == nil || c.Locker == nil || c.ResourceForVolume == nil {
 		return nil, ErrReaderCoordinatorRequired
 	}
@@ -26,9 +34,9 @@ func (c *SanlockReaderCoordinator) LockReaderSet(volumeID string) (func(), error
 	if resource == "" { return nil, errors.New("empty sanlock reader-set resource") }
 	timeout := c.Timeout
 	if timeout <= 0 { timeout = 30 * time.Second }
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	release, err := c.Locker.Lock(ctx, resource)
-	cancel()
 	if err != nil { return nil, err }
 	var once sync.Once
 	return func() { once.Do(func() { _ = release() }) }, nil
