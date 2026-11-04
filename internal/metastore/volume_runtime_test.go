@@ -131,6 +131,8 @@ func TestVolumeRuntimeDrainFailureRetainsResourcesForRetry(t *testing.T) {
 	waitRuntimeRecovery(t,b)
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err==nil{t.Fatal("expected drain failure")}
+	if got:=m.ActiveVolumes();len(got)!=0{t.Fatalf("stopping runtime reported active: %v",got)}
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadOnly));!errors.Is(err,ErrVolumeRuntimeStopping){t.Fatalf("activation during pending cleanup: %v",err)}
 	for _,event:=range b.snapshot(){if event=="metadata-close"||event=="device-close"||event=="reader-close"{t.Fatalf("resources released before successful drain: %v",b.snapshot())}}
 	b.mu.Lock();b.drainErr=nil;b.mu.Unlock()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
