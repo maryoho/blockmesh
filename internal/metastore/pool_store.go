@@ -80,6 +80,24 @@ func validatePoolStoreGeometry(sb Superblock, pool format.Superblock, index uint
 	return nil
 }
 
+// ReaderTableRange returns the fixed per-Volume Reader Table extent. The
+// range is the final ReaderTablePages of this Volume's bootstrap slot; old
+// descriptors that consumed the entire slot do not have this facility.
+func (s *Store) ReaderTableRange() (uint64, uint32, error) {
+	if s == nil || !s.poolBacked { return 0, 0, ErrGeometry }
+	reservedBytes := s.poolSB.MetadataSize - s.poolSB.ReservedOffset
+	slotBytes := (reservedBytes / uint64(format.MaxVolumeDescriptors)) / PageSize * PageSize
+	slotPages := slotBytes / PageSize
+	slotStart := s.poolSB.ReservedOffset/PageSize + uint64(s.volumeIndex)*slotPages
+	if slotPages < format.ReaderTablePages { return 0, 0, ErrGeometry }
+	start := slotStart + slotPages - format.ReaderTablePages
+	if start < s.sb.ArenaStart+s.sb.ArenaPages { return 0, 0, ErrGeometry }
+	if s.sb.LifecyclePages != 0 && start < s.sb.LifecycleStart+s.sb.LifecyclePages {
+		return 0, 0, ErrGeometry
+	}
+	return start, uint32(format.ReaderTablePages), nil
+}
+
 func readPoolVolumeDescriptor(dev Device, pool format.Superblock, pair uint64, expected string) (format.VolumeDescriptor, uint64, error) {
 	var best format.VolumeDescriptor
 	var bestSlot uint64
