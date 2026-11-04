@@ -11,6 +11,10 @@ checkpoint and persistent Retire Queue. Existing layouts with
 
 The lifecycle pages are initialized explicitly with
 `metastore.FormatLifecycle(store)` while the device is exclusively owned.
+When converting an existing volume from the process-local Arena, first stop
+all writers, fence every old reader, drain all I/O, and perform an offline
+reachability/reclamation pass. Initializing an empty Retire Queue cannot
+reconstruct retirement records that were previously only in process memory.
 The two 4 KiB pages contain:
 - `BMARNA01`: lifecycle generation and the root Mapping Sequence covered by
   the checkpoint.
@@ -67,7 +71,10 @@ space. A future extension should use a multi-page COW queue or segmented
 retirement log.
 
 The lifecycle checkpoint reconstructs page state from the published tree plus
-retired pages rather than persisting a full free bitmap. This is safe for the
+retired pages rather than persisting a full free bitmap. The allocator cursor
+and in-flight reservations are volatile; after restart the allocator rebuilds
+its Live set from durable reachability and the Retire Queue, and treats all
+other Arena pages as Free. This is safe for the
 current B+Tree-owned metadata Arena; additional metadata object types must be
 included in the root reachability walk or registered as pinned allocations
 before they can share this Arena.
