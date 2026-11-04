@@ -21,7 +21,7 @@ func TestRetireQueueRequiresGenerationIODrainAndFencing(t *testing.T) {
 	if n, err := q.Collect(a, ReclaimProof{SafeGeneration: 0, IOsDrained: true, FencingConfirmed: true}); err != nil || n != 0 {
 		t.Fatalf("generation pin should retain pages: released=%d err=%v", n, err)
 	}
-	if got := a.Stats(); got.LivePages != 2 { t.Fatalf("pages released while pinned: %+v", got) }
+	if got := a.Stats(); got.LivePages != 3 { t.Fatalf("pages released while pinned: %+v", got) }
 	n, err := q.Collect(a, ReclaimProof{SafeGeneration: 1, IOsDrained: true, FencingConfirmed: true})
 	if err != nil || n != 1 { t.Fatalf("collect: released=%d err=%v", n, err) }
 	if got := a.Stats(); got.LivePages != 2 || got.FreePages != 8 { t.Fatalf("unexpected arena stats: %+v", got) }
