@@ -87,8 +87,10 @@ scheduling is not included.
 - Checkpoint is safe only because this implementation syncs all target
   after-images before Commit returns. A future asynchronous apply pipeline
   must track an explicit durable applied-LSN before advancing the checkpoint.
-- The generic `internal/metastore.Store` / COW B+Tree path is not yet routed
-  through this Journal. Do not treat B+Tree Put/Delete as WAL-protected.
+- `btree.Open(store, journal)` routes COW page after-images and the inactive
+  root superblock descriptor through one WAL transaction. `btree.Open(store)`
+  remains a compatibility path without WAL protection. Bitmap, Volume Descriptor,
+  retire-queue and distributed owner-epoch updates are not yet integrated.
 - WAL records are not yet bound to `volume_id`, `volume_sequence`, or
   `owner_epoch`; distributed fencing and multi-writer exclusion remain
   integration work.
@@ -105,3 +107,33 @@ scheduling is not included.
 The WAL tests cover committed redo, automatic recovery on open, ignoring an
 Intent without Commit, checkpoint bank switching, recovery after reopening,
 startup repair after an interrupted descriptor mirror, survival of a single descriptor-slot corruption, WAL-full checkpoint retry, and rejection of missing descriptors when either bank contains data.
+
+## P3-3.3: COW B+Tree root publication
+
+The B+Tree can be opened with its matching per-AG Journal:
+`tree, err := btree.Open(store, journal)`. The Journal must be opened and
+recovered before `metastore.Open` so the Store observes any root descriptor
+replayed during recovery.
+
+A COW mutation encodes dirty nodes as complete 4 KiB page after-images in
+bottom-up order. The inactive metastore superblock containing the new root and
+mapping sequence is appended as the final after-image. `Journal.CommitImages`
+adapts these images to the redo WAL. The durable order remains Intent sync,
+Commit sync, then application and sync. Since the root descriptor is part of
+the same transaction and is applied last, recovery cannot expose a root whose
+new COW pages were not also committed.
+
+The two root descriptor slots are at offsets 0 and 4096. The WAL accepts an
+update to either reserved slot only when the image has the metastore magic and
+a valid CRC32C. Ordinary metadata page updates remain restricted to the arena
+and cannot overlap WAL/checkpoint regions.
+
+`ErrJournalFull` is a pre-commit result and allows the COW page reservation to
+be aborted. Other I/O errors have an uncertain commit outcome; the process
+must stop using its current Store/Tree, reopen the Journal for recovery, then
+reopen the Store and Tree. The volatile Arena is reconstructed from the
+recovered root.
+
+This stage does not yet make retirement durable. Old COW pages remain in the
+process-local retire queue, and they must not be reclaimed until the later
+persistent retire queue + reader-generation + fencing work is complete.
