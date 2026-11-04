@@ -86,9 +86,11 @@ error.
 - `Get` still uses the sorted in-memory item cache, and `Put`/`Delete`
   still copy that slice to maintain `Snapshot`. Disk-page write amplification
   is O(tree height), but CPU/memory mutation cost remains O(N).
-- After successful root publication, pages present in the old reachable graph
-  but absent from the new graph are placed in a process-local retire queue with
-  the old mapping sequence as their retire generation. `RetireQueue.Collect`
+- After successful root publication, pages proven absent from the new graph are
+  placed in a process-local retire queue with the old mapping sequence as their
+  retire generation. If an unchanged internal subtree was not loaded, the current
+  implementation conservatively retains the old page set rather than risk retiring
+  descendants that remain reachable. `RetireQueue.Collect`
   requires `SafeGeneration > RetireGeneration`, drained old I/O, and explicit
   fencing confirmation. Heartbeat expiry alone is not a fencing proof.
 - The retire queue is volatile and is not crash-safe. Until WAL persists retire
