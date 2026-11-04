@@ -96,12 +96,12 @@ scheduling is not included.
   two 8 MiB banks. This is an on-disk format evolution. Non-empty pre-P3-3.2
   segments without checkpoint descriptors fail closed and need an explicit
   offline migration/format step.
-- Checkpoint descriptors currently reserve the first 80 KiB of the 64 MiB
-  Checkpoint region for 10 AGs. The rest remains reserved for future durable
+- Checkpoint descriptors currently reserve the first 800 KiB of the 64 MiB
+  Checkpoint region for 100 AGs. The rest remains reserved for future durable
   checkpoint payloads / metadata snapshots.
 
 ## Tests
 
 The WAL tests cover committed redo, automatic recovery on open, ignoring an
 Intent without Commit, checkpoint bank switching, recovery after reopening,
-and fallback to the older descriptor when the newest descriptor is torn.
+startup repair after an interrupted descriptor mirror, and survival of a single descriptor-slot corruption.
