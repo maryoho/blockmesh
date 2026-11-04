@@ -260,12 +260,14 @@ func (t *Tree) RootPage() uint64 {
 
 func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
 
-// RetireQueue exposes process-local retired metadata pages. Collect only after
-// reader generations have advanced, old I/O has drained, and fencing is proven.
-func (t *Tree) RetireQueue() *metastore.RetireQueue { return t.retire }
+// RetiredPages returns a snapshot of process-local retirement batches.
+func (t *Tree) RetiredPages() []metastore.RetireBatch { return t.retire.Pending() }
 
 // CollectRetired applies an externally established reader/fencing proof.
+// It serializes reclamation with root publication in this Tree instance.
 func (t *Tree) CollectRetired(proof metastore.ReclaimProof) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.retire.Collect(t.arena, proof)
 }
 
