@@ -144,7 +144,12 @@ func (d *BlockDevice) Sync() error {
 }
 
 func (d *BlockDevice) Size() int64 {
-	if d == nil || d.closed {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
 		return 0
 	}
 	return d.size
