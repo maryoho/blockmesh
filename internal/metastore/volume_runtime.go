@@ -166,7 +166,8 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	dev, err := m.backend.OpenDevice(ctx, spec)
 	if err != nil {
 		if dev != nil {
-			return errors.Join(fmt.Errorf("open metadata device for %s: %w", spec.VolumeID, err), dev.Close())
+			rt.device = dev
+			return fail(fmt.Errorf("open metadata device for %s: %w", spec.VolumeID, err))
 		}
 		return fmt.Errorf("open metadata device for %s: %w", spec.VolumeID, err)
 	}
