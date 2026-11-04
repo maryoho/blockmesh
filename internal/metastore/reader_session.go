@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 
-	"blockmesh/internal/fence"
 	"blockmesh/internal/volume"
 )
 
@@ -64,23 +63,13 @@ func (s *ReaderSession) AdvanceGeneration(newGeneration uint64, oldGenerationIOs
 	return nil
 }
 
+// CloseDrained persists Closed only after the caller has stopped new reads
+// and drained every in-flight I/O, then releases the sanlock reader resource.
 func (s *ReaderSession) CloseDrained(ioDrained bool) error {
 	if s == nil { return nil }
 	s.mu.Lock(); defer s.mu.Unlock()
 	if s.closed { return nil }
 	if err := s.table.CloseDrained(s.slot,s.nodeID,s.bootID,s.epoch,ioDrained); err != nil { return err }
-	s.closed = true
-	return s.lease.Close()
-}
-
-// FenceAndClose is intended for a trusted recovery controller, not the
-// reader being fenced. It marks the slot Fenced only after the configured
-// SAN fencer has revoked and verified all target registrations.
-func (s *ReaderSession) FenceAndClose(ctx context.Context, fencer fence.Fencer) error {
-	if s == nil { return nil }
-	s.mu.Lock(); defer s.mu.Unlock()
-	if s.closed { return nil }
-	if err := s.table.FenceAndClose(ctx,s.slot,s.nodeID,s.bootID,s.epoch,fencer); err != nil { return err }
 	s.closed = true
 	return s.lease.Close()
 }
