@@ -2,10 +2,17 @@ package metastore
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"blockmesh/internal/fence"
 )
+
+type testReaderCoordinator struct { mu sync.Mutex }
+func (c *testReaderCoordinator) LockReaderSet(string) (func(),error) {
+	c.mu.Lock()
+	return c.mu.Unlock,nil
+}
 
 type recordingFencer struct { called bool }
 func (f *recordingFencer) FenceNode(_ context.Context,nodeID,bootID string) error {
@@ -20,7 +27,8 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 	if err!=nil {t.Fatal(err)}
 	if err=s.Publish(NoPage,12);err!=nil{t.Fatal(err)}
 	committer:=testCommitter{d:d}
-	readers,err:=NewReaderTable(s,18,4,committer);if err!=nil{t.Fatal(err)}
+	coordinator:=&testReaderCoordinator{}
+	readers,err:=NewReaderTable(s,18,4,committer,coordinator);if err!=nil{t.Fatal(err)}
 	if err=readers.Register(0,"node-a","boot-a",1,12);err!=nil{t.Fatal(err)}
 	if err=readers.Register(1,"node-b","boot-b",1,12);err!=nil{t.Fatal(err)}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("safe generation=%d err=%v",got,err)}
@@ -82,3 +90,17 @@ func TestReaderTableRejectsOverlappingReservedRegions(t *testing.T) {
 }
 
 var _ fence.Fencer = (*recordingFencer)(nil)
+
+func TestCollectWithReadersRequiresSharedCoordinator(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-coordinator",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil{t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	if _,err=NewPersistentArena(s,nil,committer);err!=nil{t.Fatal(err)}
+	if _,err=NewReaderTable(s,18,4,committer);err!=nil{t.Fatal(err)}
+	pa,err:=NewPersistentArena(s,nil,committer,&testReaderCoordinator{});if err!=nil{t.Fatal(err)}
+	readers,err:=NewReaderTable(s,18,4,committer,&testReaderCoordinator{});if err!=nil{t.Fatal(err)}
+	if _,err=pa.CollectWithReaders(readers,true);err==nil{t.Fatal("different coordinator objects must be documented as shared cluster service; missing barrier should not silently pass")}
+}
