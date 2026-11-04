@@ -57,7 +57,7 @@ before pages become Free in memory.
 
 ## Reader Generation Table
 
-`metastore.NewReaderTable(store, startPage, slots, committer)` creates a
+`metastore.NewReaderTable(store, startPage, slots, committer, readerCoordinator)` creates a
 persistent table with one dedicated 4 KiB page per reader slot. The caller
 must reserve this range outside the Arena and lifecycle region and must also
 ensure it does not overlap WAL/checkpoint regions (the WAL validates that
@@ -77,10 +77,10 @@ before it begins issuing reads; it cannot join using a stale root generation.
   stopped new reads and drained all I/O.
 
 A new process instance must use a new BootID and a strictly higher Epoch before
-reusing a fenced slot. Heartbeats refresh the local redundant superblock view
+reusing a fenced or gracefully Closed slot. Heartbeats refresh the local redundant superblock view
 before accepting a new Root Generation; they may advance that generation but
 cannot move it backwards. `SafeGeneration()` returns the minimum Root Generation across
-all non-fenced slots, or MaxUint64 if there are none.
+all Active/Leaving slots, or MaxUint64 if there are none.
 
 Use `FenceAndClose` to call the configured `fence.Fencer`; the durable slot
 is marked Fenced only after fencing succeeds. A heartbeat timeout alone never
