@@ -77,7 +77,9 @@ func decodeLifecycleState(b []byte)(uint64,uint64,error){
   crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) {return 0,0,ErrLifecycleCorrupt}
  for _,v:=range b[12:16]{if v!=0{return 0,0,ErrLifecycleCorrupt}}
  for _,v:=range b[32:PageSize-4]{if v!=0{return 0,0,ErrLifecycleCorrupt}}
- return binary.LittleEndian.Uint64(b[16:24]),binary.LittleEndian.Uint64(b[24:32]),nil
+ generation:=binary.LittleEndian.Uint64(b[16:24])
+ if generation==0{return 0,0,ErrLifecycleCorrupt}
+ return generation,binary.LittleEndian.Uint64(b[24:32]),nil
 }
 
 func encodeRetireQueue(batches []RetireBatch,generation uint64)([]byte,error){
@@ -100,6 +102,7 @@ func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
  count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,0,ErrLifecycleCorrupt}
  for _,v:=range b[24:lifecycleHeaderSize]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
  queueGeneration:=binary.LittleEndian.Uint64(b[16:24])
+ if queueGeneration==0{return nil,0,ErrLifecycleCorrupt}
  batches:=make([]RetireBatch,0);index:=make(map[uint64]int);seen:=make(map[uint64]struct{},count)
  off:=lifecycleHeaderSize;sb:=store.Superblock()
  for i:=0;i<count;i++ {
