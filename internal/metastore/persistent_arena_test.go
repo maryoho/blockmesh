@@ -58,5 +58,5 @@ func TestPersistentArenaFailsClosedOnLifecycleCorruption(t *testing.T){
 func TestPersistentRetireQueueCapacityIsBounded(t *testing.T){
  ids:=make([]uint64,MaxPersistentRetiredPages+1)
  for i:=range ids{ids[i]=uint64(i+2)}
- if _,err:=encodeRetireQueue([]RetireBatch{{RetireGeneration:1,PageIDs:ids}});!errors.Is(err,ErrRetireQueueFull){t.Fatalf("expected bounded queue error, got %v",err)}
+ if _,err:=encodeRetireQueue([]RetireBatch{{RetireGeneration:1,PageIDs:ids}},1);!errors.Is(err,ErrRetireQueueFull){t.Fatalf("expected bounded queue error, got %v",err)}
 }
