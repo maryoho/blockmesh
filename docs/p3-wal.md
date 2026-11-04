@@ -1,66 +1,97 @@
-# P3-3 WAL journal (initial implementation)
+# P3-3 WAL journal
 
-## Scope
+## P3-3.1: per-AG redo journal
 
-`internal/wal.Journal` is the first fixed-LBA redo-WAL implementation for the
-pool layout in `internal/format`. It is separate from the older generic
-`internal/metastore.Store` test format; the two superblock types/layouts are
-not interchangeable.
-
-Each allocation group owns one fixed 16 MiB segment:
+`internal/wal.Journal` implements a fixed-LBA redo WAL. Each AG owns one
+16 MiB segment at:
 
 `WALOffset + AGID * WALSegmentSize`
 
-Records are little-endian and protected by CRC32C. An Intent contains a list
-of complete 4 KiB page after-images. A Commit record contains the checksum of
-the Intent payload. A transaction is committed only after both records have
-been written and the metadata device has been synced after the Commit record.
+Records are little-endian and protected by CRC32C. An Intent contains complete
+4 KiB page after-images. A Commit record contains the checksum of the Intent
+payload. A transaction is committed only after the Commit record is synced.
 
-## Commit ordering
+Commit ordering:
 
-1. Validate all page offsets, alignment, image sizes, duplicate offsets, and
-   that updates do not overlap the WAL or superblock pages.
-2. Append the Intent record and call `Device.Sync()`.
-3. Append the Commit record and call `Device.Sync()`.
-4. Apply every after-image to its target metadata page.
-5. Call `Device.Sync()` before returning success.
+1. Validate page offsets, alignment, image sizes, duplicate offsets, and
+   protected metadata regions.
+2. Append Intent and sync.
+3. Append Commit and sync.
+4. Apply all after-images and sync.
 
-An error after the Intent/Commit write poisons the in-memory Journal. The
-caller must stop issuing transactions and reopen/recover the journal. It must
-not assume that an I/O error means the transaction did not commit: if the
-Commit record reached stable storage, recovery will replay it.
+An error after WAL I/O poisons the in-memory Journal. The caller must stop
+issuing transactions and reopen/recover; an I/O error does not prove that a
+Commit record failed to reach stable storage.
 
-## Recovery
+Opening a Journal performs recovery before returning. Committed after-images
+are replayed idempotently; an Intent without a matching Commit is ignored.
+Complete-record framing/CRC errors fail closed. A torn final record is treated
+as an incomplete tail.
 
-Opening a Journal scans the selected AG segment and replays every valid
-committed transaction before returning. Redo is idempotent. An Intent without
-a matching Commit is ignored. A short final header or payload is treated as a
-torn tail and is not replayed; a checksum or framing error in a complete
-record is treated as corruption and fails closed.
+## P3-3.2: dual-bank checkpoint rotation
 
-The WAL is not allowed to overwrite old records. When the fixed segment is
-full, Commit returns `ErrJournalFull`; the caller must stop writes. This
-initial slice deliberately does not implement checkpoint-based segment
-recycling yet. Recycling must only be added together with a durable,
-redundant checkpoint descriptor and crash-safe segment switching.
+Each AG's 16 MiB WAL segment is divided into two 8 MiB banks. The Checkpoint
+region reserves two 4 KiB descriptor slots per AG at:
 
-## Current boundaries
+`CheckpointOffset + (AGID * 2 + slot) * 4096`
+
+A descriptor contains magic, format version, AG ID, monotonically increasing
+generation, highest checkpointed transaction ID, active bank, and CRC32C.
+On open, the highest-generation valid descriptor wins. A torn/invalid newer
+slot falls back to the older valid slot. If both slots are blank, the Journal
+initializes generation 1 / bank 0 only when the WAL segment is also blank.
+Existing non-empty WAL without descriptors is rejected with
+`ErrCheckpointMissing`; it must not be silently interpreted as an empty log.
+
+`Journal.Checkpoint()` performs the following protocol under the journal
+mutex:
+
+1. Select the inactive bank.
+2. Zero the entire inactive 8 MiB bank and sync it.
+3. Write the alternate checkpoint descriptor with generation + 1, the last
+   fully-applied transaction ID, and the new active bank.
+4. Sync the descriptor.
+5. Switch the in-memory append position to the new bank.
+
+The order is deliberate. Before step 4 is durable, the old descriptor still
+selects the untouched old active bank. The inactive bank may be cleared
+because it is not selected. After step 4, the new descriptor selects a bank
+that was already fully cleared and synced. Thus recovery always has one valid
+descriptor pointing at a complete WAL bank, even if power fails during
+rotation. The previous descriptor remains intact as fallback.
+
+The checkpoint transaction ID advances only across transactions whose
+after-images were applied and synced by Commit (or replayed and synced by
+Recover). Recovery scans only the selected bank; all transactions at or below
+the checkpoint high-water mark are represented by already-durable metadata
+pages and need not be replayed.
+
+A full active bank returns `ErrJournalFull`. The caller should quiesce
+transactions and call Checkpoint, then retry. Checkpoint is explicit in this
+stage; automatic background checkpoint scheduling is not included.
+
+## Important boundaries
 
 - The Journal is per-AG and serializes transactions within one process.
-- The caller must hold the relevant AG/owner locks and fence stale writers.
-- The caller is responsible for publishing the root/descriptor only after
-  the committed after-images have been applied and synced.
-- This initial implementation does not yet bind a WAL record to
-  `volume_id`, `volume_sequence`, or `owner_epoch`; those fields and
-  distributed writer fencing are part of the next integration step.
+  The caller must hold AG/owner locks and fence stale writers.
+- Checkpoint is safe only because this implementation syncs all target
+  after-images before Commit returns. A future asynchronous apply pipeline
+  must track an explicit durable applied-LSN before advancing the checkpoint.
 - The generic `internal/metastore.Store` / COW B+Tree path is not yet routed
-  through this Journal. Do not treat the current B+Tree API as transactionally
-  WAL-protected until that integration is complete.
-- Checkpoint rotation, crash fault injection at every write boundary, bitmap
-  transaction integration, and persistent allocator recovery remain open
-  work.
+  through this Journal. Do not treat B+Tree Put/Delete as WAL-protected.
+- WAL records are not yet bound to `volume_id`, `volume_sequence`, or
+  `owner_epoch`; distributed fencing and multi-writer exclusion remain
+  integration work.
+- The existing 16 MiB on-disk segment is retained; its interpretation is now
+  two 8 MiB banks. This is an on-disk format evolution. Non-empty pre-P3-3.2
+  segments without checkpoint descriptors fail closed and need an explicit
+  offline migration/format step.
+- Checkpoint descriptors currently reserve the first 80 KiB of the 64 MiB
+  Checkpoint region for 10 AGs. The rest remains reserved for future durable
+  checkpoint payloads / metadata snapshots.
 
 ## Tests
 
-`internal/wal` tests cover durable redo and verify that opening a journal
-replays committed transactions while ignoring an Intent without Commit.
+The WAL tests cover committed redo, automatic recovery on open, ignoring an
+Intent without Commit, checkpoint bank switching, recovery after reopening,
+and fallback to the older descriptor when the newest descriptor is torn.
