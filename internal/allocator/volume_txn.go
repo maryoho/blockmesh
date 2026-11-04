@@ -69,7 +69,7 @@ func DecodeVolumeDescriptor(b []byte)(VolumeDescriptor,error){
 
 func readVolumeDescriptorPair(store MetadataStore,pairOffset uint64,volumeID string)(VolumeDescriptor,uint64,error){
  sb:=store.Superblock();nodeEnd:=sb.NodeTableOffset+format.NodeTableSize
- if pairOffset<sb.NodeTableOffset||pairOffset%format.PageSize!=0||pairOffset>nodeEnd||VolumeDescriptorPairSize>nodeEnd-pairOffset{return VolumeDescriptor{},0,fmt.Errorf("Volume Descriptor pair outside Node Table region")}
+ if pairOffset<sb.NodeTableOffset||(pairOffset-sb.NodeTableOffset)%VolumeDescriptorPairSize!=0||pairOffset>nodeEnd||VolumeDescriptorPairSize>nodeEnd-pairOffset{return VolumeDescriptor{},0,fmt.Errorf("Volume Descriptor pair outside Node Table region")}
  var best VolumeDescriptor;var bestSlot uint64;found:=false
  for slot:=uint64(0);slot<2;slot++{
   b:=make([]byte,format.PageSize);if err:=readDeviceAtFull(store.Device(),b,int64(pairOffset+slot*format.PageSize));err!=nil{return VolumeDescriptor{},0,err}
