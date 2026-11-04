@@ -10,7 +10,10 @@ import (
 	"sync"
 )
 
-var ErrVolumeRuntimeStopping = errors.New("volume runtime is stopping or awaiting cleanup")
+var (
+	ErrVolumeRuntimeStopping = errors.New("volume runtime is stopping or awaiting cleanup")
+	ErrVolumeRuntimeConflict = errors.New("volume runtime is already active with a different identity or mode")
+)
 
 // VolumeRuntimeMode determines which distributed ownership primitive is
 // acquired before the fixed-LBA metadata is opened.
@@ -153,6 +156,9 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	if current, exists := m.runtimes[spec.VolumeID]; exists {
 		if current.stopping {
 			return ErrVolumeRuntimeStopping
+		}
+		if current.spec != spec {
+			return ErrVolumeRuntimeConflict
 		}
 		return nil
 	}
