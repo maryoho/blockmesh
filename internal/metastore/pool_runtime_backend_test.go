@@ -39,6 +39,7 @@ func validPoolRuntimeConfig() PoolRuntimeConfig {
 		RecoveryConfig: ReaderRecoveryConfig{HeartbeatTimeout: 5 * time.Second},
 		LivePages: func(*Store) ([]uint64, error) { return nil, nil },
 		OnReaderLeaseLost: func(context.Context, VolumeRuntimeSpec, error) {},
+		OnOwnerLeaseLost: func(context.Context, VolumeRuntimeSpec, error) error { return nil },
 		EnableRequests: func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error { return nil },
 		StopRequests: func(context.Context, string) error { return nil },
 		DrainMetadataIO: func(context.Context, string) error { return nil },
