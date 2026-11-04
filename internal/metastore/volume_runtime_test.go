@@ -187,10 +187,11 @@ func (b *runtimeOwnerLossBackend) AcquireOwnerLease(context.Context, VolumeRunti
 }
 func (b *runtimeOwnerLossBackend) HandleOwnerLeaseLost(ctx context.Context, spec VolumeRuntimeSpec, cause error) error {
 	b.add("owner-fail-stop")
-	close(b.lossHandled)
 	stopErr:=b.StopRequests(ctx,spec.VolumeID)
 	drainErr:=b.DrainMetadataIO(ctx,spec.VolumeID)
-	return errors.Join(b.lossErr,stopErr,drainErr)
+	err:=errors.Join(b.lossErr,stopErr,drainErr)
+	close(b.lossHandled)
+	return err
 }
 
 func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
