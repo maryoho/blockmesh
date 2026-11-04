@@ -107,3 +107,29 @@ func TestCollectWithReadersRequiresSharedCoordinator(t *testing.T) {
 	readers,err:=NewReaderTable(s,18,4,committer,coordinator);if err!=nil{t.Fatal(err)}
 	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=0{t.Fatalf("empty coordinated collection returned %d, %v",n,err)}
 }
+
+func TestPersistentCollectionWaitsForReaderGeneration(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-collect",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil{t.Fatal(err)}
+	if err=s.WritePage(Page{ID:2,Type:1,Generation:1,Payload:[]byte("old-root")});err!=nil{t.Fatal(err)}
+	if err=s.Sync();err!=nil{t.Fatal(err)}
+	if err=s.Publish(2,1);err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	pa,err:=NewPersistentArena(s,[]uint64{2},committer,coordinator);if err!=nil{t.Fatal(err)}
+	readers,err:=NewReaderTable(s,18,4,committer,coordinator);if err!=nil{t.Fatal(err)}
+	if err=readers.Register(0,"node-reader","boot-1",1,1);err!=nil{t.Fatal(err)}
+
+	reservation,err:=pa.Reserve(1);if err!=nil{t.Fatal(err)}
+	newRoot:=reservation.Pages()[0]
+	err=pa.CommitPagesAndPublish(reservation,[]Page{{ID:newRoot,Type:1,Generation:2,Payload:[]byte("new-root")}},[]uint64{newRoot},newRoot,2,1,[]uint64{2})
+	if err!=nil{t.Fatal(err)}
+	if err=reservation.Commit();err!=nil{t.Fatal(err)}
+
+	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=0{t.Fatalf("old reader must pin retired page: released=%d err=%v",n,err)}
+	if err=readers.Heartbeat(0,"node-reader","boot-1",1,2);err!=nil{t.Fatal(err)}
+	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=1{t.Fatalf("advanced reader should permit reclamation: released=%d err=%v",n,err)}
+	if pending:=pa.Pending();len(pending)!=0{t.Fatalf("retire queue not cleared: %+v",pending)}
+}
