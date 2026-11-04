@@ -50,7 +50,7 @@ func loadCowNode(store *metastore.Store, id uint64) (*cowNode, error) {
 		for i := range n.items {
 			off := nodeHeaderSize + i*16
 			n.items[i] = Item{
-				Key: binary.LittleEndian.Uint64(p.Payload[off : off+8]),
+				Key:   binary.LittleEndian.Uint64(p.Payload[off : off+8]),
 				Value: binary.LittleEndian.Uint64(p.Payload[off+8 : off+16]),
 			}
 			if i > 0 && n.items[i-1].Key >= n.items[i].Key {

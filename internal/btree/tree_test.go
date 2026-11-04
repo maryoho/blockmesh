@@ -11,8 +11,8 @@ import (
 )
 
 type memoryDevice struct {
-	mu sync.Mutex
-	b  []byte
+	mu     sync.Mutex
+	b      []byte
 	writes int
 }
 
@@ -147,7 +147,6 @@ func TestOpenRejectsCorruptRootPage(t *testing.T) {
 		t.Fatal("expected corrupt root page error")
 	}
 }
-
 
 func TestPathCopyUpdateWritesOnlySearchPath(t *testing.T) {
 	store, tree, dev := newTree(t, 2048)

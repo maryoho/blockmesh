@@ -259,12 +259,6 @@ func (t *Tree) RootPage() uint64 {
 
 func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
 
-
-
-
-
-
-
 func encodeLeaf(items []Item) []byte {
 	b := make([]byte, nodeHeaderSize+len(items)*16)
 	copy(b[:4], "BMTN")
