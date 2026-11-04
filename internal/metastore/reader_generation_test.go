@@ -43,6 +43,7 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 	remoteArena,err:=NewPersistentArena(remote,nil,committer,coordinator);if err!=nil{t.Fatal(err)}
 	if err=remoteArena.CommitPagesAndPublish(nil,nil,nil,NoPage,13,12,nil);err!=nil{t.Fatal(err)}
 	if err=readers.Heartbeat(0,"node-a","boot-a",1,12);err!=nil{t.Fatal(err)}
+	if err=readers.Heartbeat(0,"node-a","boot-a",1,13);!errors.Is(err,ErrReaderGeneration){t.Fatalf("heartbeat must not advance root generation: %v",err)}
 	if err=readers.AdvanceGeneration(0,"node-a","boot-a",1,13,false);err==nil{t.Fatal("generation advance without old I/O drain must fail")}
 	if err=readers.AdvanceGeneration(1,"node-b","boot-b",1,13,true);err!=nil{t.Fatal(err)}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("slow reader must pin old generation: %d %v",got,err)}
