@@ -79,6 +79,7 @@ func TestPersistentTreePersistsArenaAndRetireQueue(t *testing.T) {
  if err!=nil{t.Fatal(err)}
  if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
  committer:=memoryCommitter{dev:dev}
+ if _,err=Open(store,committer);!errors.Is(err,ErrPersistentArenaRequired){t.Fatalf("legacy Open must reject persistent lifecycle layout: %v",err)}
  tree,err:=OpenPersistent(store,committer);if err!=nil{t.Fatal(err)}
  if err=tree.Put(1,10);err!=nil{t.Fatal(err)}
  oldRoot:=tree.RootPage()
