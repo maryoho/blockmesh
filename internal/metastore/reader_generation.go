@@ -63,6 +63,14 @@ type ReaderCoordinator interface {
 	LockReaderSet(volumeID string) (unlock func(), err error)
 }
 
+func acquireReaderSet(c ReaderCoordinator, volumeID string) (func(),error) {
+	if c==nil { return nil,ErrReaderCoordinatorRequired }
+	unlock,err:=c.LockReaderSet(volumeID)
+	if err!=nil { return nil,err }
+	if unlock==nil { return nil,errors.New("reader coordinator returned a nil unlock function") }
+	return unlock,nil
+}
+
 type ReaderTable struct {
 	mu sync.Mutex
 	store *Store
@@ -107,7 +115,7 @@ func (t *ReaderTable) writeLocked(r ReaderRecord) error {
 
 func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
 	if t.coordinator!=nil {
-		unlock,err:=t.coordinator.LockReaderSet(t.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
+		unlock,err:=acquireReaderSet(t.coordinator,t.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
 	}
 	t.mu.Lock();defer t.mu.Unlock()
 	if err:=t.store.Refresh();err!=nil{return err}
