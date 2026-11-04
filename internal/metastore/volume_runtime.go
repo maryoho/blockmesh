@@ -36,6 +36,14 @@ type VolumeRuntimeMetadata struct {
 	Arena       *PersistentArena
 }
 
+// RuntimeMetadataDevice is the complete random-access device contract needed
+// by Store and the fixed-LBA WAL, plus an owned close operation.
+type RuntimeMetadataDevice interface {
+	Device
+	io.Closer
+	Size() int64
+}
+
 // RuntimeReaderSession is normally backed by ReaderSession. Closing it is
 // permitted only after the local metadata I/O drain has completed.
 type RuntimeReaderSession interface {
@@ -47,10 +55,10 @@ type RuntimeReaderSession interface {
 // leases, a cluster-safe WAL committer, SAN PR fencing and a real DM I/O drain
 // barrier. FileDevice/MemoryLease/NoopFencer are not production adapters.
 type VolumeRuntimeBackend interface {
-	OpenDevice(context.Context, VolumeRuntimeSpec) (io.Closer, error)
+	OpenDevice(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error)
 	AcquireOwnerLease(context.Context, VolumeRuntimeSpec) (io.Closer, error)
-	RecoverWAL(context.Context, VolumeRuntimeSpec, io.Closer) error
-	OpenMetadata(context.Context, VolumeRuntimeSpec, io.Closer) (*VolumeRuntimeMetadata, error)
+	RecoverWAL(context.Context, VolumeRuntimeSpec, RuntimeMetadataDevice) error
+	OpenMetadata(context.Context, VolumeRuntimeSpec, RuntimeMetadataDevice) (*VolumeRuntimeMetadata, error)
 	JoinReader(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) (RuntimeReaderSession, error)
 	BuildReaderRecovery(VolumeRuntimeSpec, *VolumeRuntimeMetadata) (ManagedReaderRecovery, error)
 	EnableRequests(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
@@ -61,7 +69,7 @@ type VolumeRuntimeBackend interface {
 
 type volumeRuntime struct {
 	spec     VolumeRuntimeSpec
-	device   io.Closer
+	device   RuntimeMetadataDevice
 	owner    io.Closer
 	metadata *VolumeRuntimeMetadata
 	reader   RuntimeReaderSession
@@ -157,6 +165,9 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 
 	dev, err := m.backend.OpenDevice(ctx, spec)
 	if err != nil {
+		if dev != nil {
+			return errors.Join(fmt.Errorf("open metadata device for %s: %w", spec.VolumeID, err), dev.Close())
+		}
 		return fmt.Errorf("open metadata device for %s: %w", spec.VolumeID, err)
 	}
 	if dev == nil {
@@ -260,7 +271,7 @@ func (m *VolumeRuntimeManager) rollbackActivation(ctx context.Context, rt *volum
 	}
 	if rt.device != nil {
 		if err := rt.device.Close(); err != nil {
-			failures = append(failures, fmt.Errorf("close metadata device during activation rollback: %w", err))
+			return fmt.Errorf("close metadata device during activation rollback: %w", err)
 		}
 		rt.device = nil
 	}
