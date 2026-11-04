@@ -50,14 +50,19 @@ func lifecycleOffsets(sb Superblock)(uint64,uint64,error){
 // opening the persistent Arena.
 func FormatLifecycle(store *Store) error {
  if store==nil { return errors.New("nil metastore") }
- stateOff,queueOff,err:=lifecycleOffsets(store.Superblock()); if err!=nil{return err}
- existingState:=make([]byte,PageSize);if err=readFullAt(store.dev,existingState,int64(stateOff));err!=nil{return err}
- existingQueue:=make([]byte,PageSize);if err=readFullAt(store.dev,existingQueue,int64(queueOff));err!=nil{return err}
- if !allZeroLifecycle(existingState)||!allZeroLifecycle(existingQueue){return ErrLifecycleAlreadyInitialized}
- state:=encodeLifecycleState(1,store.Superblock().MappingSequence)
- queue,err:=encodeRetireQueue(nil,1);if err!=nil{return err}
+ stateOff,_,err:=lifecycleOffsets(store.Superblock()); if err!=nil{return err}
+ sb:=store.Superblock()
+ for i:=uint64(0);i<sb.LifecyclePages;i++ {
+  existing:=make([]byte,PageSize)
+  if err=readFullAt(store.dev,existing,int64((sb.LifecycleStart+i)*PageSize));err!=nil{return err}
+  if !allZeroLifecycle(existing){return ErrLifecycleAlreadyInitialized}
+ }
+ state:=encodeLifecycleState(1,sb.MappingSequence)
+ queues,err:=encodeRetireQueuePages(nil,1,sb.LifecyclePages-1);if err!=nil{return err}
  if err=writeFullAt(store.dev,state,int64(stateOff));err!=nil{return err}
- if err=writeFullAt(store.dev,queue,int64(queueOff));err!=nil{return err}
+ for i,queue:=range queues {
+  if err=writeFullAt(store.dev,queue,int64((sb.LifecycleStart+1+uint64(i))*PageSize));err!=nil{return err}
+ }
  return store.Sync()
 }
 
