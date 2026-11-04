@@ -40,13 +40,6 @@ func OpenBlockDevice(path string, writable, exclusive bool) (*BlockDevice, error
 	if path == "" {
 		return nil, errors.New("block device path is required")
 	}
-	var st syscall.Stat_t
-	if err := syscall.Stat(path, &st); err != nil {
-		return nil, fmt.Errorf("stat block device %q: %w", path, err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
-		return nil, fmt.Errorf("%w: %s", ErrNotBlockDevice, path)
-	}
 	flags := syscall.O_CLOEXEC
 	if writable {
 		flags |= syscall.O_RDWR
@@ -64,6 +57,13 @@ func OpenBlockDevice(path string, writable, exclusive bool) (*BlockDevice, error
 	fail := func(err error) (*BlockDevice, error) {
 		_ = f.Close()
 		return nil, err
+	}
+	var st syscall.Stat_t
+	if err = syscall.Fstat(fd, &st); err != nil {
+		return fail(fmt.Errorf("fstat block device %q: %w", path, err))
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
+		return fail(fmt.Errorf("%w: %s", ErrNotBlockDevice, path))
 	}
 
 	var size uint64
