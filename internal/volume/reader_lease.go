@@ -14,7 +14,7 @@ import (
 // sanlock resource. Resource names must be stable across all nodes.
 type ReaderLeaseConfig struct {
 	Locker *lock.SanlockLocker
-	ResourceFor func(volumeID, nodeID, bootID string, epoch uint64) string
+	ResourceFor func(volumeID string, slot uint32, nodeID, bootID string, epoch uint64) string
 	PollInterval time.Duration
 }
 
@@ -53,11 +53,11 @@ func (l *ReaderLease) Close() error {
 // AcquireReader acquires a unique sanlock resource for one reader instance.
 // onLost is mandatory: loss of the sanlock helper must synchronously fence
 // the local data path (for example suspend the DM device and stop new bios).
-func (c ReaderLeaseConfig) AcquireReader(ctx context.Context, volumeID, nodeID, bootID string, epoch uint64, onLost func(error)) (*ReaderLease, error) {
+func (c ReaderLeaseConfig) AcquireReader(ctx context.Context, volumeID string, slot uint32, nodeID, bootID string, epoch uint64, onLost func(error)) (*ReaderLease, error) {
 	if c.Locker == nil || c.ResourceFor == nil || onLost == nil || volumeID == "" || nodeID == "" || bootID == "" || epoch == 0 {
 		return nil, errors.New("reader lease requires sanlock locker, identity, epoch and fail-stop callback")
 	}
-	resource := c.ResourceFor(volumeID, nodeID, bootID, epoch)
+	resource := c.ResourceFor(volumeID, slot, nodeID, bootID, epoch)
 	if resource == "" { return nil, errors.New("reader lease resource is empty") }
 	lease, err := c.Locker.Acquire(ctx, resource)
 	if err != nil { return nil, err }
