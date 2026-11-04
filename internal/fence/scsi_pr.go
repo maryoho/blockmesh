@@ -20,6 +20,21 @@ type PRPath struct {
 	LocalKey uint64
 }
 
+
+func validatePRPaths(paths []PRPath) error {
+	if len(paths)==0 { return errors.New("at least one SCSI PR path is required") }
+	devices:=make(map[string]struct{},len(paths))
+	keys:=make(map[uint64]struct{},len(paths))
+	for _,path:=range paths {
+		if strings.TrimSpace(path.Device)=="" || path.LocalKey==0 { return errors.New("every SCSI PR path needs a device and nonzero local key") }
+		if _,ok:=devices[path.Device];ok { return fmt.Errorf("duplicate SCSI PR device path %s",path.Device) }
+		if _,ok:=keys[path.LocalKey];ok { return fmt.Errorf("local PR keys must be unique per initiator path: %x",path.LocalKey) }
+		devices[path.Device]=struct{}{}
+		keys[path.LocalKey]=struct{}{}
+	}
+	return nil
+}
+
 type RegistrationKeyResolver interface {
 	KeysForNode(context.Context, string, string) ([]uint64, error)
 }
@@ -70,7 +85,8 @@ type SCSIPRRegistrar struct {
 
 
 func (r *SCSIPRRegistrar) UnregisterReader(ctx context.Context, nodeID, bootID string) error {
-	if r == nil || len(r.Paths) == 0 { return errors.New("SCSI PR registrar requires local paths") }
+	if r == nil { return errors.New("SCSI PR registrar requires local paths") }
+	if err:=validatePRPaths(r.Paths);err!=nil{return err}
 	binary:=r.Binary
 	if binary=="" { binary="sg_persist" }
 	runner:=r.Runner
@@ -126,9 +142,10 @@ func (r *SCSIPRRegistrar) RegisterReader(ctx context.Context, nodeID, bootID str
 }
 
 func (f *SCSIPRFencer) FenceNode(ctx context.Context, nodeID, bootID string) error {
-	if f == nil || f.Keys == nil || len(f.Paths) == 0 {
+	if f == nil || f.Keys == nil {
 		return errors.New("SCSI PR fencer requires paths and a registration-key resolver")
 	}
+	if err:=validatePRPaths(f.Paths);err!=nil{return err}
 	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(bootID) == "" {
 		return errors.New("node ID and boot ID are required for fencing")
 	}
@@ -156,10 +173,8 @@ func (f *SCSIPRFencer) FenceNode(ctx context.Context, nodeID, bootID string) err
 		unique[key] = struct{}{}
 	}
 	for _, path := range f.Paths {
-		if strings.TrimSpace(path.Device) == "" || path.LocalKey == 0 {
-			return errors.New("every SCSI PR path needs a device and nonzero local registration key")
-		}
 		for targetKey := range unique {
+			if targetKey == path.LocalKey { return fmt.Errorf("refusing to preempt local registration key %x",targetKey) }
 			present, readErr := f.keyPresent(ctx, runner, binary, path.Device, targetKey)
 			if readErr != nil { return fmt.Errorf("read PR keys on %s: %w", path.Device, readErr) }
 			if !present { continue }
