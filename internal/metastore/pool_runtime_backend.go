@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"blockmesh/internal/device"
 	"blockmesh/internal/fence"
@@ -37,6 +38,8 @@ type PoolRuntimeConfig struct {
 	ReaderRecoveryProbe ReaderLeaseProbe
 	ReaderFencer fence.Fencer
 	RecoveryConfig ReaderRecoveryConfig
+	ReaderHeartbeatInterval time.Duration
+	OnReaderLeaseLost func(context.Context, VolumeRuntimeSpec, error)
 
 	// LivePages must return every page reachable from the current B+Tree root
 	// except the root itself. It is mandatory because omitting a live page
@@ -60,7 +63,7 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 		!cfg.Locker.Distributed() || cfg.WALResourceForAG == nil ||
 		cfg.ReaderSetResource == nil || cfg.ReaderSlotResource == nil ||
 		cfg.PRRegistrar == nil || cfg.ReaderRecoveryProbe == nil ||
-		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.BuildRecovery == nil ||
+		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.OnReaderLeaseLost == nil ||
 		cfg.EnableRequests == nil || cfg.StopRequests == nil ||
 		cfg.DrainMetadataIO == nil || cfg.CloseMetadata == nil {
 		return nil, errors.New("Pool runtime requires device, fenced owner, distributed sanlock/WAL, reader lease/fencing, live-page, recovery and I/O hooks")
@@ -150,17 +153,32 @@ func (b *PoolVolumeRuntimeBackend) JoinReader(ctx context.Context, spec VolumeRu
 		Locker: b.cfg.Locker,
 		ResourceFor: b.cfg.ReaderSlotResource,
 	}
-	return JoinReaderSession(ctx, meta.ReaderTable, leaseConfig, b.cfg.PRRegistrar,
+	session, err := JoinReaderSession(ctx, meta.ReaderTable, leaseConfig, b.cfg.PRRegistrar,
 		spec.ReaderSlot, spec.NodeID, spec.BootID, spec.ReaderEpoch,
-		func(error) {
-			// The caller's DM/device admission hook must be fail-stop. Runtime
-			// teardown also stops admission and drains all outstanding I/O.
-			_ = b.cfg.StopRequests(context.Background(), spec.VolumeID)
+		func(cause error) {
+			// This callback must suspend/fail-stop the local data path; a
+			// best-effort request stop is not sufficient after lease loss.
+			b.cfg.OnReaderLeaseLost(context.Background(), spec, cause)
 		})
+	if err != nil { return nil, err }
+	return startPoolReaderHeartbeat(ctx, session, spec, b.cfg.ReaderHeartbeatInterval, b.cfg.OnReaderLeaseLost), nil
+}
+
+type poolRuntimeDrain struct { drain func(context.Context, string) error }
+func (d poolRuntimeDrain) WaitForMetadataIOsDrained(ctx context.Context, volumeID string) error {
+	return d.drain(ctx, volumeID)
 }
 
 func (b *PoolVolumeRuntimeBackend) BuildReaderRecovery(spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) (ManagedReaderRecovery, error) {
-	return b.cfg.BuildRecovery(spec, meta)
+	if b.cfg.BuildRecovery != nil { return b.cfg.BuildRecovery(spec, meta) }
+	controller := &ReaderRecoveryController{
+		Table: meta.ReaderTable, Probe: b.cfg.ReaderRecoveryProbe,
+		Fencer: b.cfg.ReaderFencer, Arena: meta.Arena,
+		Drain: poolRuntimeDrain{drain: b.cfg.DrainMetadataIO},
+		Config: b.cfg.RecoveryConfig,
+	}
+	if err := controller.ValidateProduction(); err != nil { return nil, err }
+	return controller, nil
 }
 
 func (b *PoolVolumeRuntimeBackend) EnableRequests(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
@@ -177,3 +195,43 @@ func (b *PoolVolumeRuntimeBackend) CloseMetadata(ctx context.Context, spec Volum
 }
 
 var _ VolumeRuntimeBackend = (*PoolVolumeRuntimeBackend)(nil)
+
+
+// poolRuntimeReaderSession keeps the durable heartbeat alive for the entire
+// admitted RO runtime and joins it before unregistering PR keys or closing the
+// Reader Table slot.
+type poolRuntimeReaderSession struct {
+	session *ReaderSession
+	cancel context.CancelFunc
+	done chan struct{}
+}
+
+func startPoolReaderHeartbeat(parent context.Context, session *ReaderSession, spec VolumeRuntimeSpec,
+	interval time.Duration, onLost func(context.Context, VolumeRuntimeSpec, error)) RuntimeReaderSession {
+	if interval <= 0 { interval = time.Second }
+	ctx, cancel := context.WithCancel(parent)
+	w := &poolRuntimeReaderSession{session:session, cancel:cancel, done:make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done(): return
+			case <-ticker.C:
+				if err := session.Heartbeat(); err != nil {
+					onLost(context.Background(), spec, err)
+					return
+				}
+			}
+		}
+	}()
+	return w
+}
+
+func (s *poolRuntimeReaderSession) CloseDrained(ctx context.Context, drained bool) error {
+	if s == nil { return nil }
+	s.cancel()
+	<-s.done
+	return s.session.CloseDrained(ctx, drained)
+}
