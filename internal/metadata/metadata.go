@@ -257,6 +257,16 @@ func writeAtFull(d device.Device, b []byte, off int64) error {
 }
 
 func zeroRegion(d device.Device, offset, length uint64) error {
+	// Sparse regular-file images should remain sparse. Punching a hole reads
+	// back as zero and also removes stale WAL/checkpoint bytes, but avoids
+	// allocating hundreds of MiB for every unit-test image. Real block-device
+	// implementations do not expose Discard and retain the explicit zero-write
+	// path below.
+	if discarder, ok := d.(interface{ Discard(uint64, uint64) error }); ok {
+		if err := discarder.Discard(offset, length); err == nil {
+			return d.Sync()
+		}
+	}
 	const chunk = uint64(1 << 20)
 	zero := make([]byte, chunk)
 	for length > 0 {
