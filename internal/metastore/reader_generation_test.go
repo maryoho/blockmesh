@@ -228,3 +228,68 @@ func TestCoordinatedReaderMetadataRequiresClusterSafeCommitter(t *testing.T) {
 		t.Fatalf("persistent arena accepted process-local WAL committer: %v",err)
 	}
 }
+
+
+func TestReaderRecoveryControllerRequiresLeaseAndPRFence(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-controller",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil {t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil {t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	table,err:=NewReaderTable(s,18,2,committer,coordinator)
+	if err!=nil {t.Fatal(err)}
+	now:=time.Unix(2_000_000_000,0)
+	if err=table.Register(0,"node-fenced","boot-fenced",4,1);err!=nil {t.Fatal(err)}
+	table.mu.Lock()
+	record,err:=table.readLocked(0)
+	if err==nil { record.HeartbeatUnixNano=now.Add(-time.Hour).UnixNano();err=table.writeLocked(record) }
+	table.mu.Unlock()
+	if err!=nil {t.Fatal(err)}
+
+	probe:=&testReaderLeaseProbe{err:errors.New("slot lease is still held")}
+	fencerCalls:=0
+	fencer:=testFenceFunc(func(context.Context,string,string)error{fencerCalls++;return nil})
+	controller:=&ReaderRecoveryController{
+		Table:table,Probe:probe,Fencer:fencer,
+		Config:ReaderRecoveryConfig{HeartbeatTimeout:30*time.Second,MaxClockSkew:2*time.Second,
+			RetryInterval:5*time.Second,Clock:func()time.Time{return now}},
+	}
+	report,err:=controller.RecoverOnce(context.Background())
+	if err==nil||report.Stale!=1||report.Failed!=1||fencerCalls!=0 {t.Fatalf("lease-held recovery should fail before PR fencing: report=%+v err=%v calls=%d",report,err,fencerCalls)}
+	snapshot,err:=table.Snapshot();if err!=nil {t.Fatal(err)}
+	if len(snapshot)!=1||snapshot[0].State!=ReaderActive {t.Fatalf("failed recovery must keep reader generation-pinning: %+v",snapshot)}
+
+	report,err=controller.RecoverOnce(context.Background())
+	if err!=nil||report.RetryDeferred!=1||fencerCalls!=0 {t.Fatalf("retry backoff not honored: report=%+v err=%v calls=%d",report,err,fencerCalls)}
+	now=now.Add(6*time.Second)
+	probe.err=nil
+	report,err=controller.RecoverOnce(context.Background())
+	if err!=nil||report.Fenced!=1||report.Failed!=0||fencerCalls!=1||!probe.released {t.Fatalf("expected successful lease-probe and PR fencing: report=%+v err=%v calls=%d",report,err,fencerCalls)}
+	snapshot,err=table.Snapshot();if err!=nil {t.Fatal(err)}
+	if len(snapshot)!=0 {t.Fatalf("fenced reader must no longer pin generation: %+v",snapshot)}
+}
+
+func TestReaderRecoveryControllerSkipsLegacyAndFutureHeartbeat(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-controller-clock",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil {t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil {t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	table,err:=NewReaderTable(s,18,2,committer,coordinator)
+	if err!=nil {t.Fatal(err)}
+	now:=time.Unix(2_000_000_000,0)
+	if err=table.Register(0,"node-fenced","boot-fenced",4,1);err!=nil {t.Fatal(err)}
+	table.mu.Lock()
+	record,err:=table.readLocked(0)
+	if err==nil { record.HeartbeatUnixNano=now.Add(time.Hour).UnixNano();err=table.writeLocked(record) }
+	table.mu.Unlock()
+	if err!=nil {t.Fatal(err)}
+	controller:=&ReaderRecoveryController{Table:table,Probe:&testReaderLeaseProbe{},Fencer:testFenceFunc(func(context.Context,string,string)error{return nil}),
+		Config:ReaderRecoveryConfig{HeartbeatTimeout:time.Second,MaxClockSkew:time.Second,Clock:func()time.Time{return now}}}
+	report,err:=controller.RecoverOnce(context.Background())
+	if err!=nil||report.SkippedClockSkew!=1||report.Fenced!=0 {t.Fatalf("future heartbeat must fail closed: %+v %v",report,err)}
+}
