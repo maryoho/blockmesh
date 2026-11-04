@@ -89,6 +89,16 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 	if !ok || probe.Locker == nil || probe.Locker != cfg.Locker || probe.ResourceFor == nil {
 		return nil, errors.New("Pool runtime requires a SanlockReaderLeaseProbe using the same distributed locker")
 	}
+	switch owner := cfg.Owner.(type) {
+	case PoolOwnerCoordinator:
+		if !owner.Coordinator.UsesSanlockLocker(cfg.Locker) {
+			return nil, errors.New("OwnerCoordinator must use the exact Pool runtime sanlock locker")
+		}
+	case *PoolOwnerCoordinator:
+		if owner == nil || !owner.Coordinator.UsesSanlockLocker(cfg.Locker) {
+			return nil, errors.New("OwnerCoordinator must use the exact Pool runtime sanlock locker")
+		}
+	}
 	if cfg.BuildRecovery == nil && cfg.RecoveryConfig.HeartbeatTimeout <= 0 {
 		return nil, errors.New("automatic Reader recovery requires a positive heartbeat timeout")
 	}
