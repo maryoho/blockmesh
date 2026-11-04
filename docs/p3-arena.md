@@ -67,9 +67,12 @@ service must serialize slot assignment; two nodes must never register into the
 same slot concurrently.
 
 Each record stores NodeID, BootID, monotonically increasing Reader Epoch,
-Root Generation, heartbeat sequence, and state. A joining reader must refresh
-the committed superblock and register at exactly the current Mapping Sequence
+Root Generation, heartbeat sequence, and state. A joining reader must call
+`Tree.Refresh()`, then register at exactly the current Mapping Sequence
 before it begins issuing reads; it cannot join using a stale root generation.
+An existing reader calls `Tree.Refresh()` before heartbeating an advanced
+generation. Refresh rebuilds the in-memory B+Tree view and persistent Arena
+from the published root; it rejects trees with outstanding local reservations.
 - Active: participates in the minimum safe generation.
 - Leaving: still pins its generation until clean I/O drain or fencing.
 - Fenced: excluded only after the SAN fencer succeeds.
@@ -79,7 +82,8 @@ before it begins issuing reads; it cannot join using a stale root generation.
 A new process instance must use a new BootID and a strictly higher Epoch before
 reusing a fenced or gracefully Closed slot. Heartbeats refresh the local redundant superblock view
 before accepting a new Root Generation; they may advance that generation but
-cannot move it backwards. `SafeGeneration()` returns the minimum Root Generation across
+cannot move it backwards. The caller is responsible for refreshing the B+Tree
+view first, so the recorded generation matches the root actually used for reads. `SafeGeneration()` returns the minimum Root Generation across
 all Active/Leaving slots, or MaxUint64 if there are none.
 
 Use `FenceAndClose` to call the configured `fence.Fencer`; the durable slot
