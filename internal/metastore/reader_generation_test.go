@@ -36,9 +36,9 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 
 	remote,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
 	if err=remote.Publish(NoPage,13);err!=nil{t.Fatal(err)}
-	if err=readers.Heartbeat(1,"node-b","boot-b",1,13);err!=nil{t.Fatal(err)}
+	if err=readers.AdvanceGeneration(1,"node-b","boot-b",1,13,true);err!=nil{t.Fatal(err)}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("slow reader must pin old generation: %d %v",got,err)}
-	if err=readers.Heartbeat(0,"node-a","boot-a",1,13);err!=nil{t.Fatal(err)}
+	if err=readers.AdvanceGeneration(0,"node-a","boot-a",1,13,true);err!=nil{t.Fatal(err)}
 	if s.Superblock().MappingSequence!=13{t.Fatalf("reader store did not refresh committed root: %+v",s.Superblock())}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=13{t.Fatalf("all readers advanced: %d %v",got,err)}
 
@@ -129,7 +129,7 @@ func TestPersistentCollectionWaitsForReaderGeneration(t *testing.T) {
 	if err=reservation.Commit();err!=nil{t.Fatal(err)}
 
 	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=0{t.Fatalf("old reader must pin retired page: released=%d err=%v",n,err)}
-	if err=readers.Heartbeat(0,"node-reader","boot-1",1,2);err!=nil{t.Fatal(err)}
+	if err=readers.AdvanceGeneration(0,"node-reader","boot-1",1,2,true);err!=nil{t.Fatal(err)}
 	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=1{t.Fatalf("advanced reader should permit reclamation: released=%d err=%v",n,err)}
 	if pending:=pa.Pending();len(pending)!=0{t.Fatalf("retire queue not cleared: %+v",pending)}
 }
