@@ -16,9 +16,9 @@ The included `metadata.Engine` is still a single-volume JSON snapshot reference 
 
 ## P3 implementation status
 
-* **P3-1 (in progress):** fixed-LBA metadata pages, dual superblocks, checksums, root publication ordering, and process-local Arena allocation lifecycle.
+* **P3-1:** fixed-LBA metadata pages, dual superblocks, checksums, root publication ordering, and Arena allocation lifecycle.
 * P3-2: page-level copy-on-write B+Tree.
-* **P3-3 (in progress):** per-AG fixed-LBA redo WAL, recovery-before-open, dual-bank checkpoint rotation, atomic COW B+Tree publication, and an initial atomic Bitmap/Mapping/Volume Descriptor allocation transaction. Persistent retire-queue and distributed reader/fencing integration remain open.
+* **P3-3 (in progress):** per-AG fixed-LBA redo WAL, recovery-before-open, dual-bank checkpoint rotation, atomic COW root publication, atomic Bitmap/Mapping/Volume Descriptor allocation, and optional WAL-persisted B+Tree Arena lifecycle/Retire Queue. Distributed reader/fencing and multi-page retire queue remain open.
 * P3-4: multi-node leases, AG coordination, shared reader visibility and SAN fencing.
 * P3-5: crash recovery and fault-injection tests.
 * P3-6: Linux DM Target integration.
@@ -28,7 +28,7 @@ See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md]
 ## Layout
 
 * `internal/device`: random-access durable device interface and file-backed test device.
-* `internal/metastore`: fixed-LBA 4 KiB metadata pages, redundant superblocks, and page allocator.
+* `internal/metastore`: fixed-LBA 4 KiB metadata pages, redundant superblocks, process-local and WAL-persisted Arena lifecycle, and Retire Queue.
 * `internal/wal`: per-AG fixed-LBA CRC32C redo WAL with Intent/Commit, recovery-before-open, dual-bank checkpoint rotation, and `CommitImages` for atomic COW page/root publication.
 * `internal/metadata`: current JSON-backed reference engine, descriptor and retire queue.
 * `internal/allocator`: 4 MiB allocation bitmap and per-AG WAL transaction publishing Bitmap, immutable Mapping COW page, and Volume Descriptor.
