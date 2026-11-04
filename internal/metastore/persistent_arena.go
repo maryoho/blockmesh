@@ -115,7 +115,7 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
  queueImage:=make([]byte,PageSize);if err=readFullAt(store.dev,queueImage,int64(queueOff));err!=nil{return nil,err}
  generation,rootSequence,err:=decodeLifecycleState(stateImage);if err!=nil{return nil,err}
  batches,err:=decodeRetireQueue(queueImage,store);if err!=nil{return nil,err}
- if rootSequence>store.Superblock().MappingSequence{return nil,ErrLifecycleCorrupt}
+ if rootSequence!=store.Superblock().MappingSequence{return nil,ErrLifecycleCorrupt}
  live:=append([]uint64(nil),livePages...)
  for _,batch:=range batches {live=append(live,batch.PageIDs...)}
  arena,err:=NewArena(store,live);if err!=nil{return nil,err}
@@ -139,6 +139,7 @@ func (p *PersistentArena) CommitPagesAndPublish(pages []Page,rootPage,mappingSeq
  if p==nil{return errors.New("nil persistent arena")}
  p.mu.Lock();defer p.mu.Unlock()
  if mappingSequence<=p.rootSequence||retireGeneration>=mappingSequence{return errors.New("invalid lifecycle generation")}
+ if p.store.Superblock().MappingSequence!=p.rootSequence{return ErrLifecycleCorrupt}
  if p.stateGeneration==math.MaxUint64{return errors.New("lifecycle generation exhausted")}
  nextBatches:=make([]RetireBatch,len(p.batches));for i,b:=range p.batches{nextBatches[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
  if len(retired)>0 {nextBatches=append(nextBatches,RetireBatch{RetireGeneration:retireGeneration,PageIDs:append([]uint64(nil),retired...)})}
