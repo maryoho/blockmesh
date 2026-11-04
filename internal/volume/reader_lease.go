@@ -10,8 +10,9 @@ import (
 	"blockmesh/internal/lock"
 )
 
-// ReaderLeaseConfig maps each (volume,node,boot,epoch) tuple to a unique
-// sanlock resource. Resource names must be stable across all nodes.
+// ReaderLeaseConfig maps each volume's stable Reader Table slot to its
+// preinitialized sanlock resource. The resource name is stable across boot
+// IDs and epochs; the durable Reader record carries those changing identities.
 type ReaderLeaseConfig struct {
 	Locker *lock.SanlockLocker
 	ResourceFor func(volumeID string, slot uint32, nodeID, bootID string, epoch uint64) string
