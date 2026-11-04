@@ -43,6 +43,7 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 		ArenaStart:arenaStart,ArenaPages:arenaPages,RootPage:^uint64(0),
 		LifecycleStart:lifecycleStart,LifecyclePages:lifecyclePages,
 	}
+	if err=d.ValidatePool(sb);err!=nil{return zero,fmt.Errorf("invalid Volume Descriptor geometry: %w",err)}
 	image,err:=d.Encode();if err!=nil{return zero,err}
 	// Initialize the lifecycle extent before making the descriptor visible.
 	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
@@ -70,13 +71,6 @@ func ReadVolumeDescriptor(dev device.Device, sb format.Superblock, index uint32)
 		if !found || d.Generation>best.Generation { best=d;found=true }
 	}
 	if !found{return zero,format.ErrVolumeDescriptor}
-	// Validate that all volume-owned extents are contained in Pool Reserved.
-	reservedEnd:=sb.MetadataSize/format.PageSize
-	if best.ArenaStart<sb.ReservedOffset/format.PageSize || best.ArenaStart>reservedEnd ||
-		best.ArenaPages>reservedEnd-best.ArenaStart ||
-		best.LifecycleStart<best.ArenaStart+best.ArenaPages ||
-		best.LifecycleStart>reservedEnd || best.LifecyclePages>reservedEnd-best.LifecycleStart {
-		return zero,errors.New("Volume Descriptor extent is outside Pool Reserved region")
-	}
+	if err:=best.ValidatePool(sb);err!=nil{return zero,fmt.Errorf("Volume Descriptor does not fit Pool geometry: %w",err)}
 	return best,nil
 }
