@@ -234,6 +234,17 @@ func TestVolumeRuntimeRetainsResourcesWhenOwnerFailStopFails(t *testing.T) {
 	waitRuntimeRecovery(t,base)
 	lease.lost<-errors.New("sanlock helper exited")
 	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("owner lease loss handler was not called")}
+	deadline:=time.Now().Add(time.Second)
+	for {
+		m.mu.Lock()
+		rt:=m.runtimes["vol-runtime"]
+		var ownerFailure error
+		if rt!=nil { rt.ownerFailureMu.Lock();ownerFailure=rt.ownerFailure;rt.ownerFailureMu.Unlock() }
+		m.mu.Unlock()
+		if ownerFailure!=nil { break }
+		if time.Now().After(deadline) { t.Fatal("owner fail-stop error was not recorded") }
+		time.Sleep(time.Millisecond)
+	}
 	if err=m.Deactivate(ctx,"vol-runtime");err==nil{t.Fatal("expected fail-stop error to retain resources")}
 	events:=base.snapshot()
 	for _,event:=range events{
