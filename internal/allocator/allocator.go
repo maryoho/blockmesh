@@ -71,7 +71,7 @@ func (a *Allocator) AllocateOne(ctx context.Context, volumeLease lock.Lease, vol
 	}
 	defer unlockMapping()
 
-	journal, err := wal.New(a.Store.Device(), a.Store.SB, ag)
+	journal, err := wal.New(a.Store.Device(), a.Store.Superblock(), ag)
 	if err != nil {
 		return 0, err
 	}
@@ -162,7 +162,7 @@ func (a *Allocator) RecoverAG(ctx context.Context, ag uint32) (bool, error) {
 		return false, fmt.Errorf("acquire AG lock: %w", err)
 	}
 	defer unlock()
-	j, err := wal.New(a.Store.Device(), a.Store.SB, ag)
+	j, err := wal.New(a.Store.Device(), a.Store.Superblock(), ag)
 	if err != nil {
 		return false, err
 	}
