@@ -246,6 +246,9 @@ func (s *Store) refreshLocked() error {
 
 // Publish atomically advances the root descriptor by writing the inactive
 // superblock and flushing it. It never overwrites the currently selected copy.
+// For lifecycle-enabled layouts it is allowed only for the initial root
+// publication before FormatLifecycle; subsequent roots must use the persistent
+// Arena/WAL transaction path.
 func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
