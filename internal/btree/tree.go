@@ -44,8 +44,9 @@ type Tree struct {
 	store *metastore.Store
 	arena *metastore.Arena
 	items []Item // sorted in-memory read cache; disk pages remain authoritative
-	pages []uint64
-	root  uint64
+	pages  []uint64
+	retire *metastore.RetireQueue
+	root   uint64
 }
 
 // Open loads and validates the published tree, then reconstructs the
@@ -55,7 +56,7 @@ func Open(store *metastore.Store) (*Tree, error) {
 		return nil, errors.New("nil metastore")
 	}
 	sb := store.Superblock()
-	t := &Tree{store: store, root: sb.RootPage}
+	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}
 	var live []uint64
 	if sb.RootPage != metastore.NoPage {
 		seen := make(map[uint64]struct{})
@@ -258,6 +259,15 @@ func (t *Tree) RootPage() uint64 {
 }
 
 func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
+
+// RetireQueue exposes process-local retired metadata pages. Collect only after
+// reader generations have advanced, old I/O has drained, and fencing is proven.
+func (t *Tree) RetireQueue() *metastore.RetireQueue { return t.retire }
+
+// CollectRetired applies an externally established reader/fencing proof.
+func (t *Tree) CollectRetired(proof metastore.ReclaimProof) (int, error) {
+	return t.retire.Collect(t.arena, proof)
+}
 
 func encodeLeaf(items []Item) []byte {
 	b := make([]byte, nodeHeaderSize+len(items)*16)
