@@ -114,11 +114,21 @@ func tableForP339(t *testing.T, d *memdev, coordinator *testReaderCoordinator, c
 	return table
 }
 
-type p339ExclusiveProbe struct { mu sync.Mutex; attempts chan struct{} }
+type p339ExclusiveProbe struct {
+	mu sync.Mutex
+	attempts chan struct{}
+	firstAcquired chan struct{}
+	allowFirstReturn chan struct{}
+	count atomic.Int32
+}
 
 func (p *p339ExclusiveProbe) AcquireExpiredReader(context.Context, string, ReaderRecord) (func() error, error) {
 	p.attempts <- struct{}{}
 	p.mu.Lock()
+	if p.count.Add(1) == 1 {
+		close(p.firstAcquired)
+		<-p.allowFirstReturn
+	}
 	return p.mu.Unlock, nil
 }
 
@@ -129,12 +139,14 @@ func TestP339TwoRecoveryControllersFenceOneReaderOnlyOnce(t *testing.T) {
 	tableB, err := NewReaderTable(storeB, 18, 2, committer, coordinator)
 	if err != nil { t.Fatal(err) }
 
-	probe := &p339ExclusiveProbe{attempts: make(chan struct{}, 2)}
+	probe := &p339ExclusiveProbe{
+		attempts: make(chan struct{}, 2),
+		firstAcquired: make(chan struct{}),
+		allowFirstReturn: make(chan struct{}),
+	}
 	var fenceCalls atomic.Int32
-	fenceEntered := make(chan struct{})
-	allowFence := make(chan struct{})
 	fencer := testFenceFunc(func(context.Context, string, string) error {
-		if fenceCalls.Add(1) == 1 { close(fenceEntered); <-allowFence }
+		fenceCalls.Add(1)
 		return nil
 	})
 	controllerA := p339Controller(tableA, probe, fencer, now)
@@ -142,21 +154,37 @@ func TestP339TwoRecoveryControllersFenceOneReaderOnlyOnce(t *testing.T) {
 
 	doneA := make(chan error, 1)
 	go func() { _, err := controllerA.RecoverOnce(context.Background()); doneA <- err }()
-	select { case <-fenceEntered: case <-time.After(3 * time.Second): t.Fatal("first controller did not reach fencing") }
+	select {
+	case <-probe.firstAcquired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first controller did not acquire the slot lease")
+	}
 	<-probe.attempts
 
+	// The first controller deliberately pauses after acquiring the slot
+	// lease but before taking the reader-set barrier. The second controller
+	// can therefore snapshot the same stale record and contend for that lease.
 	doneB := make(chan error, 1)
 	go func() { _, err := controllerB.RecoverOnce(context.Background()); doneB <- err }()
 	select {
 	case <-probe.attempts:
 	case <-time.After(3 * time.Second):
-		close(allowFence)
-		t.Fatal("second controller did not reach slot lease probe")
+		close(probe.allowFirstReturn)
+		t.Fatal("second controller did not reach the slot lease probe")
 	}
-	close(allowFence)
+	close(probe.allowFirstReturn)
 
-	select { case err = <-doneA: if err != nil { t.Fatalf("first recovery failed: %v", err) }; case <-time.After(3 * time.Second): t.Fatal("first recovery deadlocked") }
-	select { case <-doneB: case <-time.After(3 * time.Second): t.Fatal("second recovery deadlocked") }
+	select {
+	case err = <-doneA:
+		if err != nil { t.Fatalf("first recovery failed: %v", err) }
+	case <-time.After(3 * time.Second):
+		t.Fatal("first recovery deadlocked")
+	}
+	select {
+	case <-doneB: // ErrReaderIdentity is expected after the first Fenced commit.
+	case <-time.After(3 * time.Second):
+		t.Fatal("second recovery deadlocked")
+	}
 	if got := fenceCalls.Load(); got != 1 { t.Fatalf("same reader fenced %d times, want once", got) }
 	if got := p339ReadRecord(t, tableA); got.State != ReaderFenced { t.Fatalf("reader not durably fenced: %+v", got) }
 }
