@@ -54,6 +54,7 @@ func (t *ReaderTable) FenceExpiredReader(ctx context.Context, slot uint32, nodeI
 
 	releaseProbe, err := probe.AcquireExpiredReader(ctx, t.store.Superblock().VolumeID, reader)
 	if err != nil { return err }
+	if releaseProbe == nil { return errors.New("reader lease probe returned a nil release function") }
 	defer func() { _ = releaseProbe() }()
 
 	if err = fencer.FenceNode(ctx, nodeID, bootID); err != nil {
