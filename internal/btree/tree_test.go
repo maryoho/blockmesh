@@ -149,12 +149,13 @@ func TestOpenRejectsCorruptRootPage(t *testing.T) {
 
 
 func TestPathCopyUpdateWritesOnlySearchPath(t *testing.T) {
-	_, tree, dev := newTree(t, 2048)
+	store, tree, dev := newTree(t, 2048)
 	for i := uint64(0); i < 270; i++ {
 		if err := tree.Put(i*3, i+1); err != nil {
 			t.Fatalf("Put(%d): %v", i*3, err)
 		}
 	}
+	oldRoot := tree.RootPage()
 	dev.mu.Lock()
 	dev.writes = 0
 	dev.mu.Unlock()
@@ -171,6 +172,16 @@ func TestPathCopyUpdateWritesOnlySearchPath(t *testing.T) {
 	}
 	if got, err := tree.Get(450); err != nil || got != 99999 {
 		t.Fatalf("Get(450) = %d, %v", got, err)
+	}
+	seen := make(map[uint64]struct{})
+	var live []uint64
+	oldItems, err := loadNode(store, oldRoot, ^uint16(0), seen, &live)
+	if err != nil {
+		t.Fatalf("old COW root is no longer readable: %v", err)
+	}
+	oldIndex := sort.Search(len(oldItems), func(i int) bool { return oldItems[i].Key >= 450 })
+	if oldIndex == len(oldItems) || oldItems[oldIndex].Value != 151 {
+		t.Fatalf("old root does not retain pre-update value: %#v", oldItems)
 	}
 }
 
