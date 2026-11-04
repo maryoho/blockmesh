@@ -488,7 +488,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
   var err error
   if t.persistentArena!=nil {
-   err=t.persistentArena.CommitPagesAndPublish(nil,nil,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
+   err=t.persistentArena.CommitPagesAndPublish(nil,nil,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
   } else {
    err=t.store.CommitPagesAndPublish(nil,rootID,sequence,t.journal)
   }
@@ -507,7 +507,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  if cursor!=len(ids){return fmt.Errorf("internal error: used %d of %d reserved COW pages",cursor,len(ids))}
  newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
  if t.persistentArena!=nil {
-  err=t.persistentArena.CommitPagesAndPublish(reservation,pages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
+  err=t.persistentArena.CommitPagesAndPublish(reservation,pages,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
  } else {
   err=t.store.CommitPagesAndPublish(pages,rootID,sequence,t.journal)
  }
