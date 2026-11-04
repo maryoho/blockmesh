@@ -45,6 +45,8 @@ type Layout struct {
 	TotalPages uint64
 	ArenaStart uint64
 	ArenaPages uint64
+	LifecycleStart uint64
+	LifecyclePages uint64
 }
 
 type Superblock struct {
@@ -55,6 +57,8 @@ type Superblock struct {
 	ArenaPages      uint64
 	RootPage        uint64
 	MappingSequence uint64
+	LifecycleStart uint64
+	LifecyclePages uint64
 }
 
 type Page struct {
@@ -94,6 +98,17 @@ func validateLayout(l Layout) error {
 	if l.ArenaStart > l.TotalPages || l.ArenaPages > l.TotalPages-l.ArenaStart {
 		return ErrGeometry
 	}
+	if l.LifecyclePages != 0 {
+		if l.LifecyclePages < 2 || l.LifecycleStart < 2 || l.LifecycleStart > l.TotalPages ||
+			l.LifecyclePages > l.TotalPages-l.LifecycleStart {
+			return ErrGeometry
+		}
+		arenaEnd := l.ArenaStart + l.ArenaPages
+		lifecycleEnd := l.LifecycleStart + l.LifecyclePages
+		if l.LifecycleStart < arenaEnd && lifecycleEnd > l.ArenaStart {
+			return ErrGeometry
+		}
+	}
 	return nil
 }
 
@@ -117,7 +132,7 @@ func Format(dev Device, l Layout) (*Store, error) {
 		return nil, err
 	}
 	sb := Superblock{VolumeID: l.VolumeID, Generation: 1, TotalPages: l.TotalPages,
-		ArenaStart: l.ArenaStart, ArenaPages: l.ArenaPages, RootPage: NoPage}
+		ArenaStart: l.ArenaStart, ArenaPages: l.ArenaPages, RootPage: NoPage, LifecycleStart:l.LifecycleStart, LifecyclePages:l.LifecyclePages}
 
 	b, err := encodeSuperblock(sb)
 	if err != nil {
@@ -197,6 +212,14 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	if s.sb.Generation == math.MaxUint64 {
 		return errors.New("superblock generation exhausted")
 	}
+	for _, image := range extra {
+		if image.Offset%PageSize != 0 || len(image.Data) != PageSize || image.Offset > s.sb.TotalPages*PageSize || PageSize > s.sb.TotalPages*PageSize-image.Offset {
+			return fmt.Errorf("invalid extra metadata after-image at offset %d", image.Offset)
+		}
+		if _, exists := seen[image.Offset/PageSize]; exists { return fmt.Errorf("duplicate metadata after-image at offset %d", image.Offset) }
+		seen[image.Offset/PageSize] = struct{}{}
+		images = append(images, PageImage{Offset:image.Offset, Data:append([]byte(nil), image.Data...)})
+	}
 	next := s.sb
 	next.Generation++
 	next.RootPage = rootPage
@@ -220,6 +243,13 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 // superblock root descriptor in one WAL transaction. The root descriptor is
 // appended last, so recovery can never publish a root before its pages.
 func (s *Store) CommitPagesAndPublish(pages []Page, rootPage, mappingSequence uint64, committer Committer) error {
+	return s.CommitPagesAndPublishWithImages(pages, nil, rootPage, mappingSequence, committer)
+}
+
+// CommitPagesAndPublishWithImages commits COW pages, caller-supplied durable
+// lifecycle images, and the inactive root descriptor in one WAL transaction.
+// Lifecycle images are applied after data pages and before the root descriptor.
+func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage, rootPage, mappingSequence uint64, committer Committer) error {
 	if committer == nil {
 		return errors.New("nil metadata WAL committer")
 	}
@@ -236,7 +266,7 @@ func (s *Store) CommitPagesAndPublish(pages []Page, rootPage, mappingSequence ui
 		return errors.New("superblock generation exhausted")
 	}
 
-	images := make([]PageImage, 0, len(pages)+1)
+	images := make([]PageImage, 0, len(pages)+len(extra)+1)
 	seen := make(map[uint64]struct{}, len(pages))
 	rootIncluded := rootPage == NoPage
 	for _, page := range pages {
@@ -335,6 +365,8 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 	binary.LittleEndian.PutUint64(b[40:48], s.ArenaPages)
 	binary.LittleEndian.PutUint64(b[48:56], s.RootPage)
 	binary.LittleEndian.PutUint64(b[56:64], s.MappingSequence)
+	binary.LittleEndian.PutUint64(b[128:136], s.LifecycleStart)
+	binary.LittleEndian.PutUint64(b[136:144], s.LifecyclePages)
 	copy(b[64:128], s.VolumeID)
 	binary.LittleEndian.PutUint32(b[PageSize-4:], crc32.Checksum(b[:PageSize-4], crcTable))
 	return b, nil
@@ -351,6 +383,13 @@ func decodeSuperblock(b []byte) (Superblock, error) {
 	s := Superblock{VolumeID: id, Generation: binary.LittleEndian.Uint64(b[16:24]), TotalPages: binary.LittleEndian.Uint64(b[24:32]), ArenaStart: binary.LittleEndian.Uint64(b[32:40]), ArenaPages: binary.LittleEndian.Uint64(b[40:48]), RootPage: binary.LittleEndian.Uint64(b[48:56]), MappingSequence: binary.LittleEndian.Uint64(b[56:64])}
 	if len(id) == 0 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages || s.ArenaPages > s.TotalPages-s.ArenaStart || (s.RootPage != NoPage && !(s.RootPage >= s.ArenaStart && s.RootPage-s.ArenaStart < s.ArenaPages)) {
 		return Superblock{}, ErrGeometry
+	}
+	if s.LifecyclePages != 0 {
+		if s.LifecyclePages < 2 || s.LifecycleStart < 2 || s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart {
+			return Superblock{}, ErrGeometry
+		}
+		arenaEnd, lifecycleEnd := s.ArenaStart+s.ArenaPages, s.LifecycleStart+s.LifecyclePages
+		if s.LifecycleStart < arenaEnd && lifecycleEnd > s.ArenaStart { return Superblock{}, ErrGeometry }
 	}
 	return s, nil
 }
