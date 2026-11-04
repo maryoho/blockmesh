@@ -311,6 +311,23 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 		}
 	}
 
+	for _, image := range extra {
+		if image.Offset%PageSize != 0 || len(image.Data) != PageSize ||
+			image.Offset > s.sb.TotalPages*PageSize || PageSize > s.sb.TotalPages*PageSize-image.Offset {
+			return fmt.Errorf("invalid extra metadata after-image at offset %d", image.Offset)
+		}
+		if s.sb.LifecyclePages == 0 || image.Offset < s.sb.LifecycleStart*PageSize ||
+			image.Offset >= (s.sb.LifecycleStart+s.sb.LifecyclePages)*PageSize {
+			return fmt.Errorf("extra metadata after-image %d is outside lifecycle region", image.Offset)
+		}
+		pageID := image.Offset / PageSize
+		if _, exists := seen[pageID]; exists {
+			return fmt.Errorf("duplicate metadata after-image at offset %d", image.Offset)
+		}
+		seen[pageID] = struct{}{}
+		images = append(images, PageImage{Offset: image.Offset, Data: append([]byte(nil), image.Data...)})
+	}
+
 	next := s.sb
 	next.Generation++
 	next.RootPage = rootPage
