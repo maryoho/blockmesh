@@ -26,6 +26,16 @@ type CommandResult struct {
 	Duration time.Duration `json:"duration"`
 }
 
+type ReservationEvidence struct {
+	Present bool `json:"present"`
+	HolderKey string `json:"holder_key,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	Type uint8 `json:"type,omitempty"`
+	TypeName string `json:"type_name,omitempty"`
+	AllRegistrants bool `json:"all_registrants"`
+	Parsed bool `json:"parsed"`
+}
+
 type PathEvidence struct {
 	Device string `json:"device"`
 	WWID string `json:"wwid,omitempty"`
@@ -33,6 +43,7 @@ type PathEvidence struct {
 	ReadReservation CommandResult `json:"read_reservation"`
 	RegisteredKeys []string `json:"registered_keys,omitempty"`
 	KeysParsed bool `json:"keys_parsed"`
+	Reservation ReservationEvidence `json:"reservation"`
 }
 
 type Evidence struct {
@@ -155,7 +166,10 @@ func (c Collector) Collect(ctx context.Context, multipathMap, volumeID, nodeID, 
 		reservation := run(ctx, runner, timeout, "sg_persist", "--in", "--read-reservation", "--device="+path)
 		item := PathEvidence{Device: path, WWID: extractWWID(wwid.Output), ReadKeys: keys, ReadReservation: reservation}
 		if keys.ExitCode == 0 { item.RegisteredKeys, item.KeysParsed = parseKeys(keys.Output) } else { e.Warnings = append(e.Warnings, "cannot read PR keys on "+path+": "+keys.Error) }
-		if reservation.ExitCode != 0 { e.Warnings = append(e.Warnings, "cannot read PR reservation on "+path+": "+reservation.Error) }
+		if reservation.ExitCode == 0 {
+			item.Reservation = parseReservation(reservation.Output)
+			if !item.Reservation.Parsed { e.Warnings = append(e.Warnings, "cannot parse PR reservation on "+path) }
+		} else { e.Warnings = append(e.Warnings, "cannot read PR reservation on "+path+": "+reservation.Error) }
 		if item.WWID == "" { e.Warnings = append(e.Warnings, "cannot establish WWID for "+path) }
 		e.Paths = append(e.Paths, item)
 	}
@@ -173,6 +187,10 @@ var (
 	plainKeyRE = regexp.MustCompile("(?i)^\\s*0x([0-9a-f]{1,16})\\s*$")
 	wwidRE = regexp.MustCompile("(?m)^ID_WWN(?:_WITH_EXTENSION)?=(\\S+)\\s*$")
 	majorMinorRE = regexp.MustCompile("^\\d+:\\d+$")
+	reservationKeyRE = regexp.MustCompile("(?i)^\\s*(?:key|reservation\\s+holder)\\s*[:=]\\s*0x([0-9a-f]{1,16})\\s*$")
+	reservationTypeRE = regexp.MustCompile("(?i)\\btype\\s*:\\s*([^,\\r\\n]+(?:,\\s*(?:registrants only|all registrants))?)")
+	reservationTypeCodeRE = regexp.MustCompile("(?i)\\btype\\s*=\\s*(0x[0-9a-f]+|[0-9]+)")
+	reservationScopeRE = regexp.MustCompile("(?i)\\bscope\\s*:\\s*([^,\\r\\n]+)")
 )
 
 func normalizeKey(value string) string {
@@ -246,6 +264,99 @@ func VerifyTargetKeyAbsent(e Evidence, targetKey string) (FenceVerification, err
 				result.AbsentOnAllPaths = false
 				break
 			}
+		}
+	}
+	return result, nil
+}
+
+func parseReservation(output string) ReservationEvidence {
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "no reservation held") || strings.Contains(lower, "no reservation") || strings.Contains(lower, "reservation not held") {
+		return ReservationEvidence{Present: false, Parsed: true}
+	}
+	result := ReservationEvidence{}
+	keys := make(map[string]bool)
+	for _, line := range strings.Split(output, "\n") {
+		if match := reservationKeyRE.FindStringSubmatch(line); match != nil {
+			keys[normalizeKey(match[1])] = true
+		}
+	}
+	if len(keys) == 1 {
+		for key := range keys { result.HolderKey = key }
+	} else if len(keys) > 1 {
+		return result
+	}
+	if match := reservationScopeRE.FindStringSubmatch(output); match != nil {
+		result.Scope = strings.TrimSpace(match[1])
+	}
+	if match := reservationTypeCodeRE.FindStringSubmatch(output); match != nil {
+		value := strings.TrimSpace(match[1])
+		var n uint64
+		var err error
+		if strings.HasPrefix(strings.ToLower(value), "0x") { n, err = strconv.ParseUint(value[2:], 16, 8) } else { n, err = strconv.ParseUint(value, 10, 8) }
+		if err == nil && validPRType(uint8(n)) { result.Type = uint8(n); result.TypeName = prTypeName(uint8(n)) }
+	} else if match := reservationTypeRE.FindStringSubmatch(output); match != nil {
+		name := strings.ToLower(strings.TrimSpace(match[1]))
+		name = strings.Join(strings.Fields(name), " ")
+		typeMap := map[string]uint8{
+			"write exclusive": 1, "exclusive access": 3,
+			"write exclusive, registrants only": 5, "exclusive access, registrants only": 6,
+			"write exclusive, all registrants": 7, "exclusive access, all registrants": 8,
+		}
+		result.Type = typeMap[name]
+		if result.Type != 0 { result.TypeName = prTypeName(result.Type) }
+	}
+	result.AllRegistrants = result.Type == 7 || result.Type == 8
+	if result.HolderKey == "" || result.Type == 0 { return result }
+	result.Present = true
+	result.Parsed = true
+	return result
+}
+
+func validPRType(prType uint8) bool {
+	switch prType { case 1, 3, 5, 6, 7, 8: return true }
+	return false
+}
+
+func prTypeName(prType uint8) string {
+	switch prType {
+	case 1: return "Write Exclusive"
+	case 3: return "Exclusive Access"
+	case 5: return "Write Exclusive, Registrants Only"
+	case 6: return "Exclusive Access, Registrants Only"
+	case 7: return "Write Exclusive, All Registrants"
+	case 8: return "Exclusive Access, All Registrants"
+	default: return ""
+	}
+}
+
+type ReservationVerification struct {
+	ExpectedHolderKey string `json:"expected_holder_key"`
+	ExpectedType uint8 `json:"expected_type"`
+	Verified bool `json:"verified"`
+	MismatchPaths []string `json:"mismatch_paths,omitempty"`
+	UnknownPaths []string `json:"unknown_paths,omitempty"`
+}
+
+// VerifyReservation checks the active reservation identity and type on every
+// component path. It only evaluates captured evidence and never changes PR state.
+func VerifyReservation(e Evidence, expectedHolderKey string, expectedType uint8) (ReservationVerification, error) {
+	key := normalizeKey(expectedHolderKey)
+	if len(key) > 16 { return ReservationVerification{}, errors.New("expected PR holder key exceeds 64 bits") }
+	if _, err := strconv.ParseUint(key, 16, 64); err != nil { return ReservationVerification{}, fmt.Errorf("invalid expected PR holder key %q", expectedHolderKey) }
+	if !validPRType(expectedType) { return ReservationVerification{}, fmt.Errorf("invalid expected SCSI PR type %d", expectedType) }
+	if len(e.Paths) == 0 { return ReservationVerification{}, errors.New("evidence has no SAN paths") }
+	if !e.PathCoverageVerified { return ReservationVerification{}, errors.New("multipath component-path coverage and common WWID are not verified; refusing a reservation conclusion") }
+	result := ReservationVerification{ExpectedHolderKey: "0x"+key, ExpectedType: expectedType, Verified: true}
+	for _, path := range e.Paths {
+		if path.ReadReservation.ExitCode != 0 || !path.Reservation.Parsed {
+			result.UnknownPaths = append(result.UnknownPaths, path.Device)
+			result.Verified = false
+			continue
+		}
+		if !path.Reservation.Present || normalizeKey(path.Reservation.HolderKey) != key || path.Reservation.Type != expectedType {
+			result.MismatchPaths = append(result.MismatchPaths, path.Device)
+			result.Verified = false
 		}
 	}
 	return result, nil
