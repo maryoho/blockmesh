@@ -103,7 +103,6 @@ func OpenPersistent(store *metastore.Store, journal metastore.Committer) (*Tree,
 	persistent, err := metastore.NewPersistentArena(store, t.pages, journal)
 	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
 	t.persistentArena = persistent
-	t.arena = persistent.Arena()
 	return t, nil
 }
 
@@ -290,7 +289,10 @@ func (t *Tree) RootPage() uint64 {
 	return t.root
 }
 
-func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
+func (t *Tree) ArenaStats() metastore.ArenaStats {
+	if t.persistentArena != nil { return t.persistentArena.Stats() }
+	return t.arena.Stats()
+}
 
 // RetiredPages returns a snapshot of process-local retirement batches.
 func (t *Tree) RetiredPages() []metastore.RetireBatch {
