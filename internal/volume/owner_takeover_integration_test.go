@@ -220,6 +220,18 @@ func TestAmbiguousKubernetesCreateIsFencedByNextOwner(t *testing.T){
 			close(createFinished)
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(committed)
+		case http.MethodPut:
+			var incoming map[string]any
+			if err:=json.NewDecoder(r.Body).Decode(&incoming);err!=nil{http.Error(w,err.Error(),400);return}
+			mu.Lock()
+			if object==nil{mu.Unlock();http.Error(w,"not found",404);return}
+			oldMeta:=nestedMap(object,"metadata")
+			newMeta:=nestedMap(incoming,"metadata")
+			if oldMeta["resourceVersion"]!=newMeta["resourceVersion"]{mu.Unlock();http.Error(w,"resourceVersion conflict",409);return}
+			newMeta["resourceVersion"]="2"
+			object=incoming
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(incoming)
 		default:
 			http.Error(w,"method not allowed",405)
 		}
