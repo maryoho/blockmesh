@@ -95,6 +95,53 @@ func TestPersistentTreePersistsArenaAndRetireQueue(t *testing.T) {
  if len(reopened.RetiredPages())!=0{t.Fatal("persistent retire queue not cleared")}
 }
 
+
+func TestPersistentArenaLifecycleReplaysAtomicallyWithWAL(t *testing.T) {
+ f,err:=os.CreateTemp(t.TempDir(),"btree-persistent-wal-*.img");if err!=nil{t.Fatal(err)};defer f.Close()
+ if err=f.Truncate(int64(format.MetadataSize));err!=nil{t.Fatal(err)}
+ dev,err:=device.Open(f.Name(),true);if err!=nil{t.Fatal(err)};defer dev.Close()
+ lifecycleStart:=format.ReservedOffset/format.PageSize
+ store,err:=metastore.Format(dev,metastore.Layout{
+  VolumeID:"persistent-wal",TotalPages:format.MetadataSize/format.PageSize,
+  ArenaStart:1_700_000,ArenaPages:1024,LifecycleStart:lifecycleStart,LifecyclePages:2,
+ })
+ if err!=nil{t.Fatal(err)}
+ if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
+ poolSB,err:=format.NewSuperblock(0);if err!=nil{t.Fatal(err)}
+ journal,err:=wal.New(dev,poolSB,0);if err!=nil{t.Fatal(err)}
+ tree,err:=OpenPersistent(store,journal);if err!=nil{t.Fatal(err)}
+ if err=tree.Put(7,70);err!=nil{t.Fatal(err)}
+ oldRoot:=tree.RootPage()
+
+ oldInactive:=make([]byte,metastore.PageSize)
+ if n,e:=dev.ReadAt(oldInactive,int64(metastore.Superblock1*metastore.PageSize));e!=nil||n!=len(oldInactive){t.Fatalf("read inactive superblock n=%d err=%v",n,e)}
+ stateBefore:=make([]byte,metastore.PageSize);queueBefore:=make([]byte,metastore.PageSize)
+ stateOff:=int64(lifecycleStart*format.PageSize);queueOff:=stateOff+int64(metastore.PageSize)
+ if n,e:=dev.ReadAt(stateBefore,stateOff);e!=nil||n!=len(stateBefore){t.Fatalf("read lifecycle state n=%d err=%v",n,e)}
+ if n,e:=dev.ReadAt(queueBefore,queueOff);e!=nil||n!=len(queueBefore){t.Fatalf("read retire queue n=%d err=%v",n,e)}
+
+ if err=tree.Put(7,71);err!=nil{t.Fatal(err)}
+ newRoot:=tree.RootPage();if newRoot==oldRoot{t.Fatal("expected COW root replacement")}
+ // Model a crash after WAL Commit became durable but before any target
+ // after-image (COW page, lifecycle pages, root superblock) was applied.
+ for off,data:=range map[int64][]byte{
+  {int64(newRoot*metastore.PageSize):make([]byte,metastore.PageSize),
+   int64(metastore.Superblock1*metastore.PageSize):oldInactive,
+   stateOff:stateBefore,queueOff:queueBefore,
+  }{
+  if n,e:=dev.WriteAt(data,off);e!=nil||n!=len(data){t.Fatalf("restore pre-apply image at %d: n=%d err=%v",off,n,e)}
+ }
+ if err=dev.Sync();err!=nil{t.Fatal(err)}
+ if _,err=wal.New(dev,poolSB,0);err!=nil{t.Fatalf("WAL recovery failed: %v",err)}
+ reopenedStore,err:=metastore.Open(dev,"persistent-wal");if err!=nil{t.Fatal(err)}
+ recoveredJournal,err:=wal.New(dev,poolSB,0);if err!=nil{t.Fatal(err)}
+ recovered,err:=OpenPersistent(reopenedStore,recoveredJournal);if err!=nil{t.Fatal(err)}
+ if got,e:=recovered.Get(7);e!=nil||got!=71{t.Fatalf("recovered value=%d err=%v",got,e)}
+ pending:=recovered.RetiredPages()
+ if len(pending)!=1||pending[0].RetireGeneration!=1||len(pending[0].PageIDs)!=1||pending[0].PageIDs[0]!=oldRoot{
+  t.Fatalf("WAL did not atomically recover retire queue: %+v",pending)
+ }
+}
 func TestPutGetReplaceDeleteAndReopen(t *testing.T) {
 	store, tree, dev := newTree(t, 1024)
 	for i := uint64(0); i < 270; i++ {
