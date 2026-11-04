@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: blockmesh-owner-record
+  namespace: blockmesh-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: blockmesh-owner-record
+  namespace: blockmesh-system
+subjects:
+  - kind: ServiceAccount
+    name: blockmesh
+    namespace: blockmesh-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: blockmesh-owner-record
