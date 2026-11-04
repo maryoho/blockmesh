@@ -212,8 +212,8 @@ func (t *ReaderTable) FenceAndClose(ctx context.Context,slot uint32,nodeID,bootI
 	return t.writeLocked(current)
 }
 
-func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
-	t.mu.Lock();defer t.mu.Unlock()
+func (t *ReaderTable) snapshotLocked() ([]ReaderRecord,error) {
+	if err:=t.store.Refresh();err!=nil{return nil,err}
 	out:=make([]ReaderRecord,0,t.slots)
 	for i:=uint32(0);i<t.slots;i++ {
 		r,err:=t.readLocked(i);if err!=nil{return nil,err}
@@ -222,13 +222,25 @@ func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
 	return out,nil
 }
 
+func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
+	unlock,err:=t.lockReaderSet();if err!=nil{return nil,err};defer unlock()
+	t.mu.Lock();defer t.mu.Unlock()
+	return t.snapshotLocked()
+}
+
 // SafeGeneration is the minimum root generation held by any Active or
 // Leaving reader. Gracefully Closed and SAN Fenced slots no longer pin pages.
-func (t *ReaderTable) SafeGeneration() (uint64,error) {
-	readers,err:=t.Snapshot();if err!=nil{return 0,err}
+func (t *ReaderTable) safeGenerationLocked() (uint64,error) {
+	readers,err:=t.snapshotLocked();if err!=nil{return 0,err}
 	safe:=uint64(math.MaxUint64)
 	for _,r:=range readers { if r.RootGeneration<safe {safe=r.RootGeneration} }
 	return safe,nil
+}
+
+func (t *ReaderTable) SafeGeneration() (uint64,error) {
+	unlock,err:=t.lockReaderSet();if err!=nil{return 0,err};defer unlock()
+	t.mu.Lock();defer t.mu.Unlock()
+	return t.safeGenerationLocked()
 }
 
 func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
