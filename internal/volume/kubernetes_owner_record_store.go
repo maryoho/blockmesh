@@ -221,7 +221,8 @@ func (s *KubernetesOwnerRecordStore) CompareAndSwap(ctx context.Context, volumeI
 		if decodeErr!=nil { return decodeErr }
 		if current!=*expected { return ErrOwnerRecordConflict }
 		meta,_:=obj["metadata"].(map[string]any)
-		if meta==nil || strings.TrimSpace(fmt.Sprint(meta["resourceVersion"]))=="" || meta["resourceVersion"]==nil {
+		rv,hasRV:=meta["resourceVersion"].(string)
+		if meta==nil || !hasRV || strings.TrimSpace(rv)=="" {
 			return errors.New("Kubernetes OwnerRecord Lease has no resourceVersion; refusing non-CAS update")
 		}
 		writeOwnerRecord(obj,next)
