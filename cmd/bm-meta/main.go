@@ -12,7 +12,8 @@ import (
 	"blockmesh/internal/device"
 	"blockmesh/internal/fence"
 	"blockmesh/internal/metadata"
-	"blockmesh/internal/metastore"
+	"blockmesh/internal/metadata"
+	"blockmesh/internal/format"
 	"blockmesh/internal/volume"
 )
 
@@ -21,7 +22,7 @@ type deviceReport struct {
 	DeviceBytes int64               `json:"device_bytes"`
 	LogicalSectorSize int           `json:"logical_sector_size"`
 	ReadOnly bool                   `json:"read_only"`
-	Superblock metastore.Superblock `json:"superblock"`
+	Superblock format.Superblock `json:"pool_superblock"`
 }
 
 func main() {
@@ -67,87 +68,36 @@ isolated from the fixed-LBA block-device commands and is not production-safe.`)
 }
 
 func runFormat(args []string) error {
-	fs := flag.NewFlagSet("format", flag.ContinueOnError)
-	path := fs.String("device", "", "Linux block device or multipath device")
-	volumeID := fs.String("volume-id", "", "metadata volume identity")
-	arenaStart := fs.Uint64("arena-start", 2, "first Arena page")
-	arenaPages := fs.Uint64("arena-pages", 0, "Arena page count")
-	lifecycleStart := fs.Uint64("lifecycle-start", 0, "first lifecycle/Reader Table page")
-	lifecyclePages := fs.Uint64("lifecycle-pages", 0, "lifecycle page count (2..32)")
-	confirm := fs.Bool("confirm-format", false, "confirm destructive metadata format")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("unexpected positional arguments")
-	}
-	if !*confirm {
-		return errors.New("refusing destructive format without --confirm-format")
-	}
-	if *path == "" || *volumeID == "" || *arenaPages == 0 {
-		return errors.New("--device, --volume-id and --arena-pages are required")
-	}
-	if *lifecycleStart == 0 || *lifecyclePages < 2 {
-		return errors.New("--lifecycle-start and --lifecycle-pages are required; lifecycle pages must be at least 2")
-	}
-	dev, err := device.OpenBlockDevice(*path, true, true)
-	if err != nil {
-		return err
-	}
-	defer dev.Close()
-	if dev.Size()%metastore.PageSize != 0 {
-		return fmt.Errorf("device size %d is not aligned to 4 KiB metadata pages", dev.Size())
-	}
-	layout := metastore.Layout{
-		VolumeID: *volumeID,
-		TotalPages: uint64(dev.Size() / metastore.PageSize),
-		ArenaStart: *arenaStart,
-		ArenaPages: *arenaPages,
-		LifecycleStart: *lifecycleStart,
-		LifecyclePages: *lifecyclePages,
-	}
-	store, err := metastore.Format(dev, layout)
-	if err != nil {
-		return fmt.Errorf("format fixed-LBA metadata: %w", err)
-	}
-	return writeReport(dev, store, false)
+	fs:=flag.NewFlagSet("format",flag.ContinueOnError)
+	path:=fs.String("device","","Linux block device or multipath device")
+	dataStart:=fs.Uint64("data-start-sector",0,"data area start sector")
+	confirm:=fs.Bool("confirm-format",false,"confirm destructive Pool format")
+	if err:=fs.Parse(args);err!=nil{return err}
+	if fs.NArg()!=0{return errors.New("unexpected positional arguments")}
+	if !*confirm{return errors.New("refusing destructive Pool format without --confirm-format")}
+	if *path==""{return errors.New("--device is required")}
+	dev,err:=device.OpenBlockDevice(*path,true,true);if err!=nil{return err};defer dev.Close()
+	if uint64(dev.Size())<format.MetadataSize{return fmt.Errorf("device size %d is smaller than Pool metadata size %d",dev.Size(),format.MetadataSize)}
+	if err=metadata.InitDevice(dev,*dataStart,true);err!=nil{return fmt.Errorf("format Pool metadata: %w",err)}
+	store,err:=metadata.OpenStoreDevice(dev);if err!=nil{return err}
+	return writeReport(dev,store,false)
 }
 
 func runInspect(args []string) error {
-	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
-	path := fs.String("device", "", "Linux block device or multipath device")
-	volumeID := fs.String("volume-id", "", "expected metadata volume identity")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("unexpected positional arguments")
-	}
-	if *path == "" || *volumeID == "" {
-		return errors.New("--device and --volume-id are required")
-	}
-	dev, err := device.OpenBlockDevice(*path, false, false)
-	if err != nil {
-		return err
-	}
-	defer dev.Close()
-	store, err := metastore.Open(dev, *volumeID)
-	if err != nil {
-		return fmt.Errorf("open fixed-LBA metadata: %w", err)
-	}
-	if err = store.Refresh(); err != nil {
-		return fmt.Errorf("refresh fixed-LBA superblock: %w", err)
-	}
-	return writeReport(dev, store, true)
+	fs:=flag.NewFlagSet("inspect",flag.ContinueOnError)
+	path:=fs.String("device","","Linux block device or multipath device")
+	if err:=fs.Parse(args);err!=nil{return err}
+	if fs.NArg()!=0{return errors.New("unexpected positional arguments")}
+	if *path==""{return errors.New("--device is required")}
+	dev,err:=device.OpenBlockDevice(*path,false,false);if err!=nil{return err};defer dev.Close()
+	store,err:=metadata.OpenStoreDevice(dev);if err!=nil{return fmt.Errorf("open Pool metadata: %w",err)}
+	return writeReport(dev,store,true)
 }
 
-func writeReport(dev *device.BlockDevice, store *metastore.Store, readOnly bool) error {
+func writeReport(dev *device.BlockDevice,store *metadata.Store,readOnly bool) error {
 	return json.NewEncoder(os.Stdout).Encode(deviceReport{
-		DevicePath: dev.Path(),
-		DeviceBytes: dev.Size(),
-		LogicalSectorSize: dev.LogicalSectorSize(),
-		ReadOnly: readOnly,
-		Superblock: store.Superblock(),
+		DevicePath:dev.Path(),DeviceBytes:dev.Size(),LogicalSectorSize:dev.LogicalSectorSize(),
+		ReadOnly:readOnly,Superblock:store.SB,
 	})
 }
 
