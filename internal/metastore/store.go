@@ -433,10 +433,12 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	var rootImage []byte
 	var nextDescriptor format.VolumeDescriptor
 	if s.poolBacked {
+		var slot uint64
 		var err error
-		nextDescriptor, s.sbSlot, rootImage, err = s.poolDescriptorAfterImage(rootPage, mappingSequence)
+		nextDescriptor, slot, rootImage, err = s.poolDescriptorAfterImage(rootPage, mappingSequence)
 		if err != nil { return err }
-		rootOffset = s.descriptorPair + s.sbSlot*PageSize
+		rootOffset = s.descriptorPair + slot*PageSize
+		s.sbSlot = slot
 	} else {
 		slot := uint64(1) - s.sbSlot
 		var err error
