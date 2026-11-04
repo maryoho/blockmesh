@@ -72,8 +72,12 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 	case fence.NoopFencer, *fence.NoopFencer:
 		return nil, errors.New("NoopFencer is forbidden for Pool runtime")
 	}
-	if _, ok := cfg.ReaderRecoveryProbe.(*SanlockReaderLeaseProbe); !ok {
-		return nil, errors.New("Pool runtime requires SanlockReaderLeaseProbe")
+	probe, ok := cfg.ReaderRecoveryProbe.(*SanlockReaderLeaseProbe)
+	if !ok || probe.Locker == nil || probe.Locker != cfg.Locker || probe.ResourceFor == nil {
+		return nil, errors.New("Pool runtime requires a SanlockReaderLeaseProbe using the same distributed locker")
+	}
+	if cfg.BuildRecovery == nil && cfg.RecoveryConfig.HeartbeatTimeout <= 0 {
+		return nil, errors.New("automatic Reader recovery requires a positive heartbeat timeout")
 	}
 	coordinator := &SanlockReaderCoordinator{
 		Locker: cfg.Locker, ResourceForVolume: cfg.ReaderSetResource,
