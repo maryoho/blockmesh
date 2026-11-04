@@ -110,6 +110,9 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	for _, off := range []uint64{format.SuperAOffset, format.SuperBOffset} {
 		page := make([]byte, format.PageSize)
 		if err := readAtFull(dev, page, int64(off)); err == nil {
+			// A damaged CRC must not make a Pool page look like a legacy
+			// metastore image and thereby permit a root write over the SB.
+			if binary.LittleEndian.Uint64(page[:8]) == format.SuperMagic { poolFormatted = true }
 			if diskSB, decodeErr := format.DecodeSuperblock(page); decodeErr == nil {
 				if diskSB.PoolUUID != sb.PoolUUID || diskSB.MetadataSize != sb.MetadataSize {
 					return nil, errors.New("on-device Pool Superblock does not match Journal geometry")
