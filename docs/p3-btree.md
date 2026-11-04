@@ -34,22 +34,38 @@ separator.
 
 A mutation builds only the changed path in reserved arena pages:
 
-1. Read the root and descend to the target leaf; untouched subtrees remain
-   references to their existing immutable pages.
-2. Apply the leaf change. If it overflows, split it and propagate the new child
-   reference upward. Internal overflow is split in the same way.
-3. Count dirty nodes, reserve exactly that many pages, and write dirty nodes
-   bottom-up with the next mapping sequence as their generation.
-4. Call `Store.Sync()`.
-5. Publish the new root through the inactive redundant superblock.
-6. Commit the arena reservation. If deletion collapses the root to an
-   unchanged child, publish that existing child page without allocating a
-   metadata page.
+1. Read the current root and descend to the target leaf; untouched subtrees
+   remain references to their existing immutable pages.
+2. Apply the leaf change. Splits, merges and rebalancing propagate COW
+   references toward the root.
+3. Reserve exactly the number of dirty pages and encode their complete 4 KiB
+   after-images bottom-up. Encoding does not write target pages.
+4. With a WAL committer supplied to `Open(store, journal)`, submit all new
+   page images and the inactive root superblock as one per-AG WAL transaction.
+   The root descriptor is the final after-image in that transaction.
+5. WAL persists Intent, then Commit, then applies the page images in order
+   (COW pages first, root descriptor last) and syncs the metadata device.
+6. Only after WAL commit/application succeeds does the process-local Arena
+   reservation become Live and the in-memory tree state advance.
 
-A failed page write or pre-publication Sync aborts the reservation. If
-`Store.Publish` returns an error, the reservation is intentionally retained:
-the inactive superblock may have been written even when its flush reports an
-error, so reusing those page IDs before reopen/recovery would be unsafe.
+This ordering provides an old-root-or-new-root recovery property. Before the
+WAL Commit is durable, no target after-image is applied. After Commit is
+durable, recovery replays every COW page and then the root descriptor; a crash
+during application is idempotently repaired. A root descriptor can therefore
+never become durable through this path before its referenced new pages.
+
+For compatibility, `Open(store)` retains the original non-WAL publication
+path. Production use of the P3-3.3 guarantee must open the tree with the
+matching per-AG Journal: `Open(store, journal)`. The Journal must be recovered
+before `metastore.Open` and before the tree is opened, so a replayed root
+descriptor is reflected in memory.
+
+If the WAL reports `ErrJournalFull`, the transaction did not commit and the
+new page reservation is aborted; checkpoint the AG WAL and retry. For other
+WAL I/O errors, commit outcome may be uncertain, so reserved page IDs are
+retained until the Journal is reopened and recovery determines the durable
+root. The process must stop using the old in-memory Store/Tree after such an
+error.
 
 ## Current implementation scope and limitations
 
