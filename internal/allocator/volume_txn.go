@@ -94,10 +94,13 @@ func (a *Allocator) AllocateOneTxn(ctx context.Context,lease lock.Lease,volumeID
  if ag>=sb.AGCount{return 0,fmt.Errorf("AG %d out of range",ag)}
  if mappingOffset%format.PageSize!=0||mappingOffset<sb.MappingOffset||mappingOffset>sb.CheckpointOffset||format.PageSize>sb.CheckpointOffset-mappingOffset{return 0,errors.New("mapping page offset outside Mapping region")}
  if buildMapping==nil{return 0,errors.New("mapping page builder is nil")}
+ unlockVD,err:=a.Locks.Lock(ctx,fmt.Sprintf("volume-descriptor:%d",pairOffset));if err!=nil{return 0,fmt.Errorf("acquire Volume Descriptor lock: %w",err)};defer unlockVD()
  unlockAG,err:=a.Locks.Lock(ctx,fmt.Sprintf("ag:%03d",ag));if err!=nil{return 0,fmt.Errorf("acquire AG lock: %w",err)};defer unlockAG()
  unlockMapping,err:=a.Locks.Lock(ctx,fmt.Sprintf("mapping-page:%d",mappingOffset));if err!=nil{return 0,fmt.Errorf("acquire Mapping lock: %w",err)};defer unlockMapping()
  vd,activeSlot,err:=readVolumeDescriptorPair(a.Store,pairOffset,volumeID);if err!=nil{return 0,err}
- if vd.AG!=ag||vd.OwnerEpoch!=ownerEpoch{return 0,errors.New("Volume Descriptor AG/OwnerEpoch mismatch")}
+ if vd.OwnerEpoch!=ownerEpoch{return 0,errors.New("Volume Descriptor OwnerEpoch mismatch")}
+ if vd.MappingRootOffset%format.PageSize!=0||vd.MappingRootOffset<sb.MappingOffset||vd.MappingRootOffset>sb.CheckpointOffset||format.PageSize>sb.CheckpointOffset-vd.MappingRootOffset{return 0,errors.New("current Mapping root is outside Mapping region")}
+ if mappingOffset==vd.MappingRootOffset{return 0,errors.New("new Mapping page must be a fresh COW page")}
  if vd.Generation==^uint64(0)||vd.VolumeSequence==^uint64(0){return 0,errors.New("Volume Descriptor sequence exhausted")}
  journal,err:=wal.New(a.Store.Device(),sb,ag);if err!=nil{return 0,err}
  base:=sb.BitmapOffset+uint64(ag)*format.AGBitmapStride
@@ -112,10 +115,10 @@ func (a *Allocator) AllocateOneTxn(ctx context.Context,lease lock.Lease,volumeID
  bitmapPage:=append([]byte(nil),bitmap[pageIndex*format.PageSize:(pageIndex+1)*format.PageSize]...)
  newBitmapDesc:=append([]byte(nil),desc...);binary.LittleEndian.PutUint64(newBitmapDesc[16:24],bitmapSeq+1)
  binary.LittleEndian.PutUint32(newBitmapDesc[24:28],crc32.Checksum(bitmap,castagnoli))
- oldMapping,err:=a.Store.ReadPage(mappingOffset);if err!=nil{return 0,err}
+ oldMapping,err:=a.Store.ReadPage(vd.MappingRootOffset);if err!=nil{return 0,err}
  newMapping,err:=buildMapping(oldMapping,physical);if err!=nil{return 0,fmt.Errorf("build Mapping page: %w",err)}
  if len(newMapping)!=int(format.PageSize){return 0,errors.New("Mapping builder must return exactly 4KiB")}
- next:=vd;next.Generation++;next.VolumeSequence++;next.MappingRootOffset=mappingOffset;next.BitmapSequence=bitmapSeq+1;next.OwnerEpoch=ownerEpoch
+ next:=vd;next.AG=ag;next.Generation++;next.VolumeSequence++;next.MappingRootOffset=mappingOffset;next.BitmapSequence=bitmapSeq+1;next.OwnerEpoch=ownerEpoch
  vdImage,err:=EncodeVolumeDescriptor(next);if err!=nil{return 0,err}
  inactive:=uint64(1)-activeSlot
  updates:=[]wal.PageUpdate{{Offset:base,Image:newBitmapDesc},{Offset:bitmapPageOffset,Image:bitmapPage},{Offset:mappingOffset,Image:newMapping},{Offset:pairOffset+inactive*format.PageSize,Image:vdImage}}
