@@ -285,6 +285,14 @@ func readRetireQueuePages(store *Store) ([]RetireBatch,uint64,error) {
  sb:=store.Superblock()
  if sb.LifecyclePages<2 { return nil,0,ErrLifecycleUnformatted }
  pageCount:=sb.LifecyclePages-1
+ // Backward compatibility for P3-3.5's single-page queue format.
+ if pageCount==1 {
+  first:=make([]byte,PageSize)
+  if err:=readFullAt(store.dev,first,int64((sb.LifecycleStart+1)*PageSize));err!=nil{return nil,0,err}
+  if binary.LittleEndian.Uint32(first[8:12])==lifecycleVersion {
+   return decodeRetireQueue(first,store)
+  }
+ }
  batches:=make([]RetireBatch,0)
  indexes:=make(map[uint64]int)
  seen:=make(map[uint64]struct{})
