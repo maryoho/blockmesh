@@ -13,6 +13,7 @@ var ErrRecoverySupervisorClosed = errors.New("reader recovery supervisor is clos
 // ManagedReaderRecovery is the production lifecycle contract. Validation is
 // performed synchronously before a volume activation is reported successful.
 type ManagedReaderRecovery interface {
+	VolumeID() string
 	ValidateProduction() error
 	Run(context.Context) error
 }
@@ -60,6 +61,7 @@ func (s *ReaderRecoverySupervisor) Activate(ctx context.Context, volumeID string
 	controller, err := s.factory(volumeID)
 	if err != nil { return fmt.Errorf("build reader recovery controller for %s: %w", volumeID, err) }
 	if controller == nil { return errors.New("reader recovery factory returned nil controller") }
+	if controller.VolumeID() != volumeID { return fmt.Errorf("recovery controller volume mismatch: requested %s, got %s", volumeID, controller.VolumeID()) }
 	if err = controller.ValidateProduction(); err != nil {
 		return fmt.Errorf("unsafe reader recovery configuration for %s: %w", volumeID, err)
 	}
