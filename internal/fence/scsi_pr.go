@@ -58,6 +58,7 @@ var (
 
 type ReaderRegistrar interface {
 	RegisterReader(context.Context, string, string) error
+	UnregisterReader(context.Context, string, string) error
 }
 
 type SCSIPRRegistrar struct {
@@ -65,6 +66,34 @@ type SCSIPRRegistrar struct {
 	Paths []PRPath
 	Timeout time.Duration
 	Runner CommandRunner
+}
+
+
+func (r *SCSIPRRegistrar) UnregisterReader(ctx context.Context, nodeID, bootID string) error {
+	if r == nil || len(r.Paths) == 0 { return errors.New("SCSI PR registrar requires local paths") }
+	binary:=r.Binary
+	if binary=="" { binary="sg_persist" }
+	runner:=r.Runner
+	if runner==nil { runner=execRunner{} }
+	timeout:=r.Timeout
+	if timeout<=0 { timeout=30*time.Second }
+	ctx,cancel:=context.WithTimeout(ctx,timeout)
+	defer cancel()
+	for _,path:=range r.Paths {
+		if strings.TrimSpace(path.Device)=="" || path.LocalKey==0 { return errors.New("every PR registration path needs a device and nonzero local key") }
+		present,err:=(&SCSIPRFencer{}).keyPresent(ctx,runner,binary,path.Device,path.LocalKey)
+		if err!=nil { return fmt.Errorf("read local PR keys on %s: %w",path.Device,err) }
+		if !present { continue }
+		output,runErr:=runner.Run(ctx,binary,"--out","--register",
+			fmt.Sprintf("--param-rk=%x",path.LocalKey),"--param-sark=0","--device="+path.Device)
+		if runErr!=nil { return fmt.Errorf("unregister local PR key for %s/%s on %s: %w: %s",nodeID,bootID,path.Device,runErr,strings.TrimSpace(string(output))) }
+	}
+	for _,path:=range r.Paths {
+		present,err:=(&SCSIPRFencer{}).keyPresent(ctx,runner,binary,path.Device,path.LocalKey)
+		if err!=nil { return fmt.Errorf("verify local PR key removal on %s: %w",path.Device,err) }
+		if present { return fmt.Errorf("local PR key %x remains registered on %s",path.LocalKey,path.Device) }
+	}
+	return nil
 }
 
 func (r *SCSIPRRegistrar) RegisterReader(ctx context.Context, nodeID, bootID string) error {
