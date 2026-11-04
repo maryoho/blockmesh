@@ -13,15 +13,15 @@ import (
 const bitmapDescriptorMagic = uint64(0x424D424D41503031) // BMBMAP01
 
 type Store struct {
-	dev *device.Device
+	dev device.Device
 	SB  format.Superblock
 }
 
-func Open(path string) (*Store, error) {
+func OpenStore(path string) (*Store, error) {
 	return openWithMode(path, false)
 }
 
-func OpenWritable(path string) (*Store, error) {
+func OpenStoreWritable(path string) (*Store, error) {
 	return openWithMode(path, true)
 }
 
@@ -159,7 +159,7 @@ func (s *Store) SetBitmapBit(ag uint32, localBlock uint64, allocated bool) error
 	return writeBitmap(s.dev, ag, base, bm, seq+1)
 }
 
-func readBitmap(d *device.Device, ag uint32, base uint64) ([]byte, uint64, error) {
+func readBitmap(d device.Device, ag uint32, base uint64) ([]byte, uint64, error) {
 	desc := make([]byte, format.PageSize)
 	if err := d.ReadAt(desc, int64(base)); err != nil {
 		return nil, 0, err
@@ -182,7 +182,7 @@ func readBitmap(d *device.Device, ag uint32, base uint64) ([]byte, uint64, error
 	return bm, seq, nil
 }
 
-func writeBitmap(d *device.Device, ag uint32, base uint64, bm []byte, seq uint64) error {
+func writeBitmap(d device.Device, ag uint32, base uint64, bm []byte, seq uint64) error {
 	if len(bm) != int(format.BitmapBytes) {
 		return fmt.Errorf("invalid bitmap size")
 	}
@@ -204,7 +204,7 @@ func writeBitmap(d *device.Device, ag uint32, base uint64, bm []byte, seq uint64
 
 // Device exposes the metadata device to the WAL and allocator packages.
 // Callers must coordinate all mutations with the configured lock provider.
-func (s *Store) Device() *device.Device { return s.dev }
+func (s *Store) Device() device.Device { return s.dev }
 
 // ReadPage reads one aligned 4KiB metadata page.
 func (s *Store) ReadPage(offset uint64) ([]byte, error) {
