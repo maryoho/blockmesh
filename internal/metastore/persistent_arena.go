@@ -135,7 +135,7 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 // and the new root descriptor in one WAL transaction. A non-ErrJournalFull
 // error may have an uncertain commit outcome; callers must stop using this
 // instance and reopen/recover rather than aborting the reservation.
-func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
+func (p *PersistentArena) CommitPagesAndPublish(pages []Page,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
  p.mu.Lock();defer p.mu.Unlock()
  if mappingSequence<=p.rootSequence||retireGeneration>=mappingSequence{return errors.New("invalid lifecycle generation")}
@@ -146,11 +146,7 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
  stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
  sb:=p.store.Superblock();stateOff,queueOff,err:=lifecycleOffsets(sb);if err!=nil{return err}
  extras:=[]PageImage{{Offset:stateOff,Data:stateImage},{Offset:queueOff,Data:queueImage}}
- if reservation!=nil {
-  if reservation.arena!=p.arena{return errors.New("reservation belongs to another Arena")}
- }
  if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{return err}
- if reservation!=nil {if err=reservation.Commit();err!=nil{return fmt.Errorf("root committed but Arena reservation transition failed: %w",err)}}
  p.stateGeneration++;p.rootSequence=mappingSequence;p.batches=nextBatches
  return nil
 }
