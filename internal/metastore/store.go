@@ -109,6 +109,7 @@ type Store struct {
 	poolSB format.Superblock
 	descriptor format.VolumeDescriptor
 	descriptorPair uint64
+	volumeIndex uint32
 }
 
 func validateLayout(l Layout) error {
