@@ -17,6 +17,8 @@ import (
 
 const (
 	PageSize       = 4096
+	MaxLifecyclePages = 32
+	MaxMetadataTransactionPages = 64
 	Superblock0    = uint64(0)
 	Superblock1    = uint64(1)
 	FormatVersion  = uint16(1)
@@ -31,6 +33,7 @@ var (
 	ErrCorrupt     = errors.New("metastore page is corrupt")
 	ErrOutOfRange  = errors.New("metastore page id out of range")
 	ErrGeometry    = errors.New("metastore geometry mismatch")
+	ErrMetadataTransactionTooLarge = errors.New("metadata transaction exceeds the 64-page limit")
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -101,7 +104,7 @@ func validateLayout(l Layout) error {
 	}
 	if l.LifecyclePages == 0 && l.LifecycleStart != 0 { return ErrGeometry }
 	if l.LifecyclePages != 0 {
-		if l.LifecyclePages < 2 || l.LifecycleStart < 2 || l.LifecycleStart > l.TotalPages ||
+		if l.LifecyclePages < 2 || l.LifecyclePages > MaxLifecyclePages || l.LifecycleStart < 2 || l.LifecycleStart > l.TotalPages ||
 			l.LifecyclePages > l.TotalPages-l.LifecycleStart {
 			return ErrGeometry
 		}
@@ -317,6 +320,7 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	if s.sb.Generation == math.MaxUint64 {
 		return errors.New("superblock generation exhausted")
 	}
+	if len(pages)+len(extra)+1>MaxMetadataTransactionPages { return ErrMetadataTransactionTooLarge }
 
 	images := make([]PageImage, 0, len(pages)+len(extra)+1)
 	seen := make(map[uint64]struct{}, len(pages))
@@ -438,7 +442,7 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 	}
 	if s.LifecyclePages == 0 && s.LifecycleStart != 0 { return nil, ErrGeometry }
 	if s.LifecyclePages != 0 {
-		if s.LifecyclePages < 2 || s.LifecycleStart < 2 ||
+		if s.LifecyclePages < 2 || s.LifecyclePages > MaxLifecyclePages || s.LifecycleStart < 2 ||
 			s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart {
 			return nil, ErrGeometry
 		}
@@ -501,7 +505,7 @@ func decodeSuperblock(b []byte) (Superblock, error) {
 	if version == FormatVersion && (s.LifecycleStart != 0 || s.LifecyclePages != 0) {
 		return Superblock{}, ErrCorrupt
 	}
-	if version == LifecycleFormatVersion && s.LifecyclePages < 2 {
+	if version == LifecycleFormatVersion && (s.LifecyclePages < 2 || s.LifecyclePages > MaxLifecyclePages) {
 		return Superblock{}, ErrGeometry
 	}
 	if s.LifecyclePages != 0 {
