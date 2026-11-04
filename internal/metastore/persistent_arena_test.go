@@ -19,6 +19,7 @@ func TestPersistentArenaRecoversRetiredPagesAndReclaimsOnlyAfterProof(t *testing
  if err=s.Sync();err!=nil{t.Fatal(err)}
  if err=s.Publish(2,1);err!=nil{t.Fatal(err)}
  if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+ if _,err=NewArena(s,nil);!errors.Is(err,ErrPersistentArenaRequired){t.Fatalf("volatile Arena must reject persistent layout: %v",err)}
  committer:=testCommitter{d:d}
  pa,err:=NewPersistentArena(s,[]uint64{2},committer);if err!=nil{t.Fatal(err)}
  reservation,err:=pa.Reserve(1);if err!=nil{t.Fatal(err)}
