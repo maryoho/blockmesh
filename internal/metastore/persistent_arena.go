@@ -212,15 +212,27 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
   if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=p.arena.reserved[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
  }
- p.arena.mu.Unlock()
+ // Keep the Arena mutex held from reservation validation through the
+ // durable WAL commit. Otherwise a concurrent Abort/Reserve could recycle a
+ // COW page while its after-image is being committed.
  nextBatches:=make([]RetireBatch,len(p.batches));for i,b:=range p.batches{nextBatches[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
  if len(retired)>0 {nextBatches=append(nextBatches,RetireBatch{RetireGeneration:retireGeneration,PageIDs:append([]uint64(nil),retired...)})}
- queueImages,err:=encodeRetireQueuePages(nextBatches,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{return err}
+ queueImages,err:=encodeRetireQueuePages(nextBatches,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{p.arena.mu.Unlock();return err}
  stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
- sb:=p.store.Superblock();stateOff,_,err:=lifecycleOffsets(sb);if err!=nil{return err}
+ sb:=p.store.Superblock();stateOff,_,err:=lifecycleOffsets(sb);if err!=nil{p.arena.mu.Unlock();return err}
  extras:=[]PageImage{{Offset:stateOff,Data:stateImage}}
  for i,image:=range queueImages { extras=append(extras,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
- if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{return err}
+ if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{p.arena.mu.Unlock();return err}
+ // The durable root is now visible. Convert this transaction's reservations
+ // into Live pages before allowing another goroutine to reserve or abort.
+ for id := range newLiveSet { p.arena.live[id] = struct{}{} }
+ if reservation != nil {
+  for _, id := range reservation.pages {
+   delete(p.arena.reserved, id)
+  }
+  reservation.done = true
+ }
+ p.arena.mu.Unlock()
  p.stateGeneration++;p.rootSequence=mappingSequence;p.batches=nextBatches
  return nil
 }
