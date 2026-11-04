@@ -129,7 +129,7 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
  if rootSequence!=store.Superblock().MappingSequence||queueGeneration!=generation{return nil,ErrLifecycleCorrupt}
  live:=append([]uint64(nil),livePages...)
  for _,batch:=range batches {live=append(live,batch.PageIDs...)}
- arena,err:=NewArena(store,live);if err!=nil{return nil,err}
+ arena,err:=newArena(store,live);if err!=nil{return nil,err}
  return &PersistentArena{store:store,arena:arena,committer:committer,stateGeneration:generation,rootSequence:rootSequence,batches:batches},nil
 }
 
