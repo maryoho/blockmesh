@@ -97,12 +97,14 @@ func (a *Allocator) AllocateOneTxn(ctx context.Context,lease lock.Lease,volumeID
  unlockVD,err:=a.Locks.Lock(ctx,fmt.Sprintf("volume-descriptor:%d",pairOffset));if err!=nil{return 0,fmt.Errorf("acquire Volume Descriptor lock: %w",err)};defer unlockVD()
  unlockAG,err:=a.Locks.Lock(ctx,fmt.Sprintf("ag:%03d",ag));if err!=nil{return 0,fmt.Errorf("acquire AG lock: %w",err)};defer unlockAG()
  unlockMapping,err:=a.Locks.Lock(ctx,fmt.Sprintf("mapping-page:%d",mappingOffset));if err!=nil{return 0,fmt.Errorf("acquire Mapping lock: %w",err)};defer unlockMapping()
+ // Journal.New performs mandatory recovery. It must run before reading
+ // the Volume Descriptor or any mutable AG metadata.
+ journal,err:=wal.New(a.Store.Device(),sb,ag);if err!=nil{return 0,err}
  vd,activeSlot,err:=readVolumeDescriptorPair(a.Store,pairOffset,volumeID);if err!=nil{return 0,err}
  if vd.OwnerEpoch!=ownerEpoch{return 0,errors.New("Volume Descriptor OwnerEpoch mismatch")}
  if vd.MappingRootOffset%format.PageSize!=0||vd.MappingRootOffset<sb.MappingOffset||vd.MappingRootOffset>sb.CheckpointOffset||format.PageSize>sb.CheckpointOffset-vd.MappingRootOffset{return 0,errors.New("current Mapping root is outside Mapping region")}
  if mappingOffset==vd.MappingRootOffset{return 0,errors.New("new Mapping page must be a fresh COW page")}
  if vd.Generation==^uint64(0)||vd.VolumeSequence==^uint64(0){return 0,errors.New("Volume Descriptor sequence exhausted")}
- journal,err:=wal.New(a.Store.Device(),sb,ag);if err!=nil{return 0,err}
  base:=sb.BitmapOffset+uint64(ag)*format.AGBitmapStride
  desc:=make([]byte,format.PageSize);if err=readDeviceAtFull(a.Store.Device(),desc,int64(base));err!=nil{return 0,err}
  if binary.LittleEndian.Uint64(desc[:8])!=bitmapDescriptorMagic||binary.LittleEndian.Uint32(desc[8:12])!=ag{return 0,fmt.Errorf("AG %d bitmap descriptor invalid",ag)}
