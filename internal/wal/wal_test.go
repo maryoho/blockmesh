@@ -37,7 +37,7 @@ func TestCommitAndRecoverRedo(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate a committed-but-not-applied transaction by restoring the old target.
-	if err = d.WriteAt(make([]byte, format.PageSize), int64(target)); err != nil {
+	if _, err = d.WriteAt(make([]byte, format.PageSize), int64(target)); err != nil {
 		t.Fatal(err)
 	}
 	if err = d.Sync(); err != nil {
@@ -51,7 +51,7 @@ func TestCommitAndRecoverRedo(t *testing.T) {
 		t.Fatal("expected committed WAL to replay")
 	}
 	got := make([]byte, format.PageSize)
-	if err = d.ReadAt(got, int64(target)); err != nil {
+	if _, err = d.ReadAt(got, int64(target)); err != nil {
 		t.Fatal(err)
 	}
 	if string(got[:10]) != "mapping-v1" {
