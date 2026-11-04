@@ -12,7 +12,6 @@ import (
 	"blockmesh/internal/device"
 	"blockmesh/internal/fence"
 	"blockmesh/internal/metadata"
-	"blockmesh/internal/metadata"
 	"blockmesh/internal/format"
 	"blockmesh/internal/volume"
 )
@@ -51,20 +50,19 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `bm-meta — BlockMesh fixed-LBA metadata device utility
+	fmt.Fprintln(os.Stderr, `bm-meta — BlockMesh Pool metadata utility
 
 Usage:
-  bm-meta inspect --device /dev/mapper/<metadata-lun> --volume-id <id>
-  bm-meta format  --device /dev/mapper/<metadata-lun> --volume-id <id> \
-      --arena-start <page> --arena-pages <count> \
-      --lifecycle-start <page> --lifecycle-pages <count> --confirm-format
+  bm-meta inspect --device /dev/mapper/<metadata-lun>
+  bm-meta format  --device /dev/mapper/<metadata-lun> --data-start-sector <sector> --confirm-format
   bm-meta demo [demo flags] <demo command>
 
-format is destructive and requires --confirm-format. It opens the block
-device with O_EXCL. inspect is read-only and does not acquire a cluster lease.
+format is destructive: it writes BMPOOL02 Pool Superblocks at LBA 0/1 and
+initializes Pool-level AG metadata. It does not initialize Volume Descriptors.
+inspect is read-only and does not acquire a cluster lease.
 
 The demo command uses JSON state files, MemoryLease and NoopFencer. It is
-isolated from the fixed-LBA block-device commands and is not production-safe.`)
+not production-safe.`)
 }
 
 func runFormat(args []string) error {
