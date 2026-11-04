@@ -200,23 +200,31 @@ func TestAmbiguousKubernetesCreateIsFencedByNextOwner(t *testing.T){
 	var mu sync.Mutex
 	var object map[string]any
 	var delayCreate atomic.Bool
+	createFinished:=make(chan struct{})
 	handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
-		mu.Lock()
-		defer mu.Unlock()
-		if r.Method==http.MethodGet{
-			if object==nil{http.Error(w,"not found",404);return}
-			_ = json.NewEncoder(w).Encode(object);return
-		}
-		if r.Method==http.MethodPost{
-			if object!=nil{http.Error(w,"already exists",409);return}
-			if err:=json.NewDecoder(r.Body).Decode(&object);err!=nil{http.Error(w,err.Error(),400);return}
+		switch r.Method {
+		case http.MethodGet:
+			mu.Lock()
+			current:=object
+			mu.Unlock()
+			if current==nil{http.Error(w,"not found",404);return}
+			_ = json.NewEncoder(w).Encode(current)
+		case http.MethodPost:
+			mu.Lock()
+			if object!=nil{mu.Unlock();http.Error(w,"already exists",409);return}
+			if err:=json.NewDecoder(r.Body).Decode(&object);err!=nil{mu.Unlock();http.Error(w,err.Error(),400);return}
 			nestedMap(object,"metadata")["resourceVersion"]="1"
-			if delayCreate.Load(){time.Sleep(80*time.Millisecond)}
-			w.WriteHeader(http.StatusCreated);_ = json.NewEncoder(w).Encode(object);return
+			committed:=object
+			mu.Unlock()
+			if delayCreate.Load(){time.Sleep(150*time.Millisecond)}
+			close(createFinished)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(committed)
+		default:
+			http.Error(w,"method not allowed",405)
 		}
-		http.Error(w,"method not allowed",405)
 	})
-	records,server:=newIntegrationKubernetesStore(t,handler,15*time.Millisecond)
+	records,server:=newIntegrationKubernetesStore(t,handler,30*time.Millisecond)
 	defer server.Close()
 	locker:=newIntegrationSanlockLocker()
 	fenceA:=&integrationPathFencer{paths:[]string{"mpatha","mpathb"}}
@@ -230,6 +238,11 @@ func TestAmbiguousKubernetesCreateIsFencedByNextOwner(t *testing.T){
 		t.Fatal("expected client timeout after server committed initial OwnerRecord")
 	}
 	if locker.active.Load()!=0{t.Fatal("ambiguous create leaked sanlock Owner lease")}
+	select {
+	case <-createFinished:
+	case <-time.After(time.Second):
+		t.Fatal("Kubernetes API simulator did not finish the committed create response")
+	}
 	delayCreate.Store(false)
 	record,exists,err:=records.Load(context.Background(),"vol-a")
 	if err!=nil||!exists{t.Fatalf("server-side committed record not visible: exists=%v err=%v",exists,err)}
