@@ -50,6 +50,8 @@ type Journal struct {
 	size uint64
 	segmentBase uint64
 	metadataSize uint64
+	nodeTableStart uint64
+	nodeTableEnd uint64
 	walStart uint64
 	walEnd uint64
 	checkpointStart uint64
@@ -100,7 +102,8 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	}
 	j := &Journal{
 		dev: dev, segmentBase: segmentBase, size: walBankSize,
-		metadataSize: sb.MetadataSize, walStart: sb.WALOffset,
+		metadataSize: sb.MetadataSize, nodeTableStart: sb.NodeTableOffset,
+		nodeTableEnd: sb.NodeTableOffset + format.NodeTableSize, walStart: sb.WALOffset,
 		walEnd: sb.WALOffset + sb.WALSize,
 		checkpointStart: sb.CheckpointOffset, checkpointEnd: checkpointEnd,
 		nextTx: 1,
@@ -343,8 +346,10 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 			}
 		} else if isVolumeDescriptor(update.Image) {
 			rootDescriptors++
-			if i != len(updates)-1 || rootDescriptors > 1 || !validVolumeDescriptor(update.Image) {
-				return fmt.Errorf("WAL Volume Descriptor must be one valid final after-image")
+			if i != len(updates)-1 || rootDescriptors > 1 || !validVolumeDescriptor(update.Image) ||
+				update.Offset < j.nodeTableStart || update.Offset > j.nodeTableEnd ||
+				format.PageSize > j.nodeTableEnd-update.Offset {
+				return fmt.Errorf("WAL Volume Descriptor must be a valid final after-image in the Node Table region")
 			}
 		} else if update.Offset%format.PageSize != 0 {
 			return fmt.Errorf("WAL page update offset %d is not page aligned", update.Offset)
