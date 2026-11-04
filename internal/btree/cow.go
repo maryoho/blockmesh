@@ -2,10 +2,12 @@ package btree
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 
 	"blockmesh/internal/metastore"
+	"blockmesh/internal/wal"
 )
 
 type cowChild struct {
@@ -409,6 +411,75 @@ func persistCOW(store *metastore.Store, n *cowNode, ids []uint64, cursor *int, s
 	return id, nil
 }
 
+// persistCOWImages assigns reserved IDs and builds complete page after-images.
+// It does not write them; the WAL applies them with the root descriptor.
+func persistCOWImages(n *cowNode, ids []uint64, cursor *int, sequence uint64) (uint64, []metastore.Page, error) {
+	if !n.dirty { return n.id, nil, nil }
+	var pages []metastore.Page
+	if !n.leaf {
+		for i := range n.children {
+			child := &n.children[i]
+			if child.node != nil && child.node.dirty {
+				id, childPages, err := persistCOWImages(child.node, ids, cursor, sequence)
+				if err != nil { return 0, nil, err }
+				child.id, child.minKey = id, child.node.minKey()
+				pages = append(pages, childPages...)
+			}
+		}
+	}
+	if *cursor >= len(ids) { return 0, nil, fmt.Errorf("COW reservation exhausted") }
+	id := ids[*cursor]
+	*cursor = *cursor + 1
+	var payload []byte
+	var pageType uint16
+	if n.leaf {
+		payload, pageType = encodeLeaf(n.items), leafPageType
+	} else {
+		refs := make([]nodeRef, len(n.children))
+		for i, child := range n.children { refs[i] = nodeRef{id: child.id, minKey: child.minKey, level: child.level} }
+		payload, pageType = encodeInternal(refs, n.level), internalPageType
+	}
+	n.id = id
+	pages = append(pages, metastore.Page{ID:id, Type:pageType, Generation:sequence, Payload:payload})
+	return id, pages, nil
+}
+
+func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64) error {
+	pageCount := countDirty(root)
+	if pageCount == 0 {
+		rootID := metastore.NoPage
+		if root != nil { rootID = root.id }
+		if err := t.store.CommitPagesAndPublish(nil, rootID, sequence, t.journal); err != nil { return fmt.Errorf("WAL commit root descriptor: %w", err) }
+		var newPages []uint64
+		if root != nil { newPages = collectCowPages(root) }
+		if err := t.retireSuperseded(oldPages, newPages, oldGeneration); err != nil { return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w", err) }
+		t.items = append([]Item(nil), items...)
+		t.pages, t.root = newPages, rootID
+		return nil
+	}
+	reservation, err := t.arena.Reserve(uint64(pageCount))
+	if err != nil { return err }
+	committed := false
+	defer func() { if !committed { _ = reservation.Abort() } }()
+	ids := reservation.Pages()
+	cursor := 0
+	rootID, pages, err := persistCOWImages(root, ids, &cursor, sequence)
+	if err != nil { return err }
+	if cursor != len(ids) { return fmt.Errorf("internal error: used %d of %d reserved COW pages", cursor, len(ids)) }
+	if err = t.store.CommitPagesAndPublish(pages, rootID, sequence, t.journal); err != nil {
+		// WAL-full is a guaranteed pre-commit failure. Other I/O errors may
+		// follow a durable Commit record, so keep the reservation until recovery.
+		if !errors.Is(err, wal.ErrJournalFull) { committed = true }
+		return fmt.Errorf("WAL commit COW pages and root: %w", err)
+	}
+	if err = reservation.Commit(); err != nil { committed = true; return fmt.Errorf("WAL root committed but arena reservation commit failed: %w", err) }
+	committed = true
+	newPages := collectCowPages(root)
+	if err := t.retireSuperseded(oldPages, newPages, oldGeneration); err != nil { return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w", err) }
+	t.items = append([]Item(nil), items...)
+	t.root, t.pages = rootID, newPages
+	return nil
+}
 func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 	sb := t.store.Superblock()
 	if sb.MappingSequence == ^uint64(0) {
@@ -416,6 +487,9 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 	}
 	sequence := sb.MappingSequence + 1
 	oldPages := append([]uint64(nil), t.pages...)
+	if t.journal != nil {
+		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence)
+	}
 	var newPages []uint64
 	if root != nil {
 		newPages = collectCowPages(root)
