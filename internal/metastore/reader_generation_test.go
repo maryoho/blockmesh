@@ -150,3 +150,47 @@ func TestPersistentCollectionWaitsForReaderGeneration(t *testing.T) {
 	if n,err:=pa.CollectWithReaders(readers,true);err!=nil||n!=1{t.Fatalf("advanced reader should permit reclamation: released=%d err=%v",n,err)}
 	if pending:=pa.Pending();len(pending)!=0{t.Fatalf("retire queue not cleared: %+v",pending)}
 }
+
+
+type testReaderLeaseProbe struct {
+	acquired bool
+	err error
+	released bool
+}
+
+func (p *testReaderLeaseProbe) AcquireExpiredReader(_ context.Context, _ string, record ReaderRecord) (func() error, error) {
+	if record.NodeID != "node-fenced" || record.BootID != "boot-fenced" || record.Epoch != 4 {
+		return nil, errors.New("unexpected reader lease identity")
+	}
+	if p.err != nil { return nil, p.err }
+	p.acquired = true
+	return func() error { p.released = true; return nil }, nil
+}
+
+func TestFenceExpiredReaderRequiresLeaseProbeBeforeFencing(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-expired-fence",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	table,err:=NewReaderTable(s,18,2,committer,coordinator)
+	if err!=nil{t.Fatal(err)}
+	if err=table.Register(0,"node-fenced","boot-fenced",4,1);err!=nil{t.Fatal(err)}
+
+	probe:=&testReaderLeaseProbe{err:errors.New("lease still held")}
+	fencer:=&recordingFencer{}
+	if err=table.FenceExpiredReader(context.Background(),0,"node-fenced","boot-fenced",4,probe,fencer);err==nil {
+		t.Fatal("must not fence while the sanlock reader lease is held")
+	}
+	if fencer.called {t.Fatal("fencer ran before the lease probe succeeded")}
+	snapshot,err:=table.Snapshot();if err!=nil{t.Fatal(err)}
+	if len(snapshot)!=1||snapshot[0].State!=ReaderActive {t.Fatalf("reader changed state without fencing: %+v",snapshot)}
+
+	probe.err=nil
+	if err=table.FenceExpiredReader(context.Background(),0,"node-fenced","boot-fenced",4,probe,fencer);err!=nil{t.Fatal(err)}
+	if !probe.acquired||!probe.released||!fencer.called {t.Fatal("expected lease probe, SAN fence, and probe release")}
+	snapshot,err=table.Snapshot();if err!=nil{t.Fatal(err)}
+	if len(snapshot)!=0 {t.Fatalf("fenced reader still pins generation: %+v",snapshot)}
+}
