@@ -21,27 +21,30 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 	if err=s.Publish(NoPage,12);err!=nil{t.Fatal(err)}
 	committer:=testCommitter{d:d}
 	readers,err:=NewReaderTable(s,18,4,committer);if err!=nil{t.Fatal(err)}
-	if err=readers.Register(0,"node-a","boot-a",1,10);err!=nil{t.Fatal(err)}
+	if err=readers.Register(0,"node-a","boot-a",1,12);err!=nil{t.Fatal(err)}
 	if err=readers.Register(1,"node-b","boot-b",1,12);err!=nil{t.Fatal(err)}
-	if got,err:=readers.SafeGeneration();err!=nil||got!=10{t.Fatalf("safe generation=%d err=%v",got,err)}
-	if err=readers.Heartbeat(0,"node-a","boot-a",1,11);err!=nil{t.Fatal(err)}
-	if got,err:=readers.SafeGeneration();err!=nil||got!=11{t.Fatalf("safe generation after heartbeat=%d err=%v",got,err)}
-	if err=readers.BeginLeave(0,"node-a","boot-a",1);err!=nil{t.Fatal(err)}
-	if got,err:=readers.SafeGeneration();err!=nil||got!=11{t.Fatalf("Leaving reader must pin generation: %d %v",got,err)}
-	if err=readers.CloseDrained(0,"node-a","boot-a",1,false);err==nil{t.Fatal("expected undrained close rejection")}
-	if err=readers.CloseDrained(0,"node-a","boot-a",1,true);err!=nil{t.Fatal(err)}
-	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("safe generation after clean close=%d err=%v",got,err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("safe generation=%d err=%v",got,err)}
 
 	remote,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
 	if err=remote.Publish(NoPage,13);err!=nil{t.Fatal(err)}
 	if err=readers.Heartbeat(1,"node-b","boot-b",1,13);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("slow reader must pin old generation: %d %v",got,err)}
+	if err=readers.Heartbeat(0,"node-a","boot-a",1,13);err!=nil{t.Fatal(err)}
 	if s.Superblock().MappingSequence!=13{t.Fatalf("reader store did not refresh committed root: %+v",s.Superblock())}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=13{t.Fatalf("all readers advanced: %d %v",got,err)}
+
+	if err=readers.BeginLeave(0,"node-a","boot-a",1);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=13{t.Fatalf("Leaving reader generation=%d err=%v",got,err)}
+	if err=readers.CloseDrained(0,"node-a","boot-a",1,false);err==nil{t.Fatal("expected undrained close rejection")}
+	if err=readers.CloseDrained(0,"node-a","boot-a",1,true);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=13{t.Fatalf("safe generation after clean close=%d err=%v",got,err)}
+
 	f:=&recordingFencer{}
 	if err=readers.FenceAndClose(context.Background(),1,"node-b","boot-b",1,f);err!=nil{t.Fatal(err)}
 	if !f.called{t.Fatal("fencer was not called")}
-	if got,err:=readers.SafeGeneration();err!=nil||got!=^uint64(0){t.Fatalf("all readers fenced: safe=%d err=%v",got,err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=^uint64(0){t.Fatalf("all readers inactive: safe=%d err=%v",got,err)}
 	if err=readers.FenceAndClose(context.Background(),1,"node-b","boot-b",1,f);err==nil{t.Fatal("already fenced reader must not be fenced twice")}
-	if err=readers.Register(1,"node-b","boot-c",2,13);err!=nil{t.Fatalf("fenced slot should be reusable with a new epoch: %v",err)}
+	if err=readers.Register(1,"node-b","boot-c",2,13);err!=nil{t.Fatalf("inactive slot should be reusable with a new epoch: %v",err)}
 
 	reopened,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
 	readers2,err:=NewReaderTable(reopened,18,4,committer);if err!=nil{t.Fatal(err)}
