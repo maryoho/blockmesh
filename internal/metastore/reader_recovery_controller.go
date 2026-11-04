@@ -136,7 +136,10 @@ func (c *ReaderRecoveryController) RecoverOnce(ctx context.Context) (ReaderRecov
 		c.clearAttempt(key)
 		report.Fenced++
 	}
-	if report.Fenced>0 && c.Arena!=nil {
+	// Revisit pending reclamation on every scan, not only after a newly
+	// fenced reader. This recovers a crash between durable ReaderFenced and
+	// Retire Queue collection.
+	if c.Arena!=nil && len(c.Arena.Pending())>0 {
 		if c.Drain==nil {
 			failures=append(failures,errors.New("metadata I/O drain barrier is required before retire collection"))
 		} else if err:=c.Drain.WaitForMetadataIOsDrained(ctx,c.Table.store.Superblock().VolumeID);err!=nil {
