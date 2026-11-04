@@ -222,3 +222,50 @@ func TestJournalFullCanCheckpointAndRetry(t *testing.T) {
 		t.Fatalf("commit after checkpoint: %v", err)
 	}
 }
+
+
+func TestOpenRepairsDescriptorAfterInterruptedMirror(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wal-checkpoint-repair-*.img")
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	d, err := device.Open(f.Name(), true)
+	if err != nil { t.Fatal(err) }
+	defer d.Close()
+	sb, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	j, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset, Image: make([]byte, format.PageSize)}}); err != nil { t.Fatal(err) }
+	if err = j.Checkpoint(); err != nil { t.Fatal(err) }
+
+	// Model power loss after the new descriptor was durable but before its
+	// mirror was written: restore the other slot to the previous generation.
+	stale := checkpointDescriptor{Generation: 1, CheckpointTxID: 0, ActiveBank: 0, AG: 0}
+	staleOffset, err := checkpointOffset(sb, 0, uint32(1)-j.checkpointSlot)
+	if err != nil { t.Fatal(err) }
+	if n, writeErr := d.WriteAt(encodeCheckpoint(stale), int64(staleOffset)); writeErr != nil || n != int(format.PageSize) {
+		t.Fatalf("write stale descriptor: %d %v", n, writeErr)
+	}
+	if err = d.Sync(); err != nil { t.Fatal(err) }
+
+	reopened, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	otherOffset, err := checkpointOffset(sb, 0, uint32(1)-reopened.checkpointSlot)
+	if err != nil { t.Fatal(err) }
+	var a, b [format.PageSize]byte
+	if n, readErr := d.ReadAt(a[:], int64(checkpointOffsetMust(t, sb, 0, reopened.checkpointSlot))); readErr != nil || n != len(a) {
+		t.Fatalf("read selected descriptor: %d %v", n, readErr)
+	}
+	if n, readErr := d.ReadAt(b[:], int64(otherOffset)); readErr != nil || n != len(b) {
+		t.Fatalf("read repaired descriptor: %d %v", n, readErr)
+	}
+	if string(a[:]) != string(b[:]) { t.Fatal("open did not repair the stale descriptor mirror") }
+}
+
+func checkpointOffsetMust(t *testing.T, sb format.Superblock, ag, slot uint32) uint64 {
+	t.Helper()
+	off, err := checkpointOffset(sb, ag, slot)
+	if err != nil { t.Fatal(err) }
+	return off
+}
