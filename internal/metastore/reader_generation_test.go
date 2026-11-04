@@ -2,6 +2,7 @@ package metastore
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -98,8 +99,9 @@ func TestCollectWithReadersRequiresSharedCoordinator(t *testing.T) {
 	if err=s.Publish(NoPage,1);err!=nil{t.Fatal(err)}
 	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
 	committer:=testCommitter{d:d}
-	if _,err=NewPersistentArena(s,nil,committer);err!=nil{t.Fatal(err)}
-	if _,err=NewReaderTable(s,18,4,committer);err!=nil{t.Fatal(err)}
+	pa0,err:=NewPersistentArena(s,nil,committer);if err!=nil{t.Fatal(err)}
+	readers0,err:=NewReaderTable(s,18,4,committer);if err!=nil{t.Fatal(err)}
+	if _,err=pa0.CollectWithReaders(readers0,true);!errors.Is(err,ErrReaderCoordinatorRequired){t.Fatalf("missing cluster barrier should fail closed: %v",err)}
 	coordinator:=&testReaderCoordinator{}
 	pa,err:=NewPersistentArena(s,nil,committer,coordinator);if err!=nil{t.Fatal(err)}
 	readers,err:=NewReaderTable(s,18,4,committer,coordinator);if err!=nil{t.Fatal(err)}
