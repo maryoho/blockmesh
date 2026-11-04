@@ -180,17 +180,28 @@ func TestFenceExpiredReaderRequiresLeaseProbeBeforeFencing(t *testing.T) {
 	if err=table.Register(0,"node-fenced","boot-fenced",4,1);err!=nil{t.Fatal(err)}
 
 	probe:=&testReaderLeaseProbe{err:errors.New("lease still held")}
-	fencer:=&recordingFencer{}
+	fenced := false
+	fencer := testFenceFunc(func(_ context.Context, nodeID, bootID string) error {
+		if nodeID != "node-fenced" || bootID != "boot-fenced" { return errors.New("unexpected fencing identity") }
+		fenced = true
+		return nil
+	})
 	if err=table.FenceExpiredReader(context.Background(),0,"node-fenced","boot-fenced",4,probe,fencer);err==nil {
 		t.Fatal("must not fence while the sanlock reader lease is held")
 	}
-	if fencer.called {t.Fatal("fencer ran before the lease probe succeeded")}
+	if fenced {t.Fatal("fencer ran before the lease probe succeeded")}
 	snapshot,err:=table.Snapshot();if err!=nil{t.Fatal(err)}
 	if len(snapshot)!=1||snapshot[0].State!=ReaderActive {t.Fatalf("reader changed state without fencing: %+v",snapshot)}
 
 	probe.err=nil
 	if err=table.FenceExpiredReader(context.Background(),0,"node-fenced","boot-fenced",4,probe,fencer);err!=nil{t.Fatal(err)}
-	if !probe.acquired||!probe.released||!fencer.called {t.Fatal("expected lease probe, SAN fence, and probe release")}
+	if !probe.acquired||!probe.released||!fenced {t.Fatal("expected lease probe, SAN fence, and probe release")}
 	snapshot,err=table.Snapshot();if err!=nil{t.Fatal(err)}
 	if len(snapshot)!=0 {t.Fatalf("fenced reader still pins generation: %+v",snapshot)}
+}
+
+
+type testFenceFunc func(context.Context, string, string) error
+func (f testFenceFunc) FenceNode(ctx context.Context, nodeID, bootID string) error {
+	return f(ctx,nodeID,bootID)
 }
