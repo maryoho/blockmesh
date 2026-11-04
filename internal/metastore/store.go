@@ -250,6 +250,15 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err:=s.refreshLocked();err!=nil{return err}
+	if s.sb.LifecyclePages!=0 {
+		state:=make([]byte,PageSize)
+		if err:=readFullAt(s.dev,state,int64(s.sb.LifecycleStart*PageSize));err!=nil{return err}
+		if !allZeroLifecycle(state) {
+			if _,_,err:=decodeLifecycleState(state);err!=nil{return ErrLifecycleCorrupt}
+			return ErrPersistentArenaRequired
+		}
+		if s.sb.MappingSequence!=0 || s.sb.RootPage!=NoPage { return ErrPersistentArenaRequired }
+	}
 	if rootPage != NoPage && !s.inArena(rootPage) {
 		return ErrOutOfRange
 	}
