@@ -444,6 +444,34 @@ func persistCOWImages(n *cowNode, ids []uint64, cursor *int, sequence uint64) (u
 	return id, pages, nil
 }
 
+// hasOpaqueSubtree reports whether the COW graph references an unchanged
+// internal node whose descendants were not loaded. In that case collectCowPages
+// cannot enumerate the complete new graph, so old pages must be retained
+// conservatively rather than accidentally retiring reachable descendants.
+func hasOpaqueSubtree(n *cowNode) bool {
+	if n == nil { return false }
+	if !n.dirty { return n.level > 0 }
+	if n.leaf { return false }
+	for _, child := range n.children {
+		if child.node == nil && child.level > 0 { return true }
+		if child.node != nil && hasOpaqueSubtree(child.node) { return true }
+	}
+	return false
+}
+
+func retainOpaqueSubtreePages(root *cowNode, oldPages, newPages []uint64) []uint64 {
+	if !hasOpaqueSubtree(root) { return newPages }
+	seen := make(map[uint64]struct{}, len(newPages)+len(oldPages))
+	for _, id := range newPages { seen[id] = struct{}{} }
+	out := append([]uint64(nil), newPages...)
+	for _, id := range oldPages {
+		if _, exists := seen[id]; !exists {
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out
+}
 func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64) error {
 	pageCount := countDirty(root)
 	if pageCount == 0 {
@@ -452,6 +480,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
 		if err := t.store.CommitPagesAndPublish(nil, rootID, sequence, t.journal); err != nil { return fmt.Errorf("WAL commit root descriptor: %w", err) }
 		var newPages []uint64
 		if root != nil { newPages = collectCowPages(root) }
+		newPages = retainOpaqueSubtreePages(root, oldPages, newPages)
 		if err := t.retireSuperseded(oldPages, newPages, oldGeneration); err != nil { return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w", err) }
 		t.items = append([]Item(nil), items...)
 		t.pages, t.root = newPages, rootID
@@ -475,6 +504,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
 	if err = reservation.Commit(); err != nil { committed = true; return fmt.Errorf("WAL root committed but arena reservation commit failed: %w", err) }
 	committed = true
 	newPages := collectCowPages(root)
+	newPages = retainOpaqueSubtreePages(root, oldPages, newPages)
 	if err := t.retireSuperseded(oldPages, newPages, oldGeneration); err != nil { return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w", err) }
 	t.items = append([]Item(nil), items...)
 	t.root, t.pages = rootID, newPages
@@ -494,6 +524,7 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 	if root != nil {
 		newPages = collectCowPages(root)
 	}
+	newPages = retainOpaqueSubtreePages(root, oldPages, newPages)
 	if root == nil {
 		if err := t.store.Publish(metastore.NoPage, sequence); err != nil {
 			return fmt.Errorf("publish empty B+Tree root: %w", err)
@@ -553,6 +584,7 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 	// persistCOW has assigned durable IDs to all dirty nodes; collect again so
 	// the current page set contains the newly allocated IDs.
 	newPages = collectCowPages(root)
+	newPages = retainOpaqueSubtreePages(root, oldPages, newPages)
 	if err := t.retireSuperseded(oldPages, newPages, sb.MappingSequence); err != nil {
 		return fmt.Errorf("record retired B+Tree pages after root publication: %w", err)
 	}
