@@ -107,6 +107,8 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 	}
 }
 
+func (l *SanlockLocker) Distributed() bool { return true }
+
 func (l *SanlockLocker) Lock(ctx context.Context, resource string) (func() error, error) {
 	lease, err := l.Acquire(ctx, resource)
 	if err != nil { return nil, err }
@@ -181,4 +183,4 @@ func SanlockResource(lockspace, name, path string, offset uint64) (string, error
 	return strings.Join([]string{lockspace, name, filepath.Clean(path), strconv.FormatUint(offset, 10)}, ":"), nil
 }
 
-var _ Locker = (*SanlockLocker)(nil)
+var _ DistributedLocker = (*SanlockLocker)(nil)
