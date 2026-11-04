@@ -182,3 +182,13 @@ and other metadata regions. Its geometry is deployment configuration and
 must be consistent on all nodes. A production fencer must revoke every SAN
 path before a failed reader is marked Fenced. Heartbeat timeout alone never
 permits reclamation.
+
+
+## Online reader root refresh
+
+A persistent read-only B+Tree can call `Tree.Refresh()` to reload the latest
+valid redundant superblock, walk the newly published COW graph, and rebuild
+its local Persistent Arena view. It refuses to refresh while local metadata
+reservations are outstanding. The reader must refresh the B+Tree before
+advancing its Reader Table Root Generation; a joining reader registers at the
+current Mapping Sequence before issuing reads.
