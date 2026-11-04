@@ -32,7 +32,10 @@ bad CRC fails closed. Queue capacity is
 holds 7,843 records. Lifecycle geometry is capped because every queue page is
 rewritten in each root/collection transaction; metadata WAL transactions are
 limited to 64 total page after-images, including COW pages and the root
-descriptor. A full queue rejects root publication with
+descriptor. A root transaction can therefore contain at most
+`64 - LifecyclePages - 1` COW page after-images; larger COW updates fail
+before WAL commit with `ErrMetadataTransactionTooLarge` and abort their
+reservation. A full queue rejects root publication with
 `ErrRetireQueueFull`; records are never dropped to make room.
 
 P3-3.5's one-page queue encoding remains readable when the first queue page
