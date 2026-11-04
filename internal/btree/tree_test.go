@@ -61,6 +61,40 @@ func newTree(t *testing.T, pages int) (*metastore.Store, *Tree, *memoryDevice) {
 	return store, tree, dev
 }
 
+
+type memoryCommitter struct{ dev *memoryDevice }
+func (c memoryCommitter) CommitImages(images []metastore.PageImage) error {
+ for _,image:=range images {
+  if _,err:=c.dev.WriteAt(image.Data,int64(image.Offset));err!=nil{return err}
+ }
+ return c.dev.Sync()
+}
+
+func TestPersistentTreePersistsArenaAndRetireQueue(t *testing.T) {
+ dev:=newMemoryDevice(128)
+ store,err:=metastore.Format(dev,metastore.Layout{
+  VolumeID:"persistent-btree",TotalPages:128,ArenaStart:2,ArenaPages:124,
+  LifecycleStart:126,LifecyclePages:2,
+ })
+ if err!=nil{t.Fatal(err)}
+ if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
+ committer:=memoryCommitter{dev:dev}
+ tree,err:=OpenPersistent(store,committer);if err!=nil{t.Fatal(err)}
+ if err=tree.Put(1,10);err!=nil{t.Fatal(err)}
+ oldRoot:=tree.RootPage()
+ if err=tree.Put(1,11);err!=nil{t.Fatal(err)}
+ if tree.RootPage()==oldRoot{t.Fatal("COW update did not replace root")}
+ if got:=tree.RetiredPages();len(got)!=1||got[0].RetireGeneration!=1||len(got[0].PageIDs)!=1||got[0].PageIDs[0]!=oldRoot{
+  t.Fatalf("unexpected persistent retire queue: %+v",got)
+ }
+ reopenedStore,err:=metastore.Open(dev,"persistent-btree");if err!=nil{t.Fatal(err)}
+ reopened,err:=OpenPersistent(reopenedStore,committer);if err!=nil{t.Fatal(err)}
+ if got,err:=reopened.Get(1);err!=nil||got!=11{t.Fatalf("reopened Get = %d, %v",got,err)}
+ if got:=reopened.ArenaStats();got.LivePages!=2{t.Fatalf("retired root not pinned after reopen: %+v",got)}
+ if _,err=reopened.CollectRetired(metastore.ReclaimProof{SafeGeneration:2,IOsDrained:true,FencingConfirmed:true});err!=nil{t.Fatal(err)}
+ if len(reopened.RetiredPages())!=0{t.Fatal("persistent retire queue not cleared")}
+}
+
 func TestPutGetReplaceDeleteAndReopen(t *testing.T) {
 	store, tree, dev := newTree(t, 1024)
 	for i := uint64(0); i < 270; i++ {
