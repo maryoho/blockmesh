@@ -95,6 +95,7 @@ func (l *SanlockLocker) Acquire(ctx context.Context, resource string) (Lease, er
 			waitErr := lease.waitErr
 			lease.mu.Unlock()
 			_ = os.Remove(marker)
+			if waitErr == nil { return nil, fmt.Errorf("sanlock helper exited before acquiring %q",resource) }
 			return nil, fmt.Errorf("sanlock failed to acquire %q: %w", resource, waitErr)
 		case <-ctx.Done():
 			_ = lease.Close()
