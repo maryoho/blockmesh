@@ -35,6 +35,9 @@ func TestCollectCapturesEveryPathAndOnlyUsesReadCommands(t *testing.T){
 	if len(e.Paths)!=2{t.Fatalf("got %d paths",len(e.Paths))}
 	if e.Paths[0].WWID!="naa.6000000000000001"{t.Fatalf("WWID=%q",e.Paths[0].WWID)}
 	if len(e.Paths[0].RegisteredKeys)!=2{t.Fatalf("keys=%v",e.Paths[0].RegisteredKeys)}
+	if !e.Paths[0].Reservation.Parsed || !e.Paths[0].Reservation.Present || e.Paths[0].Reservation.HolderKey != "aa" || e.Paths[0].Reservation.Type != 6 {
+		t.Fatalf("reservation was not captured: %+v", e.Paths[0].Reservation)
+	}
 	if len(r.calls)!=12{t.Fatalf("got %d commands: %v",len(r.calls),r.calls)}
 	for _,call:=range r.calls{
 		if strings.Contains(call,"--out")||strings.Contains(call,"preempt")||strings.Contains(call,"register"){t.Fatalf("mutating command issued: %s",call)}
