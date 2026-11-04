@@ -344,7 +344,7 @@ func TestFenceExpiredReaderIfStaleRechecksHeartbeatUnderBarrier(t *testing.T) {
 	coordinator:=&testReaderCoordinator{}
 	table,err:=NewReaderTable(s,18,2,committer,coordinator)
 	if err!=nil {t.Fatal(err)}
-	if err=table.Register(0,"node-live","boot-live",5,1);err!=nil {t.Fatal(err)}
+	if err=table.Register(0,"node-fenced","boot-fenced",4,1);err!=nil {t.Fatal(err)}
 	now:=time.Now()
 	table.mu.Lock()
 	record,err:=table.readLocked(0)
@@ -354,7 +354,7 @@ func TestFenceExpiredReaderIfStaleRechecksHeartbeatUnderBarrier(t *testing.T) {
 	probe:=&testReaderLeaseProbe{}
 	fencerCalls:=0
 	fencer:=testFenceFunc(func(context.Context,string,string)error{fencerCalls++;return nil})
-	err=table.FenceExpiredReaderIfStale(context.Background(),0,"node-live","boot-live",5,
+	err=table.FenceExpiredReaderIfStale(context.Background(),0,"node-fenced","boot-fenced",4,
 		now.Add(-time.Minute),probe,fencer)
 	if !errors.Is(err,ErrReaderNotStale) {t.Fatalf("fresh heartbeat must cancel fencing: %v",err)}
 	if probe.acquired||fencerCalls!=0 {t.Fatalf("fresh reader reached fencing path: probe=%v fencerCalls=%d",probe.acquired,fencerCalls)}
