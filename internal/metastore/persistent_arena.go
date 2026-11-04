@@ -236,7 +236,10 @@ func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained boo
  if p.coordinator==nil || readers.coordinator==nil { return 0,ErrReaderCoordinatorRequired }
  if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
  unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
- safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
+ readers.mu.Lock()
+ safe,err:=readers.safeGenerationLocked()
+ readers.mu.Unlock()
+ if err!=nil{return 0,err}
  return p.collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
 }
 
