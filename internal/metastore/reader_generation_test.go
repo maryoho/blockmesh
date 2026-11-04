@@ -359,3 +359,44 @@ func TestFenceExpiredReaderIfStaleRechecksHeartbeatUnderBarrier(t *testing.T) {
 	if !errors.Is(err,ErrReaderNotStale) {t.Fatalf("fresh heartbeat must cancel fencing: %v",err)}
 	if !probe.acquired||!probe.released||fencerCalls!=0 {t.Fatalf("fresh heartbeat must cancel PR fencing after slot lease probe: probe=%v released=%v fencerCalls=%d",probe.acquired,probe.released,fencerCalls)}
 }
+
+
+type recordingMetadataDrain struct { calls int; err error }
+func (d *recordingMetadataDrain) WaitForMetadataIOsDrained(context.Context,string) error {
+	d.calls++
+	return d.err
+}
+
+func TestReaderRecoveryControllerRetriesPendingCollectionWithoutNewFence(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-controller-collect",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	if err=s.WritePage(Page{ID:2,Type:1,Generation:1,Payload:[]byte("old")});err!=nil {t.Fatal(err)}
+	if err=s.Sync();err!=nil {t.Fatal(err)}
+	if err=s.Publish(2,1);err!=nil {t.Fatal(err)}
+	if err=FormatLifecycle(s);err!=nil {t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	coordinator:=&testReaderCoordinator{}
+	arena,err:=NewPersistentArena(s,[]uint64{2},committer,coordinator)
+	if err!=nil {t.Fatal(err)}
+	table,err:=NewReaderTable(s,18,2,committer,coordinator)
+	if err!=nil {t.Fatal(err)}
+	reservation,err:=arena.Reserve(1)
+	if err!=nil {t.Fatal(err)}
+	newRoot:=reservation.Pages()[0]
+	if err=arena.CommitPagesAndPublish(reservation,[]Page{{ID:newRoot,Type:1,Generation:2,Payload:[]byte("new")}},
+		[]uint64{newRoot},newRoot,2,1,[]uint64{2});err!=nil {t.Fatal(err)}
+	if err=reservation.Commit();err!=nil {t.Fatal(err)}
+	if len(arena.Pending())==0 {t.Fatal("test requires a pending retired page")}
+
+	drain:=&recordingMetadataDrain{}
+	controller:=&ReaderRecoveryController{Table:table,Probe:&testReaderLeaseProbe{},
+		Fencer:testFenceFunc(func(context.Context,string,string)error{return nil}),Arena:arena,Drain:drain,
+		Config:ReaderRecoveryConfig{HeartbeatTimeout:time.Minute}}
+	report,err:=controller.RecoverOnce(context.Background())
+	if err!=nil {t.Fatal(err)}
+	if report.Fenced!=0||report.ReclaimedPages!=1||drain.calls!=1 {
+		t.Fatalf("pending collection was not retried without a new fencing event: report=%+v drainCalls=%d",report,drain.calls)
+	}
+	if len(arena.Pending())!=0 {t.Fatalf("retire queue still pending: %+v",arena.Pending())}
+}
