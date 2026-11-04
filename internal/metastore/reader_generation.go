@@ -105,6 +105,12 @@ func NewReaderTable(store *Store, startPage uint64, slots uint32, committer Comm
 	count:=uint64(slots)
 	if startPage<2 || startPage>sb.TotalPages || count>sb.TotalPages-startPage { return nil,ErrReaderSlot }
 	end:=startPage+count
+	if store.poolBacked {
+		readerStart, readerPages, err := store.ReaderTableRange()
+		if err != nil || startPage < readerStart || end > readerStart+uint64(readerPages) {
+			return nil, ErrReaderSlot
+		}
+	}
 	arenaEnd:=sb.ArenaStart+sb.ArenaPages
 	if startPage<arenaEnd && end>sb.ArenaStart { return nil,ErrReaderSlot }
 	if sb.LifecyclePages>0 {
