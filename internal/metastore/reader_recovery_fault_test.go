@@ -230,7 +230,6 @@ func TestP339DrainFailureRetainsRetireQueueAndRetries(t *testing.T) {
 	if err = arena.CommitPagesAndPublish(reservation,
 		[]Page{{ID: newRoot, Type: 1, Generation: 2, Payload: []byte("new-root")}},
 		[]uint64{newRoot}, newRoot, 2, 1, []uint64{2}); err != nil { t.Fatal(err) }
-	if err = reservation.Commit(); err != nil { t.Fatal(err) }
 
 	drain := &recordingMetadataDrain{err: errors.New("injected DM metadata I/O drain timeout")}
 	controller := &ReaderRecoveryController{
