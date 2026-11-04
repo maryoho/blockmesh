@@ -3,6 +3,7 @@ package btree
 import (
 	"errors"
 	"io"
+	"math/rand"
 	"sort"
 	"sync"
 	"testing"
@@ -213,3 +214,77 @@ func TestDeleteAllKeysAcrossLeafBoundary(t *testing.T) {
 		t.Fatalf("expected empty tree, got %d items", len(reopened.Snapshot()))
 	}
 }
+
+func TestDeleteRebalancesLeafByRedistributionAndMerge(t *testing.T) {
+	_, tree, _ := newTree(t, 2048)
+	for i := uint64(0); i < 270; i++ {
+		if err := tree.Put(i, i+1); err != nil { t.Fatalf("Put(%d): %v", i, err) }
+	}
+	// The initial split produces two leaves. Removing 18 keys from the
+	// left leaf first forces redistribution, then a merge when the combined
+	// leaf contents fit in one page.
+	for i := uint64(0); i < 18; i++ {
+		if err := tree.Delete(i); err != nil { t.Fatalf("Delete(%d): %v", i, err) }
+	}
+	root, err := tree.store.ReadPage(tree.RootPage())
+	if err != nil { t.Fatal(err) }
+	if root.Type != leafPageType {
+		t.Fatalf("root type=%d, want leaf after sibling merge and root collapse", root.Type)
+	}
+	if got := len(tree.Snapshot()); got != 252 { t.Fatalf("snapshot has %d items, want 252", got) }
+	for i := uint64(18); i < 270; i++ {
+		if got, err := tree.Get(i); err != nil || got != i+1 {
+			t.Fatalf("Get(%d) = %d, %v", i, got, err)
+		}
+	}
+}
+
+func TestDeleteRandomizedAgainstMap(t *testing.T) {
+	_, tree, dev := newTree(t, 4096)
+	const count = 420
+	rng := rand.New(rand.NewSource(20261104))
+	order := rng.Perm(count)
+	want := make(map[uint64]uint64, count)
+	for _, raw := range order {
+		k := uint64(raw)
+		v := k*17 + 3
+		if err := tree.Put(k, v); err != nil { t.Fatalf("Put(%d): %v", k, err) }
+		want[k] = v
+	}
+	order = rng.Perm(count)
+	for _, raw := range order {
+		k := uint64(raw)
+		if err := tree.Delete(k); err != nil { t.Fatalf("Delete(%d): %v", k, err) }
+		delete(want, k)
+		got := tree.Snapshot()
+		if len(got) != len(want) { t.Fatalf("after deleting %d: snapshot len=%d want=%d", k, len(got), len(want)) }
+		for _, item := range got {
+			if v, ok := want[item.Key]; !ok || v != item.Value {
+				t.Fatalf("unexpected item after deleting %d: %+v", k, item)
+			}
+		}
+	}
+	if tree.RootPage() != metastore.NoPage { t.Fatalf("root=%d, want NoPage", tree.RootPage()) }
+	reopenedStore, err := metastore.Open(dev, "btree-test")
+	if err != nil { t.Fatal(err) }
+	reopened, err := Open(reopenedStore)
+	if err != nil { t.Fatal(err) }
+	if len(reopened.Snapshot()) != 0 { t.Fatalf("reopened tree has %d entries", len(reopened.Snapshot())) }
+}
+
+func TestDeleteQueuesSupersededPagesWithoutReleasingThem(t *testing.T) {
+	_, tree, _ := newTree(t, 128)
+	if err := tree.Put(1, 10); err != nil { t.Fatal(err) }
+	oldRoot := tree.RootPage()
+	if err := tree.Put(2, 20); err != nil { t.Fatal(err) }
+	pending := tree.RetireQueue().Pending()
+	if len(pending) != 1 || len(pending[0].PageIDs) != 1 || pending[0].PageIDs[0] != oldRoot {
+		t.Fatalf("unexpected retire queue: %+v oldRoot=%d", pending, oldRoot)
+	}
+	before := tree.ArenaStats()
+	if n, err := tree.CollectRetired(metastore.ReclaimProof{SafeGeneration: 100, IOsDrained: true}); !errors.Is(err, metastore.ErrUnsafeReclaim) || n != 0 {
+		t.Fatalf("collection without fencing proof: released=%d err=%v", n, err)
+	}
+	if after := tree.ArenaStats(); after != before { t.Fatalf("arena changed without proof: before=%+v after=%+v", before, after) }
+}
+
