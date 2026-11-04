@@ -11,6 +11,7 @@ import (
 
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
 )
 
 var (
@@ -202,6 +203,15 @@ func (j *Journal) Commit(updates []PageUpdate) error {
 	return nil
 }
 
+// CommitImages adapts the metastore transaction interface to this Journal.
+func (j *Journal) CommitImages(images []metastore.PageImage) error {
+	updates := make([]PageUpdate, len(images))
+	for i, image := range images {
+		updates[i] = PageUpdate{Offset: image.Offset, Image: image.Data}
+	}
+	return j.Commit(updates)
+}
+
 // Checkpoint durably advances the per-AG checkpoint and switches to the
 // alternate WAL bank. The inactive bank is cleared and synced BEFORE the
 // descriptor switch; therefore a crash before descriptor durability leaves
@@ -318,8 +328,17 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 		if update.Offset%format.PageSize != 0 || uint64(len(update.Image)) != format.PageSize {
 			return fmt.Errorf("WAL page update must be 4KiB aligned and exactly 4KiB")
 		}
-		if update.Offset < 2*format.PageSize || update.Offset > j.metadataSize || format.PageSize > j.metadataSize-update.Offset {
+		if update.Offset > j.metadataSize || format.PageSize > j.metadataSize-update.Offset {
 			return fmt.Errorf("WAL page update offset %d outside metadata regions", update.Offset)
+		}
+		// Only a complete CRC-valid metastore root descriptor may update
+		// either reserved superblock page through the WAL.
+		if update.Offset < 2*format.PageSize {
+			if (update.Offset != 0 && update.Offset != format.PageSize) || !validMetastoreSuperblock(update.Image) {
+				return fmt.Errorf("WAL update at reserved superblock offset %d is not a valid root descriptor", update.Offset)
+			}
+		} else if update.Offset%format.PageSize != 0 {
+			return fmt.Errorf("WAL page update offset %d is not page aligned", update.Offset)
 		}
 		end := update.Offset + format.PageSize
 		if update.Offset < j.walEnd && end > j.walStart {
@@ -526,6 +545,13 @@ func writeAtFull(dev device.Device, b []byte, off int64) error {
 	return nil
 }
 
+
+func validMetastoreSuperblock(b []byte) bool {
+	if len(b) != int(format.PageSize) || string(b[:8]) != "BMMETA01" {
+		return false
+	}
+	return crc32.Checksum(b[:len(b)-4], journalCRC) == binary.LittleEndian.Uint32(b[len(b)-4:])
+}
 
 func allZero(b []byte) bool {
 	for _, v := range b {
