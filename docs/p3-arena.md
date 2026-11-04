@@ -30,7 +30,9 @@ preventing an unsafe downgrade that would ignore persistent retire records.
 ## Allocation and recovery
 
 Use `btree.OpenPersistent(store, journal)` after the per-AG WAL has been
-recovered. It loads the current B+Tree graph, loads every durable retire
+recovered. The legacy `btree.Open` deliberately returns
+`ErrPersistentArenaRequired` for version-2 lifecycle layouts so callers
+cannot accidentally ignore durable retirement records. It loads the current B+Tree graph, loads every durable retire
 record, and reconstructs the Arena's Live set from both. Pages in the retire
 queue remain Live and cannot be reserved.
 
