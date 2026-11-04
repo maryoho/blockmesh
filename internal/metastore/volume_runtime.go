@@ -29,6 +29,12 @@ type VolumeRuntimeSpec struct {
 	Mode     VolumeRuntimeMode
 	NodeID   string
 	BootID   string
+
+	// Pool-backed identity. VolumeIndex selects the Node Table descriptor pair.
+	// RO requires ReaderSlot and a monotonically increasing ReaderEpoch.
+	VolumeIndex uint32
+	ReaderSlot uint32
+	ReaderEpoch uint64
 }
 
 // VolumeRuntimeMetadata is the set of fixed-LBA metadata objects that must
