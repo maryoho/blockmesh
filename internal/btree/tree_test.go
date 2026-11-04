@@ -124,11 +124,13 @@ func TestPersistentArenaLifecycleReplaysAtomicallyWithWAL(t *testing.T) {
  newRoot:=tree.RootPage();if newRoot==oldRoot{t.Fatal("expected COW root replacement")}
  // Model a crash after WAL Commit became durable but before any target
  // after-image (COW page, lifecycle pages, root superblock) was applied.
- for off,data:=range map[int64][]byte{
-  {int64(newRoot*metastore.PageSize):make([]byte,metastore.PageSize),
-   int64(metastore.Superblock1*metastore.PageSize):oldInactive,
-   stateOff:stateBefore,queueOff:queueBefore,
-  }{
+ images:=map[int64][]byte{
+  int64(newRoot*metastore.PageSize):make([]byte,metastore.PageSize),
+  int64(metastore.Superblock1*metastore.PageSize):oldInactive,
+  stateOff:stateBefore,
+  queueOff:queueBefore,
+ }
+ for off,data:=range images {
   if n,e:=dev.WriteAt(data,off);e!=nil||n!=len(data){t.Fatalf("restore pre-apply image at %d: n=%d err=%v",off,n,e)}
  }
  if err=dev.Sync();err!=nil{t.Fatal(err)}
