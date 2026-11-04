@@ -1,0 +1,179 @@
+package metastore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"blockmesh/internal/device"
+	"blockmesh/internal/fence"
+	"blockmesh/internal/format"
+	"blockmesh/internal/lock"
+	"blockmesh/internal/metadata"
+	"blockmesh/internal/volume"
+	"blockmesh/internal/wal"
+)
+
+// PoolOwnerLeaseAcquirer must acquire the exclusive distributed Owner
+// resource and complete old-owner fencing (SCSI PR PREEMPT AND ABORT on every
+// configured path, with verification) before returning. The BMDVOL02 v2
+// descriptor does not contain the previous NodeID/BootID, so this operation
+// cannot safely be inferred from the descriptor by this package.
+type PoolOwnerLeaseAcquirer interface {
+	AcquireFencedOwner(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease, error)
+}
+
+// PoolRuntimeConfig wires the Pool-backed metadata objects to the platform
+// services. All callbacks are mandatory: silently substituting local locks,
+// no-op fencing, or no-op I/O admission would make shared-SAN operation unsafe.
+type PoolRuntimeConfig struct {
+	OpenDevice func(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error)
+	Owner PoolOwnerLeaseAcquirer
+	Locker *lock.SanlockLocker
+	WALResourceForAG func(poolUUID [16]byte, ag uint32) string
+	ReaderSetResource func(volumeID string) string
+	ReaderSlotResource func(volumeID string, slot uint32) string
+	PRRegistrar fence.ReaderRegistrar
+	ReaderRecoveryProbe ReaderLeaseProbe
+	ReaderFencer fence.Fencer
+	RecoveryConfig ReaderRecoveryConfig
+
+	// LivePages must return every page reachable from the current B+Tree root
+	// except the root itself. It is mandatory because omitting a live page
+	// would allow PersistentArena to reuse metadata still reachable by readers.
+	LivePages func(*Store) ([]uint64, error)
+	BuildRecovery func(VolumeRuntimeSpec, *VolumeRuntimeMetadata) (ManagedReaderRecovery, error)
+
+	EnableRequests func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
+	StopRequests func(context.Context, string) error
+	DrainMetadataIO func(context.Context, string) error
+	CloseMetadata func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
+}
+
+type PoolVolumeRuntimeBackend struct {
+	cfg PoolRuntimeConfig
+	coordinator *SanlockReaderCoordinator
+}
+
+func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBackend, error) {
+	if cfg.OpenDevice == nil || cfg.Owner == nil || cfg.Locker == nil ||
+		!cfg.Locker.Distributed() || cfg.WALResourceForAG == nil ||
+		cfg.ReaderSetResource == nil || cfg.ReaderSlotResource == nil ||
+		cfg.PRRegistrar == nil || cfg.ReaderRecoveryProbe == nil ||
+		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.BuildRecovery == nil ||
+		cfg.EnableRequests == nil || cfg.StopRequests == nil ||
+		cfg.DrainMetadataIO == nil || cfg.CloseMetadata == nil {
+		return nil, errors.New("Pool runtime requires device, fenced owner, distributed sanlock/WAL, reader lease/fencing, live-page, recovery and I/O hooks")
+	}
+	switch cfg.ReaderFencer.(type) {
+	case fence.NoopFencer, *fence.NoopFencer:
+		return nil, errors.New("NoopFencer is forbidden for Pool runtime")
+	}
+	if _, ok := cfg.ReaderRecoveryProbe.(*SanlockReaderLeaseProbe); !ok {
+		return nil, errors.New("Pool runtime requires SanlockReaderLeaseProbe")
+	}
+	coordinator := &SanlockReaderCoordinator{
+		Locker: cfg.Locker, ResourceForVolume: cfg.ReaderSetResource,
+	}
+	return &PoolVolumeRuntimeBackend{cfg: cfg, coordinator: coordinator}, nil
+}
+
+func (b *PoolVolumeRuntimeBackend) OpenDevice(ctx context.Context, spec VolumeRuntimeSpec) (RuntimeMetadataDevice, error) {
+	return b.cfg.OpenDevice(ctx, spec)
+}
+
+func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec VolumeRuntimeSpec) (RuntimeOwnerLease, error) {
+	if spec.Mode != VolumeRuntimeReadWrite { return nil, errors.New("owner lease requested for non-RW runtime") }
+	lease, err := b.cfg.Owner.AcquireFencedOwner(ctx, spec)
+	if err != nil { return nil, err }
+	if lease == nil || lease.Epoch() == 0 {
+		if lease != nil { _ = lease.Close() }
+		return nil, errors.New("fenced owner provider returned an invalid lease epoch")
+	}
+	return lease, nil
+}
+
+func (b *PoolVolumeRuntimeBackend) openPoolVolume(dev RuntimeMetadataDevice, spec VolumeRuntimeSpec) (*Store, format.Superblock, format.VolumeDescriptor, error) {
+	pool, err := metadata.OpenStoreDevice(dev)
+	if err != nil { return nil, format.Superblock{}, format.VolumeDescriptor{}, fmt.Errorf("open BMPOOL02: %w", err) }
+	store, err := OpenPoolVolume(dev, pool.SB, spec.VolumeIndex, spec.VolumeID)
+	if err != nil { return nil, format.Superblock{}, format.VolumeDescriptor{}, err }
+	desc, err := store.PoolDescriptor()
+	if err != nil { return nil, format.Superblock{}, format.VolumeDescriptor{}, err }
+	return store, pool.SB, desc, nil
+}
+
+func (b *PoolVolumeRuntimeBackend) committer(dev device.Device, sb format.Superblock, ag uint32) (*wal.SharedCommitter, error) {
+	resource := b.cfg.WALResourceForAG(sb.PoolUUID, ag)
+	if resource == "" { return nil, errors.New("WAL resource resolver returned an empty AG resource") }
+	return wal.NewSharedCommitter(dev, sb, ag, b.cfg.Locker, resource)
+}
+
+// RecoverWAL locates the Volume's AG from its redundant descriptor pair and
+// replays that AG journal while holding the distributed WAL resource.
+func (b *PoolVolumeRuntimeBackend) RecoverWAL(_ context.Context, spec VolumeRuntimeSpec, dev RuntimeMetadataDevice) error {
+	store, sb, desc, err := b.openPoolVolume(dev, spec)
+	if err != nil { return err }
+	committer, err := b.committer(dev, sb, desc.AG)
+	if err != nil { return err }
+	return committer.Recover()
+}
+
+func (b *PoolVolumeRuntimeBackend) OpenMetadata(_ context.Context, spec VolumeRuntimeSpec, dev RuntimeMetadataDevice) (*VolumeRuntimeMetadata, error) {
+	store, sb, desc, err := b.openPoolVolume(dev, spec)
+	if err != nil { return nil, err }
+	committer, err := b.committer(dev, sb, desc.AG)
+	if err != nil { return nil, err }
+	readerStart, readerPages, err := store.ReaderTableRange()
+	if err != nil { return nil, err }
+	readers, err := NewReaderTable(store, readerStart, readerPages, committer, b.coordinator)
+	if err != nil { return nil, err }
+	live, err := b.cfg.LivePages(store)
+	if err != nil { return nil, fmt.Errorf("enumerate live B+Tree pages: %w", err) }
+	arena, err := NewPersistentArena(store, live, committer, b.coordinator)
+	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
+	return &VolumeRuntimeMetadata{
+		Store: store, ReaderTable: readers, Arena: arena,
+		PublishOwnerEpoch: func(_ context.Context, epoch uint64) error {
+			return store.AdvanceOwnerEpoch(epoch, committer)
+		},
+	}, nil
+}
+
+func (b *PoolVolumeRuntimeBackend) JoinReader(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) (RuntimeReaderSession, error) {
+	if spec.ReaderEpoch == 0 { return nil, errors.New("RO runtime requires a nonzero ReaderEpoch") }
+	probe, ok := b.cfg.ReaderRecoveryProbe.(*SanlockReaderLeaseProbe)
+	if !ok || probe.Locker != b.cfg.Locker {
+		return nil, errors.New("reader lease probe must use the Pool runtime sanlock locker")
+	}
+	leaseConfig := volume.ReaderLeaseConfig{
+		Locker: b.cfg.Locker,
+		ResourceFor: b.cfg.ReaderSlotResource,
+	}
+	return JoinReaderSession(ctx, meta.ReaderTable, leaseConfig, b.cfg.PRRegistrar,
+		spec.ReaderSlot, spec.NodeID, spec.BootID, spec.ReaderEpoch,
+		func(error) {
+			// The caller's DM/device admission hook must be fail-stop. Runtime
+			// teardown also stops admission and drains all outstanding I/O.
+			_ = b.cfg.StopRequests(context.Background(), spec.VolumeID)
+		})
+}
+
+func (b *PoolVolumeRuntimeBackend) BuildReaderRecovery(spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) (ManagedReaderRecovery, error) {
+	return b.cfg.BuildRecovery(spec, meta)
+}
+
+func (b *PoolVolumeRuntimeBackend) EnableRequests(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
+	return b.cfg.EnableRequests(ctx, spec, meta)
+}
+func (b *PoolVolumeRuntimeBackend) StopRequests(ctx context.Context, volumeID string) error {
+	return b.cfg.StopRequests(ctx, volumeID)
+}
+func (b *PoolVolumeRuntimeBackend) DrainMetadataIO(ctx context.Context, volumeID string) error {
+	return b.cfg.DrainMetadataIO(ctx, volumeID)
+}
+func (b *PoolVolumeRuntimeBackend) CloseMetadata(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
+	return b.cfg.CloseMetadata(ctx, spec, meta)
+}
+
+var _ VolumeRuntimeBackend = (*PoolVolumeRuntimeBackend)(nil)
