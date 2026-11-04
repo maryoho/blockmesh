@@ -80,10 +80,11 @@ from the published root; it rejects trees with outstanding local reservations.
   stopped new reads and drained all I/O.
 
 A new process instance must use a new BootID and a strictly higher Epoch before
-reusing a fenced or gracefully Closed slot. Heartbeats refresh the local redundant superblock view
-before accepting a new Root Generation; they may advance that generation but
-cannot move it backwards. The caller is responsible for refreshing the B+Tree
-view first, so the recorded generation matches the root actually used for reads. `SafeGeneration()` returns the minimum Root Generation across
+reusing a fenced or gracefully Closed slot. Heartbeats refresh the local redundant superblock view but do not change
+Root Generation. Use `AdvanceGeneration` only after stopping new I/O against
+the old root, draining all in-flight I/O that may reference it, and refreshing
+the B+Tree view. The method rejects an advance without this drain confirmation
+or beyond the latest committed Mapping Sequence. `SafeGeneration()` returns the minimum Root Generation across
 all Active/Leaving slots, or MaxUint64 if there are none.
 
 Use `FenceAndClose` to call the configured `fence.Fencer`; the durable slot
