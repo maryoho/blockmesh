@@ -80,6 +80,7 @@ func DecodeVolumeDescriptor(b []byte) (VolumeDescriptor,error) {
 }
 
 func VolumeDescriptorPairOffset(sb Superblock,index uint32)(uint64,error) {
+	if err:=sb.Validate();err!=nil{return 0,err}
 	if uint64(index)>=MaxVolumeDescriptors { return 0, errors.New("Volume Descriptor index exceeds Node Table capacity") }
 	if sb.NodeTableOffset!=NodeTableOffset { return 0, errors.New("unsupported Node Table offset") }
 	return sb.NodeTableOffset+uint64(index)*VolumeDescriptorPairSize,nil
