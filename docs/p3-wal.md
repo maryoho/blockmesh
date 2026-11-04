@@ -171,7 +171,7 @@ region.
 Reader records use one dedicated 4 KiB page per slot in a separately reserved
 metadata range. Reader page updates are WAL after-images. Records contain
 NodeID, BootID, Reader Epoch, Root Generation, heartbeat sequence, and
-Active/Leaving/Fenced state. Active and Leaving readers contribute to the
+Active/Leaving/Fenced/Closed state. Active and Leaving readers contribute to the
 minimum safe generation. A slot becomes excluded only after a successful
 fencer call or a caller-confirmed graceful I/O drain. The Reader Table does
 not implement cluster-wide slot allocation or lease expiry; those must be
