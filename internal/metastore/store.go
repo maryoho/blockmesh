@@ -135,7 +135,7 @@ func Format(dev Device, l Layout) (*Store, error) {
 	}
 	if l.LifecyclePages >= 2 {
 		zero := make([]byte, PageSize)
-		for i := uint64(0); i < 2; i++ {
+		for i := uint64(0); i < l.LifecyclePages; i++ {
 			if err := writeFullAt(dev, zero, int64((l.LifecycleStart+i)*PageSize)); err != nil { return nil, err }
 		}
 		if err := dev.Sync(); err != nil { return nil, err }
