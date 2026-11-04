@@ -353,15 +353,10 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 		if update.Offset > j.metadataSize || format.PageSize > j.metadataSize-update.Offset {
 			return fmt.Errorf("WAL page update offset %d outside metadata regions", update.Offset)
 		}
-		// A transaction may publish either a metastore root superblock
-		// (legacy COW path) or a Pool Volume Descriptor (P3-3.4), never both.
-		// The publication image must be the final after-image.
+		// Pool Superblocks at LBA 0/1 are immutable after format. All mutable
+		// Volume roots are published through a final Node Table descriptor.
 		if update.Offset < 2*format.PageSize {
-			rootDescriptors++
-			if i != len(updates)-1 || rootDescriptors > 1 ||
-				(update.Offset != 0 && update.Offset != format.PageSize) || !validMetastoreSuperblock(update.Image) {
-				return fmt.Errorf("WAL root descriptor must be one valid final after-image")
-			}
+			return fmt.Errorf("WAL transactions must never overwrite Pool Superblocks")
 		} else if isVolumeDescriptor(update.Image) {
 			rootDescriptors++
 			if i != len(updates)-1 || rootDescriptors > 1 || !validVolumeDescriptor(update.Image) ||
@@ -590,11 +585,11 @@ func validMetastoreSuperblock(b []byte) bool {
 // The descriptor lives in the Node Table reserved region and is deliberately
 // distinct from the metastore B+Tree superblock format.
 func isVolumeDescriptor(b []byte) bool {
-	return len(b) == int(format.PageSize) && string(b[:8]) == "BMDVOL01"
+	return len(b) == int(format.PageSize) && string(b[:8]) == format.VolumeDescriptorMagic
 }
 
 func validVolumeDescriptor(b []byte) bool {
-	if !isVolumeDescriptor(b) || binary.LittleEndian.Uint32(b[8:12]) != 1 {
+	if !isVolumeDescriptor(b) || binary.LittleEndian.Uint32(b[8:12]) != format.VolumeDescriptorVersion {
 		return false
 	}
 	return crc32.Checksum(b[:len(b)-4], journalCRC) == binary.LittleEndian.Uint32(b[len(b)-4:])
