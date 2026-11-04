@@ -67,6 +67,15 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	// starts at the descriptor's ArenaStart, not at a private device LBA 2.
 	if err = metastore.FormatLifecycle(store); err != nil { t.Fatal(err) }
 	committer := &poolImageCommitter{dev: dev, fail: true}
+	readerStart, readerPages, err := store.ReaderTableRange()
+	if err != nil { t.Fatal(err) }
+	if readerPages != 128 { t.Fatalf("Reader Table pages=%d, want 128", readerPages) }
+	if _, err = metastore.NewReaderTable(store, desc.ArenaStart, 1, committer); !errors.Is(err, metastore.ErrReaderSlot) {
+		t.Fatalf("ReaderTable accepted a page inside the Arena: %v", err)
+	}
+	if _, err = metastore.NewReaderTable(store, readerStart, readerPages, committer); err != nil {
+		t.Fatalf("ReaderTable rejected its Volume-private range: %v", err)
+	}
 	arena, err := metastore.NewPersistentArena(store, nil, committer)
 	if err != nil { t.Fatal(err) }
 	reservation, err := arena.Reserve(1)
