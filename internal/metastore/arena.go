@@ -11,6 +11,7 @@ var (
 	ErrArenaFull       = errors.New("metadata arena is full")
 	ErrInvalidPageSet  = errors.New("invalid metadata page set")
 	ErrReservationDone = errors.New("metadata page reservation is already completed")
+	ErrPersistentArenaRequired = errors.New("persistent lifecycle layout requires NewPersistentArena")
 )
 
 type pageSet map[uint64]struct{}
@@ -47,6 +48,12 @@ type Reservation struct {
 // NewArena creates an allocator. livePages must include every page reachable
 // from the published root. The current root is added automatically.
 func NewArena(store *Store, livePages []uint64) (*Arena, error) {
+	if store == nil { return nil, errors.New("nil metastore") }
+	if store.Superblock().LifecyclePages != 0 { return nil, ErrPersistentArenaRequired }
+	return newArena(store, livePages)
+}
+
+func newArena(store *Store, livePages []uint64) (*Arena, error) {
 	if store == nil {
 		return nil, errors.New("nil metastore")
 	}
