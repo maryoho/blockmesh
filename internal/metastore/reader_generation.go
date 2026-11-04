@@ -250,8 +250,9 @@ func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
 }
 
 func decodeReaderRecord(slot uint32,b []byte) (ReaderRecord,error) {
+	if len(b)!=PageSize { return ReaderRecord{},ErrLifecycleCorrupt }
 	version:=binary.LittleEndian.Uint32(b[8:12])
-	if len(b)!=PageSize || string(b[:8])!=readerPageMagic || (version!=1 && version!=readerPageVersion) ||
+	if string(b[:8])!=readerPageMagic || (version!=1 && version!=readerPageVersion) ||
 		crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) { return ReaderRecord{},ErrLifecycleCorrupt }
 	state:=ReaderState(binary.LittleEndian.Uint32(b[12:16]))
 	nl,bl:=int(binary.LittleEndian.Uint16(b[40:42])),int(binary.LittleEndian.Uint16(b[42:44]))
