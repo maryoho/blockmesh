@@ -176,11 +176,17 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
  if rootPage!=NoPage {if _,ok:=newLiveSet[rootPage];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}}
  if rootPage==NoPage&&len(newLiveSet)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
  if reservation!=nil {for _,id:=range reservation.pages {if _,ok:=newLiveSet[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}}}
+ queuedPages:=make(map[uint64]struct{})
+ for _,batch:=range p.batches {for _,id:=range batch.PageIDs {
+  queuedPages[id]=struct{}{}
+  if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }}
  retiredSeen:=make(map[uint64]struct{},len(retired))
  currentRoot:=p.store.Superblock().RootPage
  for _,id:=range retired {
   if id<p.arena.start||id-p.arena.start>=p.arena.pages||id==currentRoot {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=retiredSeen[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet};retiredSeen[id]=struct{}{}
+  if _,ok:=queuedPages[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=p.arena.reserved[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
