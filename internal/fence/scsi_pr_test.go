@@ -47,8 +47,8 @@ func (r *fakePRRunner) Run(_ context.Context, _ string, args ...string) ([]byte,
 
 func TestSCSIPRFencerPreemptsAndVerifiesEveryPath(t *testing.T) {
 	runner := &fakePRRunner{keys: map[string]map[uint64]bool{
-		"/dev/mapper/mpatha": {0x11: true, 0x22: true},
-		"/dev/mapper/mpathb": {0x11: true, 0x22: true},
+		"/dev/mapper/mpatha": {0x11: true, 0x22: true, 0xaa: true, 0xbb: true},
+		"/dev/mapper/mpathb": {0x11: true, 0x22: true, 0xaa: true, 0xbb: true},
 	}}
 	f := &SCSIPRFencer{
 		Paths: []PRPath{{Device:"/dev/mapper/mpatha", LocalKey:0xaa}, {Device:"/dev/mapper/mpathb", LocalKey:0xbb}},
