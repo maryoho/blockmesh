@@ -357,5 +357,5 @@ func TestFenceExpiredReaderIfStaleRechecksHeartbeatUnderBarrier(t *testing.T) {
 	err=table.FenceExpiredReaderIfStale(context.Background(),0,"node-fenced","boot-fenced",4,
 		now.Add(-time.Minute),probe,fencer)
 	if !errors.Is(err,ErrReaderNotStale) {t.Fatalf("fresh heartbeat must cancel fencing: %v",err)}
-	if probe.acquired||fencerCalls!=0 {t.Fatalf("fresh reader reached fencing path: probe=%v fencerCalls=%d",probe.acquired,fencerCalls)}
+	if !probe.acquired||!probe.released||fencerCalls!=0 {t.Fatalf("fresh heartbeat must cancel PR fencing after slot lease probe: probe=%v released=%v fencerCalls=%d",probe.acquired,probe.released,fencerCalls)}
 }
