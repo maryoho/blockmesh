@@ -30,7 +30,7 @@ func TestCollectCapturesEveryPathAndOnlyUsesReadCommands(t *testing.T){
 		"dmsetup status /dev/mapper/mpatha","sanlock client status","sanlock status",
 		"lsblk -J -O /dev/mapper/mpatha",
 	}{if _,ok:=r.outputs[cmd];!ok{r.outputs[cmd]=[]byte("ok")}}
-	e,err:=testCollector(r).Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","vol-1","node-a","boot-a",[]string{"/dev/sda","/dev/sdb"})
+	e,err:=testCollector(r).Collect(context.Background(),"/dev/mapper/mpatha","vol-1","node-a","boot-a",[]string{"/dev/sda","/dev/sdb"})
 	if err!=nil{t.Fatal(err)}
 	if len(e.Paths)!=2{t.Fatalf("got %d paths",len(e.Paths))}
 	if e.Paths[0].WWID!="naa.6000000000000001"{t.Fatalf("WWID=%q",e.Paths[0].WWID)}
@@ -42,8 +42,8 @@ func TestCollectCapturesEveryPathAndOnlyUsesReadCommands(t *testing.T){
 }
 func TestCollectRejectsMissingOrDuplicatePaths(t *testing.T){
 	c:=testCollector(&fakeRunner{})
-	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","","","",nil);err==nil{t.Fatal("expected missing paths error")}
-	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","","","",[]string{"/dev/sda","/dev/sda"});err==nil{t.Fatal("expected duplicate path error")}
+	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","","","",nil);err==nil{t.Fatal("expected missing paths error")}
+	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","","","",[]string{"/dev/sda","/dev/sda"});err==nil{t.Fatal("expected duplicate path error")}
 }
 func TestVerifyTargetKeyAbsentRequiresEveryPathReadable(t *testing.T){
 	e:=Evidence{PathCoverageVerified:true,Paths:[]PathEvidence{
