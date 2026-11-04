@@ -359,6 +359,11 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 	if len(s.VolumeID) == 0 || len(s.VolumeID) > 64 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages || s.ArenaPages > s.TotalPages-s.ArenaStart {
 		return nil, ErrGeometry
 	}
+	if s.LifecyclePages != 0 {
+		if s.LifecyclePages < 2 || s.LifecycleStart < 2 || s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart { return nil, ErrGeometry }
+		arenaEnd,lifecycleEnd:=s.ArenaStart+s.ArenaPages,s.LifecycleStart+s.LifecyclePages
+		if s.LifecycleStart<arenaEnd&&lifecycleEnd>s.ArenaStart{return nil,ErrGeometry}
+	}
 	b := make([]byte, PageSize)
 	copy(b[0:8], []byte{'B', 'M', 'M', 'E', 'T', 'A', '0', '1'})
 	binary.LittleEndian.PutUint16(b[8:10], FormatVersion)
