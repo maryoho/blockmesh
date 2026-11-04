@@ -26,6 +26,7 @@ const (
 var (
 	ErrKeyNotFound = errors.New("B+Tree key not found")
 	ErrCorruptTree = errors.New("corrupt B+Tree")
+	ErrPersistentArenaRequired = errors.New("persistent lifecycle metadata requires OpenPersistent")
 )
 
 type Item struct {
@@ -54,6 +55,10 @@ type Tree struct {
 // Open loads and validates the published tree, then reconstructs the
 // process-local arena allocation state from its reachable pages.
 func Open(store *metastore.Store, journals ...metastore.Committer) (*Tree, error) {
+	return openTree(store, false, journals...)
+}
+
+func openTree(store *metastore.Store, allowPersistent bool, journals ...metastore.Committer) (*Tree, error) {
 	if len(journals) > 1 {
 		return nil, errors.New("at most one WAL committer may be supplied")
 	}
@@ -61,6 +66,8 @@ func Open(store *metastore.Store, journals ...metastore.Committer) (*Tree, error
 		return nil, errors.New("nil metastore")
 	}
 	sb := store.Superblock()
+	if sb.LifecyclePages != 0 && !allowPersistent { return nil, ErrPersistentArenaRequired }
+	if sb.LifecyclePages == 0 && allowPersistent { return nil, metastore.ErrLifecycleUnformatted }
 	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}
 	if len(journals) == 1 {
 		if journals[0] == nil {
@@ -91,7 +98,7 @@ func Open(store *metastore.Store, journals ...metastore.Committer) (*Tree, error
 // recover the WAL before calling this function.
 func OpenPersistent(store *metastore.Store, journal metastore.Committer) (*Tree, error) {
 	if journal == nil { return nil, errors.New("nil WAL committer") }
-	t, err := Open(store, journal)
+	t, err := openTree(store, true, journal)
 	if err != nil { return nil, err }
 	persistent, err := metastore.NewPersistentArena(store, t.pages, journal)
 	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
