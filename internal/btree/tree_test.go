@@ -4,11 +4,15 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"testing"
 
+	"blockmesh/internal/device"
+	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
+	"blockmesh/internal/wal"
 )
 
 type memoryDevice struct {
@@ -309,3 +313,62 @@ func TestDeleteRetiresSupersededRoot(t *testing.T) {
 	}
 }
 
+
+func TestWALBackedCOWPublishesPagesAndRootAtomically(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "btree-wal-*.img")
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	dev, err := device.Open(f.Name(), true)
+	if err != nil { t.Fatal(err) }
+	defer dev.Close()
+
+	store, err := metastore.Format(dev, metastore.Layout{
+		VolumeID: "btree-wal-test",
+		TotalPages: format.MetadataSize / metastore.PageSize,
+		ArenaStart: 1_700_000,
+		ArenaPages: 1024,
+	})
+	if err != nil { t.Fatal(err) }
+	sb, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	journal, err := wal.New(dev, sb, 0)
+	if err != nil { t.Fatal(err) }
+	tree, err := Open(store, journal)
+	if err != nil { t.Fatal(err) }
+
+	// Slot 0 is the inactive superblock (Format initially publishes slot 1).
+	// Preserve it so we can model a crash after the WAL Commit but before any
+	// of its after-images reached their target locations.
+	oldInactive := make([]byte, metastore.PageSize)
+	if n, readErr := dev.ReadAt(oldInactive, 0); readErr != nil || n != len(oldInactive) {
+		t.Fatalf("read old inactive superblock: n=%d err=%v", n, readErr)
+	}
+	if err = tree.Put(42, 4242); err != nil { t.Fatal(err) }
+	newRoot := tree.RootPage()
+	if newRoot == metastore.NoPage { t.Fatal("WAL-backed Put did not publish a root") }
+
+	// Roll back the applied root descriptor and COW page while leaving the
+	// durable WAL records intact. Reopening the Journal must replay both.
+	if n, writeErr := dev.WriteAt(make([]byte, metastore.PageSize), int64(newRoot*metastore.PageSize)); writeErr != nil || n != metastore.PageSize {
+		t.Fatalf("clear COW root page: n=%d err=%v", n, writeErr)
+	}
+	if n, writeErr := dev.WriteAt(oldInactive, 0); writeErr != nil || n != len(oldInactive) {
+		t.Fatalf("restore old root descriptor: n=%d err=%v", n, writeErr)
+	}
+	if err = dev.Sync(); err != nil { t.Fatal(err) }
+
+	if _, err = wal.New(dev, sb, 0); err != nil {
+		t.Fatalf("WAL reopen must replay COW pages and root descriptor: %v", err)
+	}
+	reopenedStore, err := metastore.Open(dev, "btree-wal-test")
+	if err != nil { t.Fatal(err) }
+	reopened, err := Open(reopenedStore)
+	if err != nil { t.Fatal(err) }
+	if got, getErr := reopened.Get(42); getErr != nil || got != 4242 {
+		t.Fatalf("recovered COW value = %d, %v; want 4242", got, getErr)
+	}
+	if reopened.RootPage() != newRoot {
+		t.Fatalf("recovered root=%d, want %d", reopened.RootPage(), newRoot)
+	}
+}
