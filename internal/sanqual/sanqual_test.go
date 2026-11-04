@@ -61,7 +61,7 @@ func TestVerifyTargetKeyAbsentRequiresEveryPathReadable(t *testing.T){
 func TestVerifyTargetKeyAbsentPassesOnlyWhenAbsentEverywhere(t *testing.T){
 	e:=Evidence{PathCoverageVerified:true,Paths:[]PathEvidence{
 		{Device:"/dev/sda",ReadKeys:CommandResult{ExitCode:0},KeysParsed:true,RegisteredKeys:[]string{"aa"}},
-		{Device:"/dev/sdb",ReadKeys:CommandResult{ExitCode:0},RegisteredKeys:[]string{"aa"}},
+		{Device:"/dev/sdb",ReadKeys:CommandResult{ExitCode:0},KeysParsed:true,RegisteredKeys:[]string{"aa"}},
 	}}
 	v,err:=VerifyTargetKeyAbsent(e,"0x00000000000000bb")
 	if err!=nil{t.Fatal(err)}
