@@ -22,7 +22,7 @@ func run(args []string)error{
 	case "collect":return collect(args[1:])
 	case "verify-fenced":return verifyFenced(args[1:])
 	case "verify-reservation":return verifyReservation(args[1:])
-	default:return fmt.Errorf("unknown command %q (expected collect or verify-fenced)",args[0])
+	default:return fmt.Errorf("unknown command %q (expected collect, verify-fenced, or verify-reservation)",args[0])
 	}
 }
 func collect(args []string)error{
