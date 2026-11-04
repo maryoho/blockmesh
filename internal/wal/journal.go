@@ -64,6 +64,7 @@ type Journal struct {
 	nextTx uint64
 	lastTx uint64
 	poisoned bool
+	poolFormatted bool
 }
 
 func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
@@ -100,8 +101,23 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	if uint64(sb.AGCount)*checkpointSlotsPerAG*checkpointDescriptorSize > sb.CheckpointSize {
 		return nil, errors.New("checkpoint region cannot hold dual per-AG descriptors")
 	}
+	// Detect the actual on-device format. Legacy metastore root publication
+	// remains available only on old test/diagnostic images that have no valid
+	// Pool Superblock. A BMPOOL02 device can never receive those LBA 0/1 writes.
+	poolFormatted := false
+	for _, off := range []uint64{format.SuperAOffset, format.SuperBOffset} {
+		page := make([]byte, format.PageSize)
+		if err := readAtFull(dev, page, int64(off)); err == nil {
+			if diskSB, decodeErr := format.DecodeSuperblock(page); decodeErr == nil {
+				if diskSB.PoolUUID != sb.PoolUUID || diskSB.MetadataSize != sb.MetadataSize {
+					return nil, errors.New("on-device Pool Superblock does not match Journal geometry")
+				}
+				poolFormatted = true
+			}
+		}
+	}
 	j := &Journal{
-		dev: dev, segmentBase: segmentBase, size: walBankSize,
+		dev: dev, segmentBase: segmentBase, size: walBankSize, poolFormatted: poolFormatted,
 		metadataSize: sb.MetadataSize, nodeTableStart: sb.NodeTableOffset,
 		nodeTableEnd: sb.NodeTableOffset + format.NodeTableSize, walStart: sb.WALOffset,
 		walEnd: sb.WALOffset + sb.WALSize,
@@ -353,10 +369,13 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 		if update.Offset > j.metadataSize || format.PageSize > j.metadataSize-update.Offset {
 			return fmt.Errorf("WAL page update offset %d outside metadata regions", update.Offset)
 		}
-		// Pool Superblocks at LBA 0/1 are immutable after format. All mutable
-		// Volume roots are published through a final Node Table descriptor.
+		// Pool Superblocks at LBA 0/1 are immutable on BMPOOL02 devices.
+		// Legacy root images are accepted only on unformatted legacy test images.
 		if update.Offset < 2*format.PageSize {
-			return fmt.Errorf("WAL transactions must never overwrite Pool Superblocks")
+			if j.poolFormatted || (update.Offset != 0 && update.Offset != format.PageSize) ||
+				i != len(updates)-1 || !validMetastoreSuperblock(update.Image) {
+				return fmt.Errorf("WAL transactions must not overwrite Pool Superblocks")
+			}
 		} else if isVolumeDescriptor(update.Image) {
 			rootDescriptors++
 			if i != len(updates)-1 || rootDescriptors > 1 || !validVolumeDescriptor(update.Image) ||
