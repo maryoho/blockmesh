@@ -212,6 +212,9 @@ func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
 	lease.lost<-errors.New("sanlock helper exited")
 	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("owner lease loss handler was not called")}
 	if got:=m.ActiveVolumes();len(got)!=0{t.Fatalf("lease-lost Owner still reported active: %v",got)}
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));!errors.Is(err,ErrVolumeRuntimeStopping){
+		t.Fatalf("activation after Owner Lease loss=%v, want stopping",err)
+	}
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
 	events:=base.snapshot()
 	assertRuntimeEventOrder(t,events,"owner-acquire","wal-recover","owner-epoch-publish","requests-enable","owner-fail-stop","requests-stop","io-drain","owner-release")
