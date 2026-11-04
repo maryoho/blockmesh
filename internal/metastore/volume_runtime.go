@@ -10,6 +10,8 @@ import (
 	"sync"
 )
 
+var ErrVolumeRuntimeStopping = errors.New("volume runtime is stopping or awaiting cleanup")
+
 // VolumeRuntimeMode determines which distributed ownership primitive is
 // acquired before the fixed-LBA metadata is opened.
 type VolumeRuntimeMode uint8
@@ -79,8 +81,9 @@ type volumeRuntime struct {
 }
 
 // VolumeRuntimeManager serializes per-volume activation/deactivation and owns
-// the recovery supervisor. A runtime is published only after all activation
-// steps, including request admission, have succeeded.
+// the recovery supervisor. The runtime map also retains partially initialized
+// resources after failed cleanup so a later Deactivate can safely retry; only
+// runtimes with enabled request admission are reported as active.
 type VolumeRuntimeManager struct {
 	mu       sync.Mutex
 	backend  VolumeRuntimeBackend
@@ -147,7 +150,10 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	if m.closed {
 		return ErrRecoverySupervisorClosed
 	}
-	if _, exists := m.runtimes[spec.VolumeID]; exists {
+	if current, exists := m.runtimes[spec.VolumeID]; exists {
+		if current.stopping {
+			return ErrVolumeRuntimeStopping
+		}
 		return nil
 	}
 
@@ -355,8 +361,10 @@ func (m *VolumeRuntimeManager) Shutdown(ctx context.Context) error {
 	m.closed = true
 	m.cancel()
 	ids := make([]string, 0, len(m.runtimes))
-	for id := range m.runtimes {
-		ids = append(ids, id)
+	for id, rt := range m.runtimes {
+		if rt.enabled {
+			ids = append(ids, id)
+		}
 	}
 	m.mu.Unlock()
 	sort.Strings(ids)
