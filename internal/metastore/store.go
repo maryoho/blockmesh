@@ -290,6 +290,15 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	if s.poolBacked {
 		if rootPage != NoPage && !s.inArena(rootPage) { return ErrOutOfRange }
 		if mappingSequence <= s.sb.MappingSequence { return errors.New("mapping sequence must increase") }
+		if s.sb.LifecyclePages != 0 {
+			state := make([]byte, PageSize)
+			if err := readFullAt(s.dev, state, int64(s.sb.LifecycleStart*PageSize)); err != nil { return err }
+			if !allZeroLifecycle(state) {
+				if _, _, err := decodeLifecycleState(state); err != nil { return ErrLifecycleCorrupt }
+				return ErrPersistentArenaRequired
+			}
+			if s.sb.MappingSequence != 0 || s.sb.RootPage != NoPage { return ErrPersistentArenaRequired }
+		}
 		next, slot, image, err := s.poolDescriptorAfterImage(rootPage, mappingSequence)
 		if err != nil { return err }
 		if err = writeFullAt(s.dev, image, int64(s.descriptorPair+slot*PageSize)); err != nil { return err }
@@ -446,7 +455,7 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	}
 	// The Volume root descriptor is deliberately the final WAL after-image.
 	images = append(images, PageImage{Offset: rootOffset, Data: rootImage})
-	if err = committer.CommitImages(images); err != nil {
+	if err := committer.CommitImages(images); err != nil {
 		return err
 	}
 	s.sb = next
