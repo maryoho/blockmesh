@@ -38,6 +38,7 @@ type PersistentArena struct {
  stateGeneration uint64
  rootSequence uint64
  batches []RetireBatch
+ coordinator ReaderCoordinator
 }
 
 func lifecycleOffsets(sb Superblock)(uint64,uint64,error){
@@ -124,7 +125,8 @@ func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
 // NewPersistentArena restores live pages from the root graph and durable
 // retire records. Every retired page remains pinned until Collect proves the
 // reader generation, I/O drain and fencing conditions.
-func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*PersistentArena,error){
+func NewPersistentArena(store *Store,livePages []uint64,committer Committer,coordinators ...ReaderCoordinator)(*PersistentArena,error){
+ if len(coordinators)>1{return nil,errors.New("at most one reader coordinator may be supplied")}
  if store==nil||committer==nil{return nil,errors.New("store and WAL committer are required")}
  stateOff,_,err:=lifecycleOffsets(store.Superblock());if err!=nil{return nil,err}
  stateImage:=make([]byte,PageSize);if err=readFullAt(store.dev,stateImage,int64(stateOff));err!=nil{return nil,err}
@@ -140,7 +142,9 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
   live=append(live,id)
  }}
  arena,err:=newArena(store,live);if err!=nil{return nil,err}
- return &PersistentArena{store:store,arena:arena,committer:committer,stateGeneration:generation,rootSequence:rootSequence,batches:batches},nil
+ var coordinator ReaderCoordinator
+ if len(coordinators)==1 { coordinator=coordinators[0] }
+ return &PersistentArena{store:store,arena:arena,committer:committer,stateGeneration:generation,rootSequence:rootSequence,batches:batches,coordinator:coordinator},nil
 }
 
 func (p *PersistentArena) Reserve(count uint64)(*Reservation,error){if p==nil{return nil,errors.New("nil persistent arena")};return p.arena.Reserve(count)}
@@ -157,6 +161,9 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 // instance and reopen/recover rather than aborting the reservation.
 func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
+ if p.coordinator!=nil {
+  unlock,err:=p.coordinator.LockReaderSet(p.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
+ }
  p.mu.Lock();defer p.mu.Unlock()
  if err:=p.store.Refresh();err!=nil{return err}
  if p.rootSequence==math.MaxUint64||mappingSequence!=p.rootSequence+1||retireGeneration!=p.rootSequence{return errors.New("invalid lifecycle generation")}
@@ -222,7 +229,9 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
 func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained bool) (int,error) {
  if p==nil { return 0,errors.New("nil persistent arena") }
  if readers==nil { return 0,errors.New("durable reader table is required") }
+ if p.coordinator==nil || readers.coordinator==nil { return 0,ErrReaderCoordinatorRequired }
  if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
+ unlock,err:=p.coordinator.LockReaderSet(p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
  safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
  return p.Collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
 }
