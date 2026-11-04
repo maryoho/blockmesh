@@ -10,9 +10,7 @@ import (
 	"blockmesh/internal/fence"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
-	"blockmesh/internal/metadata"
 	"blockmesh/internal/volume"
-	"blockmesh/internal/wal"
 )
 
 // PoolOwnerLeaseAcquirer must acquire the exclusive distributed Owner
@@ -31,7 +29,9 @@ type PoolRuntimeConfig struct {
 	OpenDevice func(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error)
 	Owner PoolOwnerLeaseAcquirer
 	Locker *lock.SanlockLocker
-	WALResourceForAG func(poolUUID [16]byte, ag uint32) string
+	OpenPoolSuperblock func(RuntimeMetadataDevice) (format.Superblock, error)
+	CommitterForAG func(device.Device, format.Superblock, uint32) (Committer, error)
+	RecoverAG func(context.Context, Committer) error
 	ReaderSetResource func(volumeID string) string
 	ReaderSlotResource func(volumeID string, slot uint32) string
 	PRRegistrar fence.ReaderRegistrar
@@ -60,7 +60,7 @@ type PoolVolumeRuntimeBackend struct {
 
 func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBackend, error) {
 	if cfg.OpenDevice == nil || cfg.Owner == nil || cfg.Locker == nil ||
-		!cfg.Locker.Distributed() || cfg.WALResourceForAG == nil ||
+		!cfg.Locker.Distributed() || cfg.OpenPoolSuperblock == nil || cfg.CommitterForAG == nil || cfg.RecoverAG == nil ||
 		cfg.ReaderSetResource == nil || cfg.ReaderSlotResource == nil ||
 		cfg.PRRegistrar == nil || cfg.ReaderRecoveryProbe == nil ||
 		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.OnReaderLeaseLost == nil ||
@@ -97,36 +97,38 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 }
 
 func (b *PoolVolumeRuntimeBackend) openPoolVolume(dev RuntimeMetadataDevice, spec VolumeRuntimeSpec) (*Store, format.Superblock, format.VolumeDescriptor, error) {
-	pool, err := metadata.OpenStoreDevice(dev)
+	pool, err := b.cfg.OpenPoolSuperblock(dev)
 	if err != nil { return nil, format.Superblock{}, format.VolumeDescriptor{}, fmt.Errorf("open BMPOOL02: %w", err) }
-	store, err := OpenPoolVolume(dev, pool.SB, spec.VolumeIndex, spec.VolumeID)
+	store, err := OpenPoolVolume(dev, pool, spec.VolumeIndex, spec.VolumeID)
 	if err != nil { return nil, format.Superblock{}, format.VolumeDescriptor{}, err }
 	desc, err := store.PoolDescriptor()
 	if err != nil { return nil, format.Superblock{}, format.VolumeDescriptor{}, err }
-	return store, pool.SB, desc, nil
-}
-
-func (b *PoolVolumeRuntimeBackend) committer(dev device.Device, sb format.Superblock, ag uint32) (*wal.SharedCommitter, error) {
-	resource := b.cfg.WALResourceForAG(sb.PoolUUID, ag)
-	if resource == "" { return nil, errors.New("WAL resource resolver returned an empty AG resource") }
-	return wal.NewSharedCommitter(dev, sb, ag, b.cfg.Locker, resource)
+	return store, pool, desc, nil
 }
 
 // RecoverWAL locates the Volume's AG from its redundant descriptor pair and
 // replays that AG journal while holding the distributed WAL resource.
-func (b *PoolVolumeRuntimeBackend) RecoverWAL(_ context.Context, spec VolumeRuntimeSpec, dev RuntimeMetadataDevice) error {
-	store, sb, desc, err := b.openPoolVolume(dev, spec)
+func (b *PoolVolumeRuntimeBackend) RecoverWAL(ctx context.Context, spec VolumeRuntimeSpec, dev RuntimeMetadataDevice) error {
+	_, sb, desc, err := b.openPoolVolume(dev, spec)
 	if err != nil { return err }
-	committer, err := b.committer(dev, sb, desc.AG)
+	committer, err := b.cfg.CommitterForAG(dev, sb, desc.AG)
 	if err != nil { return err }
-	return committer.Recover()
+	if committer == nil { return errors.New("AG committer factory returned nil") }
+	if safe, ok := committer.(ClusterSafeCommitter); !ok || !safe.ClusterSafe() {
+		return ErrClusterSafeCommitterRequired
+	}
+	return b.cfg.RecoverAG(ctx, committer)
 }
 
 func (b *PoolVolumeRuntimeBackend) OpenMetadata(_ context.Context, spec VolumeRuntimeSpec, dev RuntimeMetadataDevice) (*VolumeRuntimeMetadata, error) {
 	store, sb, desc, err := b.openPoolVolume(dev, spec)
 	if err != nil { return nil, err }
-	committer, err := b.committer(dev, sb, desc.AG)
+	committer, err := b.cfg.CommitterForAG(dev, sb, desc.AG)
 	if err != nil { return nil, err }
+	if committer == nil { return nil, errors.New("AG committer factory returned nil") }
+	if safe, ok := committer.(ClusterSafeCommitter); !ok || !safe.ClusterSafe() {
+		return nil, ErrClusterSafeCommitterRequired
+	}
 	readerStart, readerPages, err := store.ReaderTableRange()
 	if err != nil { return nil, err }
 	readers, err := NewReaderTable(store, readerStart, readerPages, committer, b.coordinator)
