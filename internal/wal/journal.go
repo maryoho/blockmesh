@@ -333,8 +333,8 @@ func decodeUpdates(payload []byte) ([]PageUpdate, error) {
 		return nil, ErrJournalCorrupt
 	}
 	count := uint64(binary.LittleEndian.Uint32(payload[:4]))
-	const itemSize = 8 + 4 + format.PageSize
-	if count == 0 || count > uint64((len(payload)-4)/itemSize) || uint64(len(payload)) != 4+count*itemSize {
+	const itemSize = uint64(8+4) + format.PageSize
+	if count == 0 || count > uint64(len(payload)-4)/itemSize || uint64(len(payload)) != 4+count*itemSize {
 		return nil, ErrJournalCorrupt
 	}
 	updates := make([]PageUpdate, 0, int(count))
