@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"blockmesh/internal/fence"
 )
 
 type supervisorTestController struct {
@@ -89,4 +91,31 @@ func TestReaderRecoverySupervisorParentCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err = s.Deactivate(ctx, "vol-a"); err != nil { t.Fatal(err) }
+}
+
+
+func TestReaderRecoveryProductionValidationRejectsUnsafeDependencies(t *testing.T) {
+	d, table, coordinator, committer, _ := p339Fixture(t)
+	store, err := Open(d, "p339-reader-recovery")
+	if err != nil { t.Fatal(err) }
+	arena, err := NewPersistentArena(store, nil, committer, coordinator)
+	if err != nil { t.Fatal(err) }
+
+	controller := &ReaderRecoveryController{
+		Table: table,
+		Probe: &testReaderLeaseProbe{},
+		Fencer: fence.NoopFencer{},
+		Arena: arena,
+		Drain: &recordingMetadataDrain{},
+		Config: ReaderRecoveryConfig{HeartbeatTimeout: time.Minute},
+	}
+	if err = controller.ValidateProduction(); err == nil {
+		t.Fatal("production validation accepted NoopFencer")
+	}
+
+	controller.Fencer = testFenceFunc(func(context.Context, string, string) error { return nil })
+	controller.Drain = nil
+	if err = controller.ValidateProduction(); err == nil {
+		t.Fatal("production validation accepted missing MetadataIODrainBarrier")
+	}
 }
