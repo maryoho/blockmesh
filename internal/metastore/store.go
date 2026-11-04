@@ -102,6 +102,13 @@ type Store struct {
 	dev    Device
 	sb     Superblock
 	sbSlot uint64
+
+	// Pool-backed Stores publish roots through the inactive BMDVOL02
+	// descriptor copy; the Pool Superblock at LBA 0/1 is never modified.
+	poolBacked bool
+	poolSB format.Superblock
+	descriptor format.VolumeDescriptor
+	descriptorPair uint64
 }
 
 func validateLayout(l Layout) error {
@@ -242,6 +249,9 @@ func (s *Store) Refresh() error {
 }
 
 func (s *Store) refreshLocked() error {
+	if s.poolBacked {
+		return s.refreshPoolLocked()
+	}
 	var best Superblock
 	found:=false
 	for _,slot:=range []uint64{Superblock0,Superblock1} {
@@ -277,6 +287,17 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err:=s.refreshLocked();err!=nil{return err}
+	if s.poolBacked {
+		if rootPage != NoPage && !s.inArena(rootPage) { return ErrOutOfRange }
+		if mappingSequence <= s.sb.MappingSequence { return errors.New("mapping sequence must increase") }
+		next, slot, image, err := s.poolDescriptorAfterImage(rootPage, mappingSequence)
+		if err != nil { return err }
+		if err = writeFullAt(s.dev, image, int64(s.descriptorPair+slot*PageSize)); err != nil { return err }
+		if err = s.dev.Sync(); err != nil { return err }
+		s.descriptor, s.sbSlot = next, slot
+		s.sb.Generation, s.sb.RootPage, s.sb.MappingSequence = next.Generation, next.RootPage, next.MappingSequence
+		return nil
+	}
 	if s.sb.LifecyclePages!=0 {
 		state:=make([]byte,PageSize)
 		if err:=readFullAt(s.dev,state,int64(s.sb.LifecycleStart*PageSize));err!=nil{return err}
@@ -340,6 +361,9 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	}
 	if s.sb.Generation == math.MaxUint64 {
 		return errors.New("superblock generation exhausted")
+	}
+	if s.poolBacked && s.descriptor.VolumeSequence == math.MaxUint64 {
+		return errors.New("Volume Descriptor sequence exhausted")
 	}
 	if len(pages)+len(extra)+1>MaxMetadataTransactionPages { return ErrMetadataTransactionTooLarge }
 
@@ -405,18 +429,29 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	next.Generation++
 	next.RootPage = rootPage
 	next.MappingSequence = mappingSequence
-	slot := uint64(1) - s.sbSlot
-	superblockImage, err := encodeSuperblock(next)
-	if err != nil {
-		return err
+	var rootOffset uint64
+	var rootImage []byte
+	var nextDescriptor format.VolumeDescriptor
+	if s.poolBacked {
+		var err error
+		nextDescriptor, s.sbSlot, rootImage, err = s.poolDescriptorAfterImage(rootPage, mappingSequence)
+		if err != nil { return err }
+		rootOffset = s.descriptorPair + s.sbSlot*PageSize
+	} else {
+		slot := uint64(1) - s.sbSlot
+		var err error
+		rootImage, err = encodeSuperblock(next)
+		if err != nil { return err }
+		s.sbSlot = slot
+		rootOffset = slot * PageSize
 	}
-	// The root descriptor is deliberately the final after-image in the WAL
-	// transaction. Recovery replays page data before making it reachable.
-	images = append(images, PageImage{Offset: slot * PageSize, Data: superblockImage})
+	// The Volume root descriptor is deliberately the final WAL after-image.
+	images = append(images, PageImage{Offset: rootOffset, Data: rootImage})
 	if err = committer.CommitImages(images); err != nil {
 		return err
 	}
-	s.sb, s.sbSlot = next, slot
+	s.sb = next
+	if s.poolBacked { s.descriptor = nextDescriptor }
 	return nil
 }
 
