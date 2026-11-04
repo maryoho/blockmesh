@@ -188,7 +188,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		return ErrRecoverySupervisorClosed
 	}
 	if current, exists := m.runtimes[spec.VolumeID]; exists {
-		if current.stopping {
+		if current.stopping || current.ownerLost.Load() {
 			return ErrVolumeRuntimeStopping
 		}
 		if current.spec != spec {
