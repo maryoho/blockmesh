@@ -269,3 +269,27 @@ func checkpointOffsetMust(t *testing.T, sb format.Superblock, ag, slot uint32) u
 	if err != nil { t.Fatal(err) }
 	return off
 }
+
+
+func TestMissingDescriptorsNeverAssumeInactiveBankIsEmpty(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wal-missing-checkpoint-*.img")
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	d, err := device.Open(f.Name(), true)
+	if err != nil { t.Fatal(err) }
+	defer d.Close()
+	sb, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	// Simulate a WAL whose active bank was bank 1 but whose descriptors were
+	// lost. Bank 0 is blank, so probing only the first bank would lose data.
+	marker := []byte("live-bank-one")
+	bank1Offset := sb.WALOffset + walBankSize + journalHeaderSize
+	if n, writeErr := d.WriteAt(marker, int64(bank1Offset)); writeErr != nil || n != len(marker) {
+		t.Fatalf("write bank1 marker: %d %v", n, writeErr)
+	}
+	if err = d.Sync(); err != nil { t.Fatal(err) }
+	if _, err = New(d, sb, 0); err != ErrCheckpointMissing {
+		t.Fatalf("expected ErrCheckpointMissing, got %v", err)
+	}
+}
