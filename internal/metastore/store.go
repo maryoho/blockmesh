@@ -85,6 +85,16 @@ type Committer interface {
 	CommitImages(images []PageImage) error
 }
 
+// ClusterSafeCommitter serializes shared-device commits across processes and
+// reloads WAL state under that distributed lock. It is mandatory whenever a
+// ReaderCoordinator is configured.
+type ClusterSafeCommitter interface {
+	Committer
+	ClusterSafe() bool
+}
+
+var ErrClusterSafeCommitterRequired = errors.New("cluster-safe WAL committer required for coordinated metadata")
+
 type Store struct {
 	mu     sync.RWMutex
 	dev    Device
