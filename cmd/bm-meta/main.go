@@ -19,7 +19,7 @@ func main() {
 	node := flag.String("node", "node-a", "node id")
 	blocks := flag.Uint64("blocks", 1024, "physical 4MiB blocks")
 	flag.Parse()
-	e, err := metadata.Open(metadata.Config{VolumeID: *vol, NodeID: *node, StatePath: *state, WALPath: *walPath, TotalBlocks: *blocks, Lease: volume.NewMemoryLease(), Fencer: fence.NoopFencer{}})
+	e, err := metadata.OpenEngine(metadata.Config{VolumeID: *vol, NodeID: *node, StatePath: *state, WALPath: *walPath, TotalBlocks: *blocks, Lease: volume.NewMemoryLease(), Fencer: fence.NoopFencer{}})
 	if err != nil {
 		log.Fatal(err)
 	}
