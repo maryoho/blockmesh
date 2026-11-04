@@ -69,8 +69,9 @@ Each record stores NodeID, BootID, monotonically increasing Reader Epoch,
 Root Generation, heartbeat sequence, and state:
 - Active: participates in the minimum safe generation.
 - Leaving: still pins its generation until clean I/O drain or fencing.
-- Fenced: excluded only after the fencer succeeds, or after the graceful
-  close path confirms the caller has stopped new reads and drained all I/O.
+- Fenced: excluded only after the SAN fencer succeeds.
+- Closed: excluded only after the graceful close path confirms the caller has
+  stopped new reads and drained all I/O.
 
 A new process instance must use a new BootID and a strictly higher Epoch before
 reusing a fenced slot. Heartbeats refresh the local redundant superblock view
