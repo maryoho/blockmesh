@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 )
 
@@ -47,5 +46,4 @@ func main() {
 	defer stop()
 	<-ctx.Done()
 	_ = os.Remove(*readyFile)
-	_ = strconv.Itoa(*parentPID) // keep the parsed identity explicit in diagnostics/builds
 }
