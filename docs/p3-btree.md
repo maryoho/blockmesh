@@ -48,13 +48,23 @@ error, so reusing those page IDs before reopen/recovery would be unsafe.
 - The tree is validated recursively when opened, including node type, level,
   ordering, child ranges, separators, page checksums and duplicate/cyclic
   child references.
-- This baseline rebuilds the complete tree for each mutation. It is correct
-  COW publication but has O(N) write amplification; path-copy insertion,
-  split/merge and deletion balancing are a later optimization.
+- Mutations use path-copy COW. A normal insert, replace or delete writes
+  only the changed leaf and its ancestors. A leaf split creates two new leaves;
+  an internal split creates two new internal pages and can propagate to the
+  root. A root split creates one new root. All old pages remain immutable.
+- Deletion removes empty leaves and prunes empty child references. Underfull
+  non-root nodes are currently allowed; internal nodes with one child are
+  encoded with zero separators. A one-child root is collapsed to its child.
+  Merge/redistribution balancing is deferred.
+- `Get` still uses the sorted in-memory item cache, and `Put`/`Delete`
+  still copy that slice to maintain `Snapshot`. Disk-page write amplification
+  is O(tree height), but CPU/memory mutation cost remains O(N).
 - Old roots and their pages are not reclaimed. This is intentional until the
   Reader Lease, generation tracking and SAN fencing/reclamation stages are
   integrated. Do not reuse old-root pages while any reader may still hold an
-  older root.
+  older root. Repeated updates therefore consume arena pages; a persistent
+  retire queue and safe reclamation are required before long-running production
+  use.
 - The arena allocator is process-local. `Open` rebuilds its live set from the
   currently published root. Reopen/reclamation with concurrent old-root
   readers is not production-safe until the persistent retire queue and reader
