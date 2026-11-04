@@ -309,6 +309,15 @@ func (t *Tree) CollectRetired(proof metastore.ReclaimProof) (int, error) {
 	return t.retire.Collect(t.arena, proof)
 }
 
+// CollectRetiredWithReaders derives the safe generation from the persistent
+// Reader Table and uses the configured distributed reader-set barrier.
+func (t *Tree) CollectRetiredWithReaders(readers *metastore.ReaderTable, ioDrained bool) (int,error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.persistentArena==nil { return 0,metastore.ErrPersistentArenaRequired }
+	return t.persistentArena.CollectWithReaders(readers,ioDrained)
+}
+
 func encodeLeaf(items []Item) []byte {
 	b := make([]byte, nodeHeaderSize+len(items)*16)
 	copy(b[:4], "BMTN")
