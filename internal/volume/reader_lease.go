@@ -70,18 +70,19 @@ func (c ReaderLeaseConfig) AcquireReader(ctx context.Context, volumeID string, s
 	interval := c.PollInterval
 	if interval <= 0 { interval = 250 * time.Millisecond }
 	go func() {
-		defer close(r.monitorDone)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-r.done:
+				close(r.monitorDone)
 				return
 			case <-ticker.C:
 				if !lease.Valid() {
 					err := fmt.Errorf("sanlock reader lease lost: %s", resource)
 					r.errMu.Lock(); r.err = err; r.errMu.Unlock()
 					close(r.lost)
+					close(r.monitorDone)
 					onLost(err)
 					return
 				}
