@@ -12,19 +12,25 @@ import (
 
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
-	"blockmesh/internal/metadata"
+	"blockmesh/internal/device"
 	"blockmesh/internal/wal"
 )
 
 const bitmapDescriptorMagic = uint64(0x424D424D41503031) // BMBMAP01
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
+type MetadataStore interface {
+	Superblock() format.Superblock
+	Device() device.Device
+	ReadPage(offset uint64) ([]byte, error)
+}
+
 type Allocator struct {
-	Store *metadata.Store
+	Store MetadataStore
 	Locks lock.Locker
 }
 
-func New(store *metadata.Store, locks lock.Locker) (*Allocator, error) {
+func New(store MetadataStore, locks lock.Locker) (*Allocator, error) {
 	if store == nil || locks == nil {
 		return nil, fmt.Errorf("store and lock provider are required")
 	}
@@ -37,16 +43,17 @@ func New(store *metadata.Store, locks lock.Locker) (*Allocator, error) {
 // mappingOffset must point into the Mapping region. The caller's Volume Owner
 // lease is represented by the volume:<volumeID> lock resource.
 func (a *Allocator) AllocateOne(ctx context.Context, volumeLease lock.Lease, volumeID string, ag uint32, mappingOffset uint64, buildMapping func(oldPage []byte, physicalBlock uint64) ([]byte, error)) (uint64, error) {
+	sb := a.Store.Superblock()
 	if volumeID == "" {
 		return 0, fmt.Errorf("volume ID is empty")
 	}
 	if volumeLease == nil || !volumeLease.Valid() || volumeLease.Resource() != "volume:"+volumeID {
 		return 0, fmt.Errorf("a valid exclusive Volume Owner Lease is required")
 	}
-	if ag >= a.Store.SB.AGCount {
+	if ag >= sb.AGCount {
 		return 0, fmt.Errorf("AG %d out of range", ag)
 	}
-	if mappingOffset%format.PageSize != 0 || mappingOffset < a.Store.SB.MappingOffset || mappingOffset+format.PageSize > a.Store.SB.CheckpointOffset {
+	if mappingOffset%format.PageSize != 0 || mappingOffset < sb.MappingOffset || mappingOffset+format.PageSize > sb.CheckpointOffset {
 		return 0, fmt.Errorf("mapping page offset %d outside Mapping region", mappingOffset)
 	}
 	if buildMapping == nil {
@@ -72,7 +79,7 @@ func (a *Allocator) AllocateOne(ctx context.Context, volumeLease lock.Lease, vol
 		return 0, fmt.Errorf("recover AG %d WAL: %w", ag, err)
 	}
 
-	base := a.Store.SB.BitmapOffset + uint64(ag)*format.AGBitmapStride
+	base := sb.BitmapOffset + uint64(ag)*format.AGBitmapStride
 	desc := make([]byte, format.PageSize)
 	if err = readDeviceAtFull(a.Store.Device(), desc, int64(base)); err != nil {
 		return 0, err
@@ -146,7 +153,8 @@ func findFree(bitmap []byte) (uint64, bool) {
 // Before calling this after a node failure, the caller must complete the
 // platform-specific fencing procedure for the previous owner.
 func (a *Allocator) RecoverAG(ctx context.Context, ag uint32) (bool, error) {
-	if ag >= a.Store.SB.AGCount {
+	sb := a.Store.Superblock()
+	if ag >= sb.AGCount {
 		return false, fmt.Errorf("AG %d out of range", ag)
 	}
 	unlock, err := a.Locks.Lock(ctx, fmt.Sprintf("ag:%03d", ag))
@@ -165,7 +173,8 @@ func (a *Allocator) RecoverAG(ctx context.Context, ag uint32) (bool, error) {
 // pool startup/recovery, not for the ordinary I/O path.
 func (a *Allocator) RecoverAll(ctx context.Context) (int, error) {
 	replayed := 0
-	for ag := uint32(0); ag < a.Store.SB.AGCount; ag++ {
+	sb := a.Store.Superblock()
+	for ag := uint32(0); ag < sb.AGCount; ag++ {
 		ok, err := a.RecoverAG(ctx, ag)
 		if err != nil {
 			return replayed, fmt.Errorf("recover AG %d: %w", ag, err)
