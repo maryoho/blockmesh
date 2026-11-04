@@ -21,7 +21,7 @@ The included `metadata.Engine` is still a single-volume JSON snapshot reference 
 * **P3-3 (in progress):** per-AG fixed-LBA redo WAL, recovery-before-open, dual-bank checkpoint rotation, atomic COW root publication, atomic Bitmap/Mapping/Volume Descriptor allocation, and optional WAL-persisted B+Tree Arena lifecycle, multi-page Retire Queue, and durable Reader Generation slots. Distributed lease/slot coordination and production SAN fencing remain open.
 * P3-4: multi-node leases, AG coordination, shared reader visibility and SAN fencing.
 * P3-5: crash recovery and fault-injection tests.
-* **P3-3.10:** per-volume Recovery Controller lifecycle supervisor, production dependency validation, and cancellable recovery scans/collection. The current `cmd/bm-meta` remains a JSON/WAL demonstrator; the fixed-LBA daemon Volume activation manager and real cluster-wide DM drain provider are still integration work.
+* **P3-3.10:** per-volume Recovery Controller lifecycle supervisor, production dependency validation, and cancellable recovery scans/collection. P3-3.11 adds a retryable `VolumeRuntimeManager` that sequences device open, RW Owner Lease, WAL recovery, fixed-LBA Store/ReaderTable/PersistentArena construction, RO Reader Session, recovery supervision, request admission, I/O drain and reverse-order teardown. Its `VolumeRuntimeBackend` is an explicit production adapter contract; the real Linux block-device/sanlock/DM drain backend is not yet implemented. The current `cmd/bm-meta` remains a JSON/WAL demonstrator and is not yet wired to the fixed-LBA runtime. See [docs/p3-3.11.md](docs/p3-3.11.md).
 * P3-6: Linux DM Target integration.
 
 See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md](docs/p3-arena.md), [docs/p3-wal.md](docs/p3-wal.md), and [docs/p3-reader-fencing.md](docs/p3-reader-fencing.md) for the on-disk layout, page lifecycle, WAL contract, and sanlock/SCSI PR integration.
@@ -29,7 +29,7 @@ See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md]
 ## Layout
 
 * `internal/device`: random-access durable device interface and file-backed test device.
-* `internal/metastore`: fixed-LBA 4 KiB metadata pages, redundant superblocks, process-local and WAL-persisted Arena lifecycle, multi-page Retire Queue, and durable Reader Generation slots.
+* `internal/metastore`: fixed-LBA 4 KiB metadata pages, redundant superblocks, process-local and WAL-persisted Arena lifecycle, multi-page Retire Queue, durable Reader Generation slots, recovery supervision, and retryable per-Volume Runtime lifecycle.
 * `internal/wal`: per-AG fixed-LBA CRC32C redo WAL with Intent/Commit, recovery-before-open, dual-bank checkpoint rotation, and `SharedCommitter` for cross-process AG serialization.
 * `internal/metadata`: current JSON-backed reference engine, descriptor and retire queue.
 * `internal/allocator`: 4 MiB allocation bitmap and per-AG WAL transaction publishing Bitmap, immutable Mapping COW page, and Volume Descriptor.
