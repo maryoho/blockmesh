@@ -179,6 +179,7 @@ type runtimeOwnerLossBackend struct {
 	*runtimeTestBackend
 	lease *runtimeMonitoredOwnerLease
 	lossHandled chan struct{}
+	lossErr error
 }
 func (b *runtimeOwnerLossBackend) AcquireOwnerLease(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease,error) {
 	b.add("owner-acquire")
@@ -187,8 +188,9 @@ func (b *runtimeOwnerLossBackend) AcquireOwnerLease(context.Context, VolumeRunti
 func (b *runtimeOwnerLossBackend) HandleOwnerLeaseLost(ctx context.Context, spec VolumeRuntimeSpec, cause error) error {
 	b.add("owner-fail-stop")
 	close(b.lossHandled)
-	if err:=b.StopRequests(ctx,spec.VolumeID);err!=nil{return err}
-	return b.DrainMetadataIO(ctx,spec.VolumeID)
+	stopErr:=b.StopRequests(ctx,spec.VolumeID)
+	drainErr:=b.DrainMetadataIO(ctx,spec.VolumeID)
+	return errors.Join(b.lossErr,stopErr,drainErr)
 }
 
 func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
@@ -212,4 +214,30 @@ func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
 	events:=base.snapshot()
 	assertRuntimeEventOrder(t,events,"owner-acquire","wal-recover","owner-epoch-publish","requests-enable","owner-fail-stop","requests-stop","io-drain","owner-release")
+}
+
+func TestVolumeRuntimeRetainsResourcesWhenOwnerFailStopFails(t *testing.T) {
+	base:=&runtimeTestBackend{}
+	lease:=&runtimeMonitoredOwnerLease{
+		runtimeTestOwnerLease:&runtimeTestOwnerLease{
+			closer:runtimeTestCloser{events:&base.events,mu:&base.mu,name:"owner-release"},epoch:10,
+		},
+		lost:make(chan error,1),
+	}
+	backend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{}),lossErr:errors.New("DM suspend failed")}
+	m,err:=NewVolumeRuntimeManager(backend)
+	if err!=nil{t.Fatal(err)}
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second)
+	defer cancel()
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));err!=nil{t.Fatal(err)}
+	waitRuntimeRecovery(t,base)
+	lease.lost<-errors.New("sanlock helper exited")
+	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("owner lease loss handler was not called")}
+	if err=m.Deactivate(ctx,"vol-runtime");err==nil{t.Fatal("expected fail-stop error to retain resources")}
+	events:=base.snapshot()
+	for _,event:=range events{
+		if event=="metadata-close"||event=="owner-release"||event=="device-close"{
+			t.Fatalf("runtime resources released after failed fail-stop: %v",events)
+		}
+	}
 }
