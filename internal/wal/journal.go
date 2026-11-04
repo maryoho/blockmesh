@@ -46,11 +46,19 @@ type Journal struct {
 	dev device.Device
 	base uint64
 	size uint64
+	segmentBase uint64
 	metadataSize uint64
 	walStart uint64
 	walEnd uint64
+	checkpointStart uint64
+	checkpointEnd uint64
+	checkpointSlot uint32
+	checkpointGeneration uint64
+	checkpointTxID uint64
+	activeBank uint32
 	end uint64
 	nextTx uint64
+	lastTx uint64
 	poisoned bool
 }
 
@@ -70,16 +78,33 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	if sb.WALOffset > math.MaxUint64-sb.WALSize {
 		return nil, errors.New("WAL region overflows address space")
 	}
-	base := sb.WALOffset + uint64(ag)*format.WALSegmentSize
-	if base < sb.WALOffset || base > sb.MetadataSize || format.WALSegmentSize > sb.MetadataSize-base ||
+	segmentBase := sb.WALOffset + uint64(ag)*format.WALSegmentSize
+	if segmentBase < sb.WALOffset || segmentBase > sb.MetadataSize || format.WALSegmentSize > sb.MetadataSize-segmentBase ||
 		uint64(ag)*format.WALSegmentSize > sb.WALSize || format.WALSegmentSize > sb.WALSize-uint64(ag)*format.WALSegmentSize {
 		return nil, errors.New("AG WAL segment outside metadata device")
 	}
-	j := &Journal{
-		dev: dev, base: base, size: format.WALSegmentSize,
-		metadataSize: sb.MetadataSize, walStart: sb.WALOffset,
-		walEnd: sb.WALOffset + sb.WALSize, nextTx: 1,
+	checkpointEnd := sb.CheckpointOffset + sb.CheckpointSize
+	if checkpointEnd < sb.CheckpointOffset || checkpointEnd > sb.MetadataSize {
+		return nil, errors.New("checkpoint region outside metadata device")
 	}
+	if uint64(sb.AGCount)*checkpointSlotsPerAG*checkpointDescriptorSize > sb.CheckpointSize {
+		return nil, errors.New("checkpoint region cannot hold dual per-AG descriptors")
+	}
+	j := &Journal{
+		dev: dev, segmentBase: segmentBase, size: walBankSize,
+		metadataSize: sb.MetadataSize, walStart: sb.WALOffset,
+		walEnd: sb.WALOffset + sb.WALSize,
+		checkpointStart: sb.CheckpointOffset, checkpointEnd: checkpointEnd,
+		nextTx: 1,
+	}
+	desc, slot, err := j.loadCheckpoint(ag, sb)
+	if err != nil { return nil, fmt.Errorf("load AG %d checkpoint: %w", ag, err) }
+	j.activeBank, j.checkpointSlot = desc.ActiveBank, slot
+	j.checkpointGeneration, j.checkpointTxID = desc.Generation, desc.CheckpointTxID
+	j.lastTx = desc.CheckpointTxID
+	j.nextTx = desc.CheckpointTxID + 1
+	if j.nextTx == 0 { return nil, errors.New("WAL transaction ID exhausted") }
+	j.base = segmentBase + uint64(desc.ActiveBank)*walBankSize
 	// Recovery is mandatory before a caller can issue new transactions. This
 	// prevents reads or later writes from observing pages left half-applied by
 	// a crash after the durable Commit record.
@@ -152,6 +177,7 @@ func (j *Journal) Commit(updates []PageUpdate) error {
 		j.poisoned = true
 		return err
 	}
+	j.lastTx = txID
 	return nil
 }
 
@@ -177,6 +203,9 @@ func (j *Journal) Recover() (bool, error) {
 		}
 	}
 	j.end, j.nextTx, j.poisoned = end, next, false
+	for _, txn := range txns {
+		if txn.txID > j.lastTx { j.lastTx = txn.txID }
+	}
 	return len(txns) != 0, nil
 }
 
@@ -192,6 +221,9 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 		end := update.Offset + format.PageSize
 		if update.Offset < j.walEnd && end > j.walStart {
 			return fmt.Errorf("WAL page update overlaps WAL region")
+		}
+		if update.Offset < j.checkpointEnd && end > j.checkpointStart {
+			return fmt.Errorf("WAL page update overlaps checkpoint descriptor region")
 		}
 		if _, ok := seen[update.Offset]; ok {
 			return fmt.Errorf("duplicate WAL page update offset %d", update.Offset)
@@ -217,7 +249,8 @@ func (j *Journal) scanLocked() ([]journalTxn, uint64, uint64, error) {
 	intents := make(map[uint64][]PageUpdate)
 	intentCRC := make(map[uint64]uint32)
 	var offset uint64
-	nextTx := uint64(1)
+	nextTx := j.checkpointTxID + 1
+	if nextTx == 0 { return nil, 0, 0, errors.New("WAL transaction ID exhausted") }
 	for offset < j.size {
 		header := make([]byte, journalHeaderSize)
 		if j.size-offset < journalHeaderSize {
