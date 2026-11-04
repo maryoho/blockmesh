@@ -20,12 +20,12 @@ func TestRebalanceInternalSiblingsMergeAndRedistribute(t *testing.T) {
 		t.Fatalf("invalid merged internal node: %+v", merged)
 	}
 
-	left = makeInternal(300, 120)
-	right = makeInternal(500, 120)
+	left = makeInternal(300, 130)
+	right = makeInternal(500, 130)
 	parent = &cowNode{level: 2, children: []cowChild{refForNode(left), refForNode(right)}}
 	if err := rebalanceChild(nil, parent, 0); err != nil { t.Fatal(err) }
 	if len(parent.children) != 2 { t.Fatalf("redistributed parent has %d children, want 2", len(parent.children)) }
-	if len(left.children) != 120 || len(right.children) != 120 {
+	if len(left.children) != 130 || len(right.children) != 130 {
 		t.Fatalf("unexpected redistribution sizes: left=%d right=%d", len(left.children), len(right.children))
 	}
 }
