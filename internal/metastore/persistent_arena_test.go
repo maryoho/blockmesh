@@ -23,7 +23,7 @@ func TestPersistentArenaRecoversRetiredPagesAndReclaimsOnlyAfterProof(t *testing
  pa,err:=NewPersistentArena(s,[]uint64{2},committer);if err!=nil{t.Fatal(err)}
  reservation,err:=pa.Reserve(1);if err!=nil{t.Fatal(err)}
  newRoot:=reservation.Pages()[0]
- if err=pa.CommitPagesAndPublish([]Page{{ID:newRoot,Type:1,Generation:2,Payload:[]byte("root-2")}},newRoot,2,1,[]uint64{2});err!=nil{t.Fatal(err)}
+ if err=pa.CommitPagesAndPublish(reservation,[]Page{{ID:newRoot,Type:1,Generation:2,Payload:[]byte("root-2")}},newRoot,2,1,[]uint64{2});err!=nil{t.Fatal(err)}
  if err=reservation.Commit();err!=nil{t.Fatal(err)}
  if got:=pa.Pending();len(got)!=1||got[0].RetireGeneration!=1||len(got[0].PageIDs)!=1||got[0].PageIDs[0]!=2{t.Fatalf("unexpected retire queue: %+v",got)}
 
