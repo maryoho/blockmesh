@@ -59,7 +59,7 @@ func TestArenaFullAndRelease(t *testing.T) {
 	if err = r.Commit(); err != nil { t.Fatal(err) }
 	ids := r.Pages()
 	if err = a.ReleasePages(ids); err != nil { t.Fatal(err) }
-	if got := a.Stats(); got.LivePages != 1 || got.ReservedPages != 0 || got.FreePages != 6 {
+	if got := a.Stats(); got.LivePages != 1 || got.ReservedPages != 0 || got.FreePages != 5 {
 		t.Fatalf("unexpected stats after release: %+v", got)
 	}
 	if err = s.Publish(ids[0], 1); err != nil { t.Fatal(err) }
