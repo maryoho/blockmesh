@@ -16,6 +16,8 @@ const (
 	leafPageType        uint16 = 1
 	internalPageType    uint16 = 2
 	nodeHeaderSize             = 12
+	nodeFormatVersionV1 uint16 = 1
+	nodeFormatVersion   uint16 = 2
 	maxLeafEntries             = (metastore.PagePayloadMax - nodeHeaderSize) / 16
 	maxInternalKeys            = (metastore.PagePayloadMax - 20) / 16
 	maxInternalChildren        = maxInternalKeys + 1
@@ -82,8 +84,12 @@ func loadNode(store *metastore.Store, id uint64, expectedLevel uint16, seen map[
 		return nil, fmt.Errorf("read B+Tree page %d: %w", id, err)
 	}
 	*live = append(*live, id)
-	if len(p.Payload) < nodeHeaderSize || string(p.Payload[:4]) != "BMTN" || binary.LittleEndian.Uint16(p.Payload[4:6]) != 1 {
+	if len(p.Payload) < nodeHeaderSize || string(p.Payload[:4]) != "BMTN" {
 		return nil, fmt.Errorf("%w: invalid node header at page %d", ErrCorruptTree, id)
+	}
+	nodeVersion := binary.LittleEndian.Uint16(p.Payload[4:6])
+	if nodeVersion != nodeFormatVersionV1 && nodeVersion != nodeFormatVersion {
+		return nil, fmt.Errorf("%w: unsupported node version %d at page %d", ErrCorruptTree, nodeVersion, id)
 	}
 	count := int(binary.LittleEndian.Uint16(p.Payload[6:8]))
 	level := binary.LittleEndian.Uint16(p.Payload[8:10])
@@ -102,7 +108,7 @@ func loadNode(store *metastore.Store, id uint64, expectedLevel uint16, seen map[
 		}
 		return out, nil
 	case internalPageType:
-		if level == 0 || (expectedLevel != math.MaxUint16 && expectedLevel != level) || count > maxInternalKeys || len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
+		if level == 0 || (expectedLevel != math.MaxUint16 && expectedLevel != level) || count > maxInternalKeys || (count == 0 && nodeVersion < nodeFormatVersion) || len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
 			return nil, fmt.Errorf("%w: invalid internal page %d", ErrCorruptTree, id)
 		}
 		keys := make([]uint64, count)
@@ -262,7 +268,7 @@ func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
 func encodeLeaf(items []Item) []byte {
 	b := make([]byte, nodeHeaderSize+len(items)*16)
 	copy(b[:4], "BMTN")
-	binary.LittleEndian.PutUint16(b[4:6], 1)
+	binary.LittleEndian.PutUint16(b[4:6], nodeFormatVersion)
 	binary.LittleEndian.PutUint16(b[6:8], uint16(len(items)))
 	binary.LittleEndian.PutUint16(b[8:10], 0)
 	for i, item := range items {
