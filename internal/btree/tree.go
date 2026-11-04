@@ -268,7 +268,11 @@ func (t *Tree) publishItems(items []Item) error {
 	}
 	root := level[0].id
 	if err = t.store.Publish(root, sequence); err != nil {
-		return fmt.Errorf("publish B+Tree root: %w", err)
+		// Publish may have written the inactive superblock before Sync failed.
+		// Its durability is therefore ambiguous; never return these pages to
+		// the allocator until recovery has inspected the selected superblock.
+		committed = true
+		return fmt.Errorf("publish B+Tree root (reservation retained for recovery): %w", err)
 	}
 	// A failure here is not safely abortable: the durable root already points
 	// at these pages. Keep the reservation owned and report the invariant break.
