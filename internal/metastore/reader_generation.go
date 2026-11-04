@@ -34,6 +34,7 @@ var (
 	ErrReaderIdentity = errors.New("reader identity or epoch mismatch")
 	ErrReaderGeneration = errors.New("reader generation cannot move backwards")
 	ErrReaderNotFenced = errors.New("reader has not been fenced")
+	ErrReaderCoordinatorRequired = errors.New("distributed reader-set coordinator is required")
 )
 
 // ReaderRecord is the durable state of one reader instance. BootID must be
@@ -55,15 +56,24 @@ type ReaderRecord struct {
 // The slot range must be reserved by the caller and must not overlap the
 // Arena, lifecycle pages, WAL, checkpoint area, or any other metadata object.
 // Slot assignment/ownership must be serialized by the cluster lock service.
+// ReaderCoordinator must provide a cluster-wide exclusive barrier shared by
+// reader registration, root publication, and retire collection. It must be
+// backed by the volume lease/lock service, not a process-local mutex.
+type ReaderCoordinator interface {
+	LockReaderSet(volumeID string) (unlock func(), err error)
+}
+
 type ReaderTable struct {
 	mu sync.Mutex
 	store *Store
 	startPage uint64
 	slots uint32
 	committer Committer
+	coordinator ReaderCoordinator
 }
 
-func NewReaderTable(store *Store, startPage uint64, slots uint32, committer Committer) (*ReaderTable,error) {
+func NewReaderTable(store *Store, startPage uint64, slots uint32, committer Committer, coordinators ...ReaderCoordinator) (*ReaderTable,error) {
+	if len(coordinators)>1 { return nil,errors.New("at most one reader coordinator may be supplied") }
 	if store==nil || committer==nil || slots==0 { return nil,errors.New("store, nonzero reader slots and WAL committer are required") }
 	sb:=store.Superblock()
 	count:=uint64(slots)
@@ -75,7 +85,9 @@ func NewReaderTable(store *Store, startPage uint64, slots uint32, committer Comm
 		lifeEnd:=sb.LifecycleStart+sb.LifecyclePages
 		if startPage<lifeEnd && end>sb.LifecycleStart { return nil,ErrReaderSlot }
 	}
-	return &ReaderTable{store:store,startPage:startPage,slots:slots,committer:committer},nil
+	var coordinator ReaderCoordinator
+	if len(coordinators)==1 { coordinator=coordinators[0] }
+	return &ReaderTable{store:store,startPage:startPage,slots:slots,committer:committer,coordinator:coordinator},nil
 }
 
 func (t *ReaderTable) readLocked(slot uint32) (ReaderRecord,error) {
@@ -94,6 +106,9 @@ func (t *ReaderTable) writeLocked(r ReaderRecord) error {
 }
 
 func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
+	if t.coordinator!=nil {
+		unlock,err:=t.coordinator.LockReaderSet(t.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
+	}
 	t.mu.Lock();defer t.mu.Unlock()
 	if err:=t.store.Refresh();err!=nil{return err}
 	if slot>=t.slots || nodeID=="" || bootID=="" || len(nodeID)>readerIdentitySize || len(bootID)>readerIdentitySize || epoch==0 { return ErrReaderSlot }
