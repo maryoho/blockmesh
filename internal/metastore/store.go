@@ -394,8 +394,9 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 }
 
 func decodeSuperblock(b []byte) (Superblock, error) {
+	if len(b) != PageSize { return Superblock{}, ErrCorrupt }
 	version:=binary.LittleEndian.Uint16(b[8:10])
-	if len(b) != PageSize || string(b[:8]) != "BMMETA01" || (version != FormatVersion && version != LifecycleFormatVersion) || binary.LittleEndian.Uint16(b[10:12]) != PageSize {
+	if string(b[:8]) != "BMMETA01" || (version != FormatVersion && version != LifecycleFormatVersion) || binary.LittleEndian.Uint16(b[10:12]) != PageSize {
 		return Superblock{}, ErrCorrupt
 	}
 	if crc32.Checksum(b[:PageSize-4], crcTable) != binary.LittleEndian.Uint32(b[PageSize-4:]) {
