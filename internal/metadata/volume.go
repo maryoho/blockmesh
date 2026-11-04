@@ -44,11 +44,12 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 		LifecycleStart:lifecycleStart,LifecyclePages:lifecyclePages,
 	}
 	image,err:=d.Encode();if err!=nil{return zero,err}
+	// Initialize the lifecycle extent before making the descriptor visible.
+	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
 	if err=writeAtFull(dev,image,int64(pair));err!=nil{return zero,err}
 	if err=dev.Sync();err!=nil{return zero,err}
 	if err=writeAtFull(dev,image,int64(pair+format.PageSize));err!=nil{return zero,err}
 	if err=dev.Sync();err!=nil{return zero,err}
-	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
 	return d,nil
 }
 
