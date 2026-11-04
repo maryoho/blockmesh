@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"sync"
 
@@ -57,7 +56,7 @@ func Open(store *metastore.Store) (*Tree, error) {
 	var live []uint64
 	if sb.RootPage != metastore.NoPage {
 		seen := make(map[uint64]struct{})
-		items, err := loadNode(store, sb.RootPage, math.MaxUint16, seen, &live)
+		items, err := loadNode(store, sb.RootPage, ^uint16(0), seen, &live)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +200,7 @@ func (t *Tree) ArenaStats() metastore.ArenaStats { return t.arena.Stats() }
 
 func (t *Tree) publishItems(items []Item) error {
 	sb := t.store.Superblock()
-	if sb.MappingSequence == math.MaxUint64 {
+	if sb.MappingSequence == ^uint64(0) {
 		return errors.New("B+Tree mapping sequence exhausted")
 	}
 	sequence := sb.MappingSequence + 1
