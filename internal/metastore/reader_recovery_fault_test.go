@@ -129,7 +129,7 @@ func (p *p339ExclusiveProbe) AcquireExpiredReader(context.Context, string, Reade
 		close(p.firstAcquired)
 		<-p.allowFirstReturn
 	}
-	return p.mu.Unlock, nil
+	return func() error { p.mu.Unlock(); return nil }, nil
 }
 
 func TestP339TwoRecoveryControllersFenceOneReaderOnlyOnce(t *testing.T) {
