@@ -32,6 +32,7 @@ type PathEvidence struct {
 	ReadKeys CommandResult `json:"read_keys"`
 	ReadReservation CommandResult `json:"read_reservation"`
 	RegisteredKeys []string `json:"registered_keys,omitempty"`
+	KeysParsed bool `json:"keys_parsed"`
 }
 
 type Evidence struct {
@@ -105,6 +106,7 @@ func (c Collector) Collect(ctx context.Context, multipathMap, volumeID, nodeID, 
 	if strings.TrimSpace(multipathMap) == "" { return Evidence{}, errors.New("multipath map device is required") }
 	if len(paths) == 0 { return Evidence{}, errors.New("explicit component paths are required; refusing to infer incomplete multipath coverage") }
 	runner, timeout, validate := c.defaults()
+	if err := validate(filepath.Clean(strings.TrimSpace(multipathMap))); err != nil { return Evidence{}, fmt.Errorf("validate multipath map %s: %w", multipathMap, err) }
 	cleanPaths := make([]string, 0, len(paths))
 	seen := make(map[string]bool, len(paths))
 	for _, raw := range paths {
@@ -152,7 +154,7 @@ func (c Collector) Collect(ctx context.Context, multipathMap, volumeID, nodeID, 
 		keys := run(ctx, runner, timeout, "sg_persist", "--in", "--read-keys", "--device="+path)
 		reservation := run(ctx, runner, timeout, "sg_persist", "--in", "--read-reservation", "--device="+path)
 		item := PathEvidence{Device: path, WWID: extractWWID(wwid.Output), ReadKeys: keys, ReadReservation: reservation}
-		if keys.ExitCode == 0 { item.RegisteredKeys = parseKeys(keys.Output) } else { e.Warnings = append(e.Warnings, "cannot read PR keys on "+path+": "+keys.Error) }
+		if keys.ExitCode == 0 { item.RegisteredKeys, item.KeysParsed = parseKeys(keys.Output) } else { e.Warnings = append(e.Warnings, "cannot read PR keys on "+path+": "+keys.Error) }
 		if reservation.ExitCode != 0 { e.Warnings = append(e.Warnings, "cannot read PR reservation on "+path+": "+reservation.Error) }
 		if item.WWID == "" { e.Warnings = append(e.Warnings, "cannot establish WWID for "+path) }
 		e.Paths = append(e.Paths, item)
@@ -180,17 +182,18 @@ func normalizeKey(value string) string {
 	return value
 }
 
-func parseKeys(output string) []string {
+func parseKeys(output string) ([]string, bool) {
 	set := make(map[string]bool)
+	parseable := strings.Contains(strings.ToLower(output), "pr generation") || strings.Contains(strings.ToLower(output), "registered reservation keys") || strings.Contains(strings.ToLower(output), "no registered")
 	for _, line := range strings.Split(output, "\n") {
 		match := keyLineRE.FindStringSubmatch(line)
 		if match == nil { match = plainKeyRE.FindStringSubmatch(line) }
-		if match != nil { set[normalizeKey(match[1])] = true }
+		if match != nil { parseable = true; set[normalizeKey(match[1])] = true }
 	}
 	keys := make([]string, 0, len(set))
 	for key := range set { keys = append(keys, key) }
 	sort.Strings(keys)
-	return keys
+	return keys, parseable
 }
 
 func extractWWID(output string) string {
@@ -232,7 +235,7 @@ func VerifyTargetKeyAbsent(e Evidence, targetKey string) (FenceVerification, err
 	if !e.PathCoverageVerified { return FenceVerification{}, errors.New("multipath component-path coverage and common WWID are not verified; refusing a fencing conclusion") }
 	result := FenceVerification{TargetKey: "0x"+key, AbsentOnAllPaths: true}
 	for _, path := range e.Paths {
-		if path.ReadKeys.ExitCode != 0 {
+		if path.ReadKeys.ExitCode != 0 || !path.KeysParsed {
 			result.UnknownPaths = append(result.UnknownPaths, path.Device)
 			result.AbsentOnAllPaths = false
 			continue
