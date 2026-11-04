@@ -123,9 +123,8 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
  if store==nil||committer==nil{return nil,errors.New("store and WAL committer are required")}
  stateOff,queueOff,err:=lifecycleOffsets(store.Superblock());if err!=nil{return nil,err}
  stateImage:=make([]byte,PageSize);if err=readFullAt(store.dev,stateImage,int64(stateOff));err!=nil{return nil,err}
- queueImage:=make([]byte,PageSize);if err=readFullAt(store.dev,queueImage,int64(queueOff));err!=nil{return nil,err}
  generation,rootSequence,err:=decodeLifecycleState(stateImage);if err!=nil{return nil,err}
- batches,queueGeneration,err:=decodeRetireQueue(queueImage,store);if err!=nil{return nil,err}
+ batches,queueGeneration,err:=readRetireQueuePages(store);if err!=nil{return nil,err}
  if rootSequence!=store.Superblock().MappingSequence||queueGeneration!=generation{return nil,ErrLifecycleCorrupt}
  live:=append([]uint64(nil),livePages...)
  for _,batch:=range batches {live=append(live,batch.PageIDs...)}
@@ -192,10 +191,11 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
  p.arena.mu.Unlock()
  nextBatches:=make([]RetireBatch,len(p.batches));for i,b:=range p.batches{nextBatches[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
  if len(retired)>0 {nextBatches=append(nextBatches,RetireBatch{RetireGeneration:retireGeneration,PageIDs:append([]uint64(nil),retired...)})}
- queueImage,err:=encodeRetireQueue(nextBatches,p.stateGeneration+1);if err!=nil{return err}
+ queueImages,err:=encodeRetireQueuePages(nextBatches,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{return err}
  stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
- sb:=p.store.Superblock();stateOff,queueOff,err:=lifecycleOffsets(sb);if err!=nil{return err}
- extras:=[]PageImage{{Offset:stateOff,Data:stateImage},{Offset:queueOff,Data:queueImage}}
+ sb:=p.store.Superblock();stateOff,_,err:=lifecycleOffsets(sb);if err!=nil{return err}
+ extras:=[]PageImage{{Offset:stateOff,Data:stateImage}}
+ for i,image:=range queueImages { extras=append(extras,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
  if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{return err}
  p.stateGeneration++;p.rootSequence=mappingSequence;p.batches=nextBatches
  return nil
@@ -213,11 +213,87 @@ func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
  for _,b:=range p.batches {if proof.SafeGeneration>b.RetireGeneration {release=append(release,b.PageIDs...)}else{kept=append(kept,b)}}
  if len(release)==0{return 0,nil}
  if p.stateGeneration==math.MaxUint64{return 0,errors.New("lifecycle generation exhausted")}
- queueImage,err:=encodeRetireQueue(kept,p.stateGeneration+1);if err!=nil{return 0,err}
+ queueImages,err:=encodeRetireQueuePages(kept,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{return 0,err}
  stateImage:=encodeLifecycleState(p.stateGeneration+1,p.rootSequence)
- stateOff,queueOff,err:=lifecycleOffsets(p.store.Superblock());if err!=nil{return 0,err}
- if err=p.committer.CommitImages([]PageImage{{Offset:stateOff,Data:stateImage},{Offset:queueOff,Data:queueImage}});err!=nil{return 0,err}
+ stateOff,_,err:=lifecycleOffsets(p.store.Superblock());if err!=nil{return 0,err}
+ images:=[]PageImage{{Offset:stateOff,Data:stateImage}}
+ sb:=p.store.Superblock()
+ for i,image:=range queueImages { images=append(images,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
+ if err=p.committer.CommitImages(images);err!=nil{return 0,err}
  if err=p.arena.ReleasePages(release);err!=nil{return 0,fmt.Errorf("retire queue committed but in-memory page release failed: %w",err)}
  p.stateGeneration++;p.batches=kept
  return len(release),nil
+}
+
+
+const persistentQueueFormatVersion = uint32(2)
+
+// encodeRetireQueuePages stores the durable queue in a fixed, pre-reserved
+// page range. Every page carries the same generation and an explicit index;
+// all pages are committed in one WAL transaction, so no torn mixture can be
+// accepted after recovery.
+func encodeRetireQueuePages(batches []RetireBatch, generation, pageCount uint64) ([][]byte, error) {
+ if pageCount == 0 { return nil, ErrLifecycleUnformatted }
+ total:=0
+ for _,batch:=range batches {
+  if len(batch.PageIDs)>math.MaxInt-total { return nil, ErrRetireQueueFull }
+  total+=len(batch.PageIDs)
+ }
+ capacity:=int(pageCount)*MaxPersistentRetiredPages
+ if total>capacity { return nil, ErrRetireQueueFull }
+ pages:=make([][]byte,int(pageCount))
+ for i:=range pages {
+  b:=make([]byte,PageSize); copy(b[:8],lifecycleQueueMagic)
+  binary.LittleEndian.PutUint32(b[8:12],persistentQueueFormatVersion)
+  binary.LittleEndian.PutUint64(b[16:24],generation)
+  binary.LittleEndian.PutUint32(b[24:28],uint32(i))
+  binary.LittleEndian.PutUint32(b[28:32],uint32(pageCount))
+  pages[i]=b
+ }
+ pageIndex,used:=0,0
+ for _,batch:=range batches { for _,id:=range batch.PageIDs {
+  if pageIndex>=len(pages) { return nil,ErrRetireQueueFull }
+  b:=pages[pageIndex]
+  count:=binary.LittleEndian.Uint32(b[12:16])
+  off:=lifecycleHeaderSize+int(count)*lifecycleRecordSize
+  binary.LittleEndian.PutUint64(b[off:off+8],batch.RetireGeneration)
+  binary.LittleEndian.PutUint64(b[off+8:off+16],id)
+  binary.LittleEndian.PutUint32(b[12:16],count+1)
+  used++
+  if int(count)+1==MaxPersistentRetiredPages { pageIndex++ }
+ }}
+ _=used
+ for _,b:=range pages { binary.LittleEndian.PutUint32(b[PageSize-4:],crc32.Checksum(b[:PageSize-4],crcTable)) }
+ return pages,nil
+}
+
+func readRetireQueuePages(store *Store) ([]RetireBatch,uint64,error) {
+ sb:=store.Superblock()
+ if sb.LifecyclePages<2 { return nil,0,ErrLifecycleUnformatted }
+ pageCount:=sb.LifecyclePages-1
+ batches:=make([]RetireBatch,0)
+ indexes:=make(map[uint64]int)
+ seen:=make(map[uint64]struct{})
+ var generation uint64
+ for i:=uint64(0);i<pageCount;i++ {
+  b:=make([]byte,PageSize)
+  off:=(sb.LifecycleStart+1+i)*PageSize
+  if err:=readFullAt(store.dev,b,int64(off));err!=nil{return nil,0,err}
+  if len(b)!=PageSize||string(b[:8])!=lifecycleQueueMagic||binary.LittleEndian.Uint32(b[8:12])!=persistentQueueFormatVersion||
+   crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) { return nil,0,ErrLifecycleCorrupt }
+  if binary.LittleEndian.Uint32(b[24:28])!=uint32(i)||binary.LittleEndian.Uint32(b[28:32])!=uint32(pageCount) { return nil,0,ErrLifecycleCorrupt }
+  g:=binary.LittleEndian.Uint64(b[16:24]);if g==0{return nil,0,ErrLifecycleCorrupt}
+  if i==0 {generation=g} else if generation!=g {return nil,0,ErrLifecycleCorrupt}
+  count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,0,ErrLifecycleCorrupt}
+  offRec:=lifecycleHeaderSize
+  for j:=0;j<count;j++ {
+   rg:=binary.LittleEndian.Uint64(b[offRec:offRec+8]);id:=binary.LittleEndian.Uint64(b[offRec+8:offRec+16]);offRec+=lifecycleRecordSize
+   if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||rg>=sb.MappingSequence{return nil,0,ErrLifecycleCorrupt}
+   if _,ok:=seen[id];ok{return nil,0,ErrLifecycleCorrupt};seen[id]=struct{}{}
+   bi,ok:=indexes[rg];if !ok{bi=len(batches);indexes[rg]=bi;batches=append(batches,RetireBatch{RetireGeneration:rg})}
+   batches[bi].PageIDs=append(batches[bi].PageIDs,id)
+  }
+  for _,v:=range b[offRec:PageSize-4]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
+ }
+ return batches,generation,nil
 }
