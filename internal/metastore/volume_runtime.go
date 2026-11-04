@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -73,6 +74,16 @@ type RuntimeOwnerLease interface {
 	Epoch() uint64
 }
 
+// RuntimeOwnerLeaseMonitor exposes asynchronous sanlock/lease loss. A closed
+// channel without an error is treated as lease loss by the manager.
+type RuntimeOwnerLeaseMonitor interface { Lost() <-chan error }
+
+// RuntimeOwnerLeaseLossHandler must synchronously fail-stop the local data
+// path before returning. PoolVolumeRuntimeBackend implements this contract.
+type RuntimeOwnerLeaseLossHandler interface {
+	HandleOwnerLeaseLost(context.Context, VolumeRuntimeSpec, error) error
+}
+
 // VolumeRuntimeBackend contains the platform-specific operations. Production
 // implementations must use a block-device backend, distributed sanlock
 // leases, a cluster-safe WAL committer, SAN PR fencing and a real DM I/O drain
@@ -99,6 +110,9 @@ type volumeRuntime struct {
 	enabled  bool
 	stopping bool
 	recoveryStarted bool
+	ownerWatchCancel context.CancelFunc
+	ownerWatchDone chan struct{}
+	ownerLost atomic.Bool
 }
 
 // VolumeRuntimeManager serializes per-volume activation/deactivation and owns
@@ -214,9 +228,32 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if rt.owner == nil {
 			return fail(errors.New("runtime backend returned nil owner lease"))
 		}
+		if monitor, ok := rt.owner.(RuntimeOwnerLeaseMonitor); ok {
+			handler, handlerOK := m.backend.(RuntimeOwnerLeaseLossHandler)
+			if !handlerOK || monitor.Lost() == nil {
+				return fail(errors.New("monitored Owner Lease requires a loss handler and non-nil loss channel"))
+			}
+			watchCtx, watchCancel := context.WithCancel(m.ctx)
+			rt.ownerWatchCancel = watchCancel
+			rt.ownerWatchDone = make(chan struct{})
+			go func() {
+				defer close(rt.ownerWatchDone)
+				select {
+				case <-watchCtx.Done():
+					return
+				case cause, open := <-monitor.Lost():
+					if !open || cause == nil { cause = errors.New("Owner Lease lost") }
+					rt.ownerLost.Store(true)
+					_ = handler.HandleOwnerLeaseLost(context.Background(), spec, cause)
+				}
+			}()
+		} else if _, requiresMonitor := m.backend.(RuntimeOwnerLeaseLossHandler); requiresMonitor {
+			return fail(errors.New("Pool RW runtime requires a monitored Owner Lease"))
+		}
 		if err = m.backend.RecoverWAL(ctx, spec, rt.device); err != nil {
 			return fail(fmt.Errorf("recover fixed-LBA WAL: %w", err))
 		}
+		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost during WAL recovery")) }
 	}
 
 	rt.metadata, err = m.backend.OpenMetadata(ctx, spec, rt.device)
@@ -237,6 +274,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if err = rt.metadata.PublishOwnerEpoch(ctx, rt.owner.Epoch()); err != nil {
 			return fail(fmt.Errorf("publish durable Volume owner epoch: %w", err))
 		}
+		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost before request admission")) }
 	}
 
 	if spec.Mode == VolumeRuntimeReadOnly {
@@ -256,6 +294,10 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		return fail(fmt.Errorf("start reader recovery supervisor: %w", err))
 	}
 	rt.recoveryStarted = true
+	if rt.ownerLost.Load() {
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(errors.New("Owner Lease lost before request admission"), cleanupErr)
+	}
 	if err = m.backend.EnableRequests(ctx, spec, rt.metadata); err != nil {
 		// EnableRequests may have partially admitted I/O before returning an
 		// error. Reuse the full teardown path (including drain) rather than
@@ -306,6 +348,7 @@ func (m *VolumeRuntimeManager) rollbackActivation(ctx context.Context, rt *volum
 		rt.metadata = nil
 	}
 	if rt.owner != nil {
+		stopOwnerLeaseMonitor(rt)
 		if err := rt.owner.Close(); err != nil {
 			failures = append(failures, fmt.Errorf("release owner lease during activation rollback: %w", err))
 			return errors.Join(failures...)
@@ -428,4 +471,12 @@ func (m *VolumeRuntimeManager) ActiveVolumes() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func stopOwnerLeaseMonitor(rt *volumeRuntime) {
+	if rt == nil || rt.ownerWatchDone == nil { return }
+	if rt.ownerWatchCancel != nil { rt.ownerWatchCancel() }
+	<-rt.ownerWatchDone
+	rt.ownerWatchDone = nil
+	rt.ownerWatchCancel = nil
 }
