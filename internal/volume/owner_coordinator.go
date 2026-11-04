@@ -177,3 +177,11 @@ func (l *OwnerLease) Close() error {
 	<-l.done
 	return l.lease.Close()
 }
+
+// UsesSanlockLocker reports whether this coordinator holds the exact same
+// sanlock locker instance as the Pool runtime's Reader/WAL coordination.
+func (c *OwnerCoordinator) UsesSanlockLocker(want *lock.SanlockLocker) bool {
+	if c == nil || want == nil { return false }
+	got, ok := c.cfg.Locker.(*lock.SanlockLocker)
+	return ok && got == want
+}
