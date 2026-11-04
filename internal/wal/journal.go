@@ -324,7 +324,8 @@ func (j *Journal) Recover() (bool, error) {
 
 func (j *Journal) validateUpdates(updates []PageUpdate) error {
 	seen := make(map[uint64]struct{}, len(updates))
-	for _, update := range updates {
+	rootDescriptors := 0
+	for i, update := range updates {
 		if update.Offset%format.PageSize != 0 || uint64(len(update.Image)) != format.PageSize {
 			return fmt.Errorf("WAL page update must be 4KiB aligned and exactly 4KiB")
 		}
@@ -334,8 +335,10 @@ func (j *Journal) validateUpdates(updates []PageUpdate) error {
 		// Only a complete CRC-valid metastore root descriptor may update
 		// either reserved superblock page through the WAL.
 		if update.Offset < 2*format.PageSize {
-			if (update.Offset != 0 && update.Offset != format.PageSize) || !validMetastoreSuperblock(update.Image) {
-				return fmt.Errorf("WAL update at reserved superblock offset %d is not a valid root descriptor", update.Offset)
+			rootDescriptors++
+			if i != len(updates)-1 || rootDescriptors > 1 ||
+				(update.Offset != 0 && update.Offset != format.PageSize) || !validMetastoreSuperblock(update.Image) {
+				return fmt.Errorf("WAL root descriptor must be one valid final after-image")
 			}
 		} else if update.Offset%format.PageSize != 0 {
 			return fmt.Errorf("WAL page update offset %d is not page aligned", update.Offset)
