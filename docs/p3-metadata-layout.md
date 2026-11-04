@@ -71,10 +71,7 @@ For a COW metadata update:
    inactive superblock and flushes it.
 5. Only after publication and reader-generation safety may old pages be reused.
 
-The store intentionally does not implement allocation, WAL, AG locking,
-reader leases, fencing, or reclamation yet. Those are subsequent P3 stages.
-The caller must serialize writers and must not treat WritePage completion as
-stable storage until Sync succeeds.
+The process-local Metadata Arena allocator is implemented in internal/metastore/arena.go; see docs/p3-arena.md for its reservation and page-lifecycle contract. The allocator is not yet durable and does not implement WAL, AG locking, reader leases, fencing, or crash-safe reclamation. Those remain subsequent P3 stages. The caller must serialize writers and must not treat WritePage completion as stable storage until Sync succeeds.
 
 ## API status
 
