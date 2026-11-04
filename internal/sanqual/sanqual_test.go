@@ -59,11 +59,16 @@ func TestVerifyTargetKeyAbsentRequiresEveryPathReadable(t *testing.T){
 	if v.AbsentOnAllPaths||len(v.UnknownPaths)!=1{t.Fatalf("unreadable path accepted: %+v",v)}
 }
 func TestVerifyTargetKeyAbsentPassesOnlyWhenAbsentEverywhere(t *testing.T){
-	e:=Evidence{Paths:[]PathEvidence{
+	e:=Evidence{PathCoverageVerified:true,Paths:[]PathEvidence{
 		{Device:"/dev/sda",ReadKeys:CommandResult{ExitCode:0},RegisteredKeys:[]string{"aa"}},
 		{Device:"/dev/sdb",ReadKeys:CommandResult{ExitCode:0},RegisteredKeys:[]string{"aa"}},
 	}}
 	v,err:=VerifyTargetKeyAbsent(e,"0x00000000000000bb")
 	if err!=nil{t.Fatal(err)}
 	if !v.AbsentOnAllPaths{t.Fatalf("expected absence: %+v",v)}
+}
+
+func TestVerifyTargetKeyAbsentRejectsIncompleteMultipathCoverage(t *testing.T) {
+	e := Evidence{Paths: []PathEvidence{{Device: "/dev/sda", ReadKeys: CommandResult{ExitCode: 0}}}}
+	if _, err := VerifyTargetKeyAbsent(e, "aa"); err == nil { t.Fatal("incomplete path coverage must not produce a fencing conclusion") }
 }
