@@ -294,9 +294,9 @@ func TestDeleteRetiresSupersededRoot(t *testing.T) {
 	if err := tree.Put(1, 10); err != nil { t.Fatal(err) }
 	if err := tree.Put(2, 20); err != nil { t.Fatal(err) }
 	oldRoot := tree.RootPage()
-	before := len(tree.RetireQueue().Pending())
+	before := len(tree.RetiredPages())
 	if err := tree.Delete(1); err != nil { t.Fatal(err) }
-	pending := tree.RetireQueue().Pending()
+	pending := tree.RetiredPages()
 	if len(pending) != before+1 {
 		t.Fatalf("retire batches=%d, want %d", len(pending), before+1)
 	}
