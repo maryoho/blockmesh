@@ -141,7 +141,7 @@ func (s Superblock) Validate() error {
 		s.AGCount == 0 || s.AGSizeBlocks == 0 ||
 		uint64(s.AGSizeBlocks)*BlockSize == 0 ||
 		uint64(s.AGCount)*uint64(s.AGSizeBlocks) != s.TotalBlocks ||
-		s.MetadataSize < 2*PageSize || s.MetadataSize > uint64(^uint64(0)>>1) {
+		s.MetadataSize < 2*PageSize || s.MetadataSize > uint64(^uint64(0)>>1) || s.NodeTableOffset < 2*PageSize {
 		return fmt.Errorf("invalid Pool geometry")
 	}
 	regions := [][3]uint64{
