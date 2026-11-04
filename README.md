@@ -18,18 +18,18 @@ The included `metadata.Engine` is still a single-volume JSON snapshot reference 
 
 * **P3-1 (in progress):** fixed-LBA metadata pages, dual superblocks, checksums, root publication ordering, and process-local Arena allocation lifecycle.
 * P3-2: page-level copy-on-write B+Tree.
-* P3-3: transactional bitmap/B+Tree/descriptor updates and WAL.
+* **P3-3 (in progress):** per-AG fixed-LBA redo WAL with durable Intent/Commit ordering and automatic committed-transaction replay. Checkpoint rotation and B+Tree/bitmap/descriptor integration remain open.
 * P3-4: multi-node leases, AG coordination, shared reader visibility and SAN fencing.
 * P3-5: crash recovery and fault-injection tests.
 * P3-6: Linux DM Target integration.
 
-See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md) and [docs/p3-arena.md](docs/p3-arena.md) for the on-disk layout and page lifecycle.
+See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md](docs/p3-arena.md), and [docs/p3-wal.md](docs/p3-wal.md) for the on-disk layout, page lifecycle, and WAL contract.
 
 ## Layout
 
 * `internal/device`: random-access durable device interface and file-backed test device.
 * `internal/metastore`: fixed-LBA 4 KiB metadata pages, redundant superblocks, and page allocator.
-* `internal/wal`: framed CRC32C WAL with Intent and Commit records (reference implementation).
+* `internal/wal`: per-AG fixed-LBA CRC32C redo WAL with Intent/Commit records and recovery-before-open; checkpoint recycling and metadata transaction integration are not complete.
 * `internal/metadata`: current JSON-backed reference engine, descriptor and retire queue.
 * `internal/allocator`: 4 MiB allocation bitmap primitive.
 * `internal/fence`: fencing contract and test-only no-op implementation.
