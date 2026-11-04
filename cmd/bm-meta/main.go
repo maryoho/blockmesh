@@ -7,9 +7,9 @@ import (
 	"log"
 	"os"
 
-	"blockmesh-p3/internal/fence"
-	"blockmesh-p3/internal/metadata"
-	"blockmesh-p3/internal/volume"
+	"blockmesh/internal/fence"
+	"blockmesh/internal/metadata"
+	"blockmesh/internal/volume"
 )
 
 func main() {

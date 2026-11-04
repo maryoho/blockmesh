@@ -10,10 +10,10 @@ import (
 	"sort"
 	"sync"
 
-	"blockmesh-p3/internal/allocator"
-	"blockmesh-p3/internal/fence"
-	"blockmesh-p3/internal/volume"
-	"blockmesh-p3/internal/wal"
+	"blockmesh/internal/allocator"
+	"blockmesh/internal/fence"
+	"blockmesh/internal/volume"
+	"blockmesh/internal/wal"
 )
 
 type Engine struct {

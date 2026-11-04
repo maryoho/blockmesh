@@ -1,3 +1,3 @@
-module blockmesh-p3
+module blockmesh
 
 go 1.23

@@ -6,8 +6,8 @@ import (
 	"hash/crc32"
 	"io"
 
-	"blockmesh-meta-v1/internal/device"
-	"blockmesh-meta-v1/internal/format"
+	"blockmesh/internal/device"
+	"blockmesh/internal/format"
 )
 
 const bitmapDescriptorMagic = uint64(0x424D424D41503031) // BMBMAP01

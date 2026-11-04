@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"blockmesh-p3/internal/fence"
-	"blockmesh-p3/internal/volume"
+	"blockmesh/internal/fence"
+	"blockmesh/internal/volume"
 )
 
 type testFencer struct {

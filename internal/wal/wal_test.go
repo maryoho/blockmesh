@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"blockmesh-meta-v1/internal/device"
-	"blockmesh-meta-v1/internal/format"
+	"blockmesh/internal/device"
+	"blockmesh/internal/format"
 )
 
 func TestCommitAndRecoverRedo(t *testing.T) {

@@ -7,9 +7,9 @@ import (
 	"os"
 	"testing"
 
-	"blockmesh-meta-v1/internal/format"
-	"blockmesh-meta-v1/internal/lock"
-	"blockmesh-meta-v1/internal/metadata"
+	"bblockmesh/internal/format"
+	"bblockmesh/internal/lock"
+	"bblockmesh/internal/metadata"
 )
 
 func TestAllocateOneUpdatesBitmapAndMapping(t *testing.T) {

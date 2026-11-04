@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"blockmesh-meta-v1/internal/format"
+	"bblockmesh/internal/format"
 )
 
 func TestInitInspectBitmap(t *testing.T) {
