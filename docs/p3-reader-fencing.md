@@ -84,3 +84,31 @@ A lease timeout alone is never a Fenced state. If sanlock acquisition, PREEMPT A
 - The controller that calls FenceExpiredReader must be trusted to run the configured SCSI PR fencer. FenceAndClose remains a lower-level trusted API and must not be called merely because a heartbeat expired.
 - CollectWithReaders still requires an independently established global I/O-drained condition. PR task abort does not replace draining the local BlockMesh/DM queues.
 - NoopFencer, MemoryLease, and FileLocker are development/test scaffolding only.
+
+
+## 7. Current API wiring notes
+
+The current JoinReaderSession signature requires the PR registrar:
+
+    session, err := metastore.JoinReaderSession(
+        ctx, readerTable, readerLeaseConfig, prRegistrar,
+        slot, nodeID, bootID, epoch, onLeaseLost,
+    )
+
+The registrar must be a fence.SCSIPRRegistrar configured with this host's
+per-initiator local keys. Join registers and verifies those keys before the
+Reader Table slot becomes Active. CloseDrained takes a context:
+session.CloseDrained(ctx, true). It unregisters the local PR keys, persists
+ReaderClosed, then releases the sanlock slot lease.
+
+Build cmd/bm-lock-helper and install it on every host. SanlockLocker invokes
+this helper through sanlock client command. The helper sets Linux
+PR_SET_PDEATHSIG, checks the expected parent PID to close the parent-death
+race, and only then creates the readiness marker. Set HelperBinary to its
+installed path when it is not available in PATH.
+
+ReaderLeaseConfig.ResourceFor receives volume ID, stable slot number, node
+identity, boot ID, and epoch. It must resolve to the pre-initialized sanlock
+resource assigned to that slot. SanlockReaderLeaseProbe.ResourceFor must
+resolve the exact same resource so recovery can acquire it only after the
+previous Reader process has released it.
