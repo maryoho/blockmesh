@@ -107,7 +107,7 @@ func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
  off:=lifecycleHeaderSize;sb:=store.Superblock()
  for i:=0;i<count;i++ {
   generation:=binary.LittleEndian.Uint64(b[off:off+8]);id:=binary.LittleEndian.Uint64(b[off+8:off+16]);off+=lifecycleRecordSize
-  if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||generation>sb.MappingSequence {return nil,0,ErrLifecycleCorrupt}
+  if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||generation>=sb.MappingSequence {return nil,0,ErrLifecycleCorrupt}
   if _,ok:=seen[id];ok{return nil,0,ErrLifecycleCorrupt};seen[id]=struct{}{}
   batchIndex,ok:=index[generation];if !ok {batchIndex=len(batches);index[generation]=batchIndex;batches=append(batches,RetireBatch{RetireGeneration:generation})}
   batches[batchIndex].PageIDs=append(batches[batchIndex].PageIDs,id)
