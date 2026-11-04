@@ -364,20 +364,28 @@ func (s *Store) ReadPage(id uint64) (Page, error) {
 func (s *Store) Sync() error { return s.dev.Sync() }
 
 func encodeSuperblock(s Superblock) ([]byte, error) {
-	if len(s.VolumeID) == 0 || len(s.VolumeID) > 64 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages || s.ArenaPages > s.TotalPages-s.ArenaStart {
+	if len(s.VolumeID) == 0 || len(s.VolumeID) > 64 || s.TotalPages < 3 ||
+		s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 ||
+		s.ArenaStart < 2 || s.ArenaStart > s.TotalPages ||
+		s.ArenaPages > s.TotalPages-s.ArenaStart {
 		return nil, ErrGeometry
 	}
-	if version==FormatVersion && (s.LifecycleStart!=0||s.LifecyclePages!=0) {return Superblock{},ErrCorrupt}
-	if version==LifecycleFormatVersion && s.LifecyclePages<2 {return Superblock{},ErrGeometry}
 	if s.LifecyclePages != 0 {
-		if s.LifecyclePages < 2 || s.LifecycleStart < 2 || s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart { return nil, ErrGeometry }
-		arenaEnd,lifecycleEnd:=s.ArenaStart+s.ArenaPages,s.LifecycleStart+s.LifecyclePages
-		if s.LifecycleStart<arenaEnd&&lifecycleEnd>s.ArenaStart{return nil,ErrGeometry}
+		if s.LifecyclePages < 2 || s.LifecycleStart < 2 ||
+			s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart {
+			return nil, ErrGeometry
+		}
+		arenaEnd, lifecycleEnd := s.ArenaStart+s.ArenaPages, s.LifecycleStart+s.LifecyclePages
+		if s.LifecycleStart < arenaEnd && lifecycleEnd > s.ArenaStart {
+			return nil, ErrGeometry
+		}
+	}
+	version := FormatVersion
+	if s.LifecyclePages != 0 {
+		version = LifecycleFormatVersion
 	}
 	b := make([]byte, PageSize)
 	copy(b[0:8], []byte{'B', 'M', 'M', 'E', 'T', 'A', '0', '1'})
-	version:=FormatVersion
-	if s.LifecyclePages!=0 {version=LifecycleFormatVersion}
 	binary.LittleEndian.PutUint16(b[8:10], version)
 	binary.LittleEndian.PutUint16(b[10:12], PageSize)
 	binary.LittleEndian.PutUint64(b[16:24], s.Generation)
@@ -394,25 +402,50 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 }
 
 func decodeSuperblock(b []byte) (Superblock, error) {
-	if len(b) != PageSize { return Superblock{}, ErrCorrupt }
-	version:=binary.LittleEndian.Uint16(b[8:10])
-	if string(b[:8]) != "BMMETA01" || (version != FormatVersion && version != LifecycleFormatVersion) || binary.LittleEndian.Uint16(b[10:12]) != PageSize {
+	if len(b) != PageSize {
+		return Superblock{}, ErrCorrupt
+	}
+	version := binary.LittleEndian.Uint16(b[8:10])
+	if string(b[:8]) != "BMMETA01" ||
+		(version != FormatVersion && version != LifecycleFormatVersion) ||
+		binary.LittleEndian.Uint16(b[10:12]) != PageSize {
 		return Superblock{}, ErrCorrupt
 	}
 	if crc32.Checksum(b[:PageSize-4], crcTable) != binary.LittleEndian.Uint32(b[PageSize-4:]) {
 		return Superblock{}, ErrCorrupt
 	}
 	id := strings.TrimRight(string(b[64:128]), "\x00")
-	s := Superblock{VolumeID: id, Generation: binary.LittleEndian.Uint64(b[16:24]), TotalPages: binary.LittleEndian.Uint64(b[24:32]), ArenaStart: binary.LittleEndian.Uint64(b[32:40]), ArenaPages: binary.LittleEndian.Uint64(b[40:48]), RootPage: binary.LittleEndian.Uint64(b[48:56]), MappingSequence: binary.LittleEndian.Uint64(b[56:64]), LifecycleStart: binary.LittleEndian.Uint64(b[128:136]), LifecyclePages: binary.LittleEndian.Uint64(b[136:144])}
-	if len(id) == 0 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages || s.ArenaPages > s.TotalPages-s.ArenaStart || (s.RootPage != NoPage && !(s.RootPage >= s.ArenaStart && s.RootPage-s.ArenaStart < s.ArenaPages)) {
+	s := Superblock{
+		VolumeID: id, Generation: binary.LittleEndian.Uint64(b[16:24]),
+		TotalPages: binary.LittleEndian.Uint64(b[24:32]),
+		ArenaStart: binary.LittleEndian.Uint64(b[32:40]),
+		ArenaPages: binary.LittleEndian.Uint64(b[40:48]),
+		RootPage: binary.LittleEndian.Uint64(b[48:56]),
+		MappingSequence: binary.LittleEndian.Uint64(b[56:64]),
+		LifecycleStart: binary.LittleEndian.Uint64(b[128:136]),
+		LifecyclePages: binary.LittleEndian.Uint64(b[136:144]),
+	}
+	if len(id) == 0 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) ||
+		s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages ||
+		s.ArenaPages > s.TotalPages-s.ArenaStart ||
+		(s.RootPage != NoPage && !(s.RootPage >= s.ArenaStart && s.RootPage-s.ArenaStart < s.ArenaPages)) {
+		return Superblock{}, ErrGeometry
+	}
+	if version == FormatVersion && (s.LifecycleStart != 0 || s.LifecyclePages != 0) {
+		return Superblock{}, ErrCorrupt
+	}
+	if version == LifecycleFormatVersion && s.LifecyclePages < 2 {
 		return Superblock{}, ErrGeometry
 	}
 	if s.LifecyclePages != 0 {
-		if s.LifecyclePages < 2 || s.LifecycleStart < 2 || s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart {
+		if s.LifecycleStart < 2 || s.LifecycleStart > s.TotalPages ||
+			s.LifecyclePages > s.TotalPages-s.LifecycleStart {
 			return Superblock{}, ErrGeometry
 		}
 		arenaEnd, lifecycleEnd := s.ArenaStart+s.ArenaPages, s.LifecycleStart+s.LifecyclePages
-		if s.LifecycleStart < arenaEnd && lifecycleEnd > s.ArenaStart { return Superblock{}, ErrGeometry }
+		if s.LifecycleStart < arenaEnd && lifecycleEnd > s.ArenaStart {
+			return Superblock{}, ErrGeometry
+		}
 	}
 	return s, nil
 }
