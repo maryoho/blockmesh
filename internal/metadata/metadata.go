@@ -203,6 +203,9 @@ func writeBitmap(d device.Device, ag uint32, base uint64, bm []byte, seq uint64)
 	return writeAtFull(d, desc, int64(base))
 }
 
+// Superblock returns the current metadata geometry used by the allocator.
+func (s *Store) Superblock() format.Superblock { return s.SB }
+
 // Device exposes the metadata device to the WAL and allocator packages.
 // Callers must coordinate all mutations with the configured lock provider.
 func (s *Store) Device() device.Device { return s.dev }
