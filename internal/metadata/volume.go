@@ -33,6 +33,7 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 	arenaPages:=slotBytes/format.PageSize-lifecyclePages-format.ReaderTablePages
 	arenaStart:=start/format.PageSize
 	lifecycleStart:=arenaStart+arenaPages
+	readerTableStart:=lifecycleStart+lifecyclePages
 	for slot:=uint64(0);slot<2;slot++ {
 		page:=make([]byte,format.PageSize)
 		if err:=readAtFull(dev,page,int64(pair+slot*format.PageSize));err!=nil{return zero,err}
@@ -48,6 +49,9 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 	image,err:=d.Encode();if err!=nil{return zero,err}
 	// Initialize the lifecycle extent before making the descriptor visible.
 	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
+	// Reader slots are one durable page each and must start Empty even when
+	// this Node Table slot is being initialized on a reused Pool.
+	if err=zeroRegion(dev,readerTableStart*format.PageSize,format.ReaderTablePages*format.PageSize);err!=nil{return zero,err}
 	if err=writeAtFull(dev,image,int64(pair));err!=nil{return zero,err}
 	if err=dev.Sync();err!=nil{return zero,err}
 	if err=writeAtFull(dev,image,int64(pair+format.PageSize));err!=nil{return zero,err}
