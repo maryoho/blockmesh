@@ -97,14 +97,14 @@ func encodeRetireQueue(batches []RetireBatch,generation uint64)([]byte,error){
 func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
  if len(b)!=PageSize||string(b[:8])!=lifecycleQueueMagic||binary.LittleEndian.Uint32(b[8:12])!=lifecycleVersion||
   crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) {return nil,0,ErrLifecycleCorrupt}
- count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,ErrLifecycleCorrupt}
+ count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,0,ErrLifecycleCorrupt}
  for _,v:=range b[24:lifecycleHeaderSize]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
  queueGeneration:=binary.LittleEndian.Uint64(b[16:24])
  batches:=make([]RetireBatch,0);index:=make(map[uint64]int);seen:=make(map[uint64]struct{},count)
  off:=lifecycleHeaderSize;sb:=store.Superblock()
  for i:=0;i<count;i++ {
   generation:=binary.LittleEndian.Uint64(b[off:off+8]);id:=binary.LittleEndian.Uint64(b[off+8:off+16]);off+=lifecycleRecordSize
-  if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||generation>sb.MappingSequence {return nil,ErrLifecycleCorrupt}
+  if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||generation>sb.MappingSequence {return nil,0,ErrLifecycleCorrupt}
   if _,ok:=seen[id];ok{return nil,0,ErrLifecycleCorrupt};seen[id]=struct{}{}
   batchIndex,ok:=index[generation];if !ok {batchIndex=len(batches);index[generation]=batchIndex;batches=append(batches,RetireBatch{RetireGeneration:generation})}
   batches[batchIndex].PageIDs=append(batches[batchIndex].PageIDs,id)
