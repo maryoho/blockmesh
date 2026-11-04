@@ -162,7 +162,7 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
  if p.coordinator!=nil {
-  unlock,err:=p.coordinator.LockReaderSet(p.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
+  unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
  }
  p.mu.Lock();defer p.mu.Unlock()
  if err:=p.store.Refresh();err!=nil{return err}
@@ -231,7 +231,7 @@ func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained boo
  if readers==nil { return 0,errors.New("durable reader table is required") }
  if p.coordinator==nil || readers.coordinator==nil { return 0,ErrReaderCoordinatorRequired }
  if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
- unlock,err:=p.coordinator.LockReaderSet(p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
+ unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
  safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
  return p.Collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
 }
