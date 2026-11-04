@@ -71,6 +71,40 @@ func (c *ReaderRecoveryController) validate() error {
 	return nil
 }
 
+// ValidateProduction rejects process-local and test-only dependencies. It
+// is intended to be called by the daemon lifecycle before starting automatic
+// recovery; unit tests may continue to use the less restrictive validate().
+func (c *ReaderRecoveryController) ValidateProduction() error {
+	if err := c.validate(); err != nil { return err }
+	if c.Arena == nil || c.Drain == nil {
+		return errors.New("production reader recovery requires persistent arena and metadata I/O drain barrier")
+	}
+	switch c.Fencer.(type) {
+	case fence.NoopFencer, *fence.NoopFencer:
+		return errors.New("NoopFencer is forbidden for production reader recovery")
+	}
+	probe, ok := c.Probe.(*SanlockReaderLeaseProbe)
+	if !ok || probe.Locker == nil || probe.ResourceFor == nil {
+		return errors.New("production reader recovery requires sanlock reader lease probe")
+	}
+	coordinator, ok := c.Table.coordinator.(*SanlockReaderCoordinator)
+	if !ok || coordinator.Locker == nil || coordinator.ResourceForVolume == nil {
+		return errors.New("production reader recovery requires sanlock reader-set coordinator")
+	}
+	if probe.Locker != coordinator.Locker || !coordinator.Locker.Distributed() {
+		return errors.New("reader probe and reader-set barrier must use the same distributed sanlock locker")
+	}
+	committer, ok := c.Table.committer.(ClusterSafeCommitter)
+	if !ok || !committer.ClusterSafe() {
+		return ErrClusterSafeCommitterRequired
+	}
+	arenaCoordinator, ok := c.Arena.coordinator.(*SanlockReaderCoordinator)
+	if !ok || arenaCoordinator != coordinator {
+		return errors.New("persistent arena and reader table must share the same sanlock reader-set coordinator")
+	}
+	return nil
+}
+
 func (c *ReaderRecoveryController) now() time.Time {
 	if c.Config.Clock!=nil { return c.Config.Clock() }
 	return time.Now()
