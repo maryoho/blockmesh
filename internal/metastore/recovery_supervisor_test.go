@@ -57,21 +57,14 @@ func TestReaderRecoverySupervisorRejectsUnsafeController(t *testing.T) {
 }
 
 func TestReaderRecoverySupervisorShutdownAllVolumes(t *testing.T) {
-	var started atomic.Int32
-	s, err := NewReaderRecoverySupervisor(func(string) (ManagedReaderRecovery, error) {
-		return &supervisorTestController{started: make(chan struct{}),}, nil
-	})
-	if err != nil { t.Fatal(err) }
 	// Use separate start channels to avoid depending on goroutine scheduling.
 	c1 := &supervisorTestController{started: make(chan struct{})}
 	c2 := &supervisorTestController{started: make(chan struct{})}
-	_ = started
-	_ = c1
-	_ = c2
-	s.factory = func(volumeID string) (ManagedReaderRecovery, error) {
+	s, err := NewReaderRecoverySupervisor(func(volumeID string) (ManagedReaderRecovery, error) {
 		if volumeID == "a" { return c1, nil }
 		return c2, nil
-	}
+	})
+	if err != nil { t.Fatal(err) }
 	if err = s.Activate(context.Background(), "a"); err != nil { t.Fatal(err) }
 	if err = s.Activate(context.Background(), "b"); err != nil { t.Fatal(err) }
 	for _, ch := range []<-chan struct{}{c1.started, c2.started} {
