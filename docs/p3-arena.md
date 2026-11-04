@@ -87,16 +87,23 @@ changes a slot to Fenced. Graceful shutdown may use `CloseDrained`, but only
 after all reads are stopped and in-flight I/O is drained.
 
 `PersistentArena.CollectWithReaders(readers, ioDrained)` derives the safe
-generation from this table and combines it with the I/O-drain condition.
+generation from this table and combines it with the I/O-drain condition. It
+requires a `ReaderCoordinator` on both objects. The same cluster-wide
+exclusive reader-set barrier must also be supplied to `NewPersistentArena`;
+root publication acquires it so a reader cannot register on the old root
+between the generation snapshot and reclamation. Reader registration acquires
+the same barrier and joins at the current root. This barrier must be backed by
+the distributed lease/lock service; a process-local mutex is not sufficient.
 Every reader that can access the LUN must be represented in the table, and
-fenced state must only be written by the trusted fencing/graceful-close path.
-The lower-level `Collect(ReclaimProof)` remains a trusted integration API;
-callers can violate safety if they fabricate its proof.
+Fenced state must only be written by the trusted SAN fencer. The lower-level
+`Collect(ReclaimProof)` remains a trusted integration API; callers can violate
+safety if they fabricate its proof or bypass the coordinator.
 
 ## Remaining integration boundaries
 
-This stage supplies durable reader slots and generation calculations, not a
-complete distributed lease/slot-allocation service. It does not implement
+This stage supplies durable reader slots, a ReaderCoordinator contract, and
+generation calculations, not a complete distributed lease/slot-allocation
+service. It does not implement
 sanlock, SCSI Persistent Reservations, PREEMPT AND ABORT across multipath, or
 automatic node-failure detection. Production deployment must provide:
 - cluster-serialized reader slot allocation and ownership;
