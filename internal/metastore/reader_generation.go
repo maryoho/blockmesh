@@ -127,6 +127,11 @@ func (t *ReaderTable) lockReaderSet() (func(), error) {
 	return acquireReaderSet(t.coordinator, t.store.Superblock().VolumeID)
 }
 
+func (t *ReaderTable) lockReaderSetContext(ctx context.Context) (func(), error) {
+	if t.coordinator == nil { return func() {}, nil }
+	return acquireReaderSetContext(ctx, t.coordinator, t.store.Superblock().VolumeID)
+}
+
 func (t *ReaderTable) readLocked(slot uint32) (ReaderRecord,error) {
 	if slot>=t.slots { return ReaderRecord{},ErrReaderSlot }
 	b:=make([]byte,PageSize)
@@ -243,7 +248,7 @@ func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
 }
 
 func (t *ReaderTable) SnapshotContext(ctx context.Context) ([]ReaderRecord,error) {
-	unlock,err:=acquireReaderSetContext(ctx,t.coordinator,t.store.Superblock().VolumeID);if err!=nil{return nil,err};defer unlock()
+	unlock,err:=t.lockReaderSetContext(ctx);if err!=nil{return nil,err};defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	return t.snapshotLocked()
 }
