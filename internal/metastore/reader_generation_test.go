@@ -73,8 +73,11 @@ func TestPersistentRetireQueueSpansMultiplePages(t *testing.T) {
 	d:=newMemdev(1000)
 	s,err:=Format(d,Layout{VolumeID:"multi-queue",TotalPages:1000,ArenaStart:2,ArenaPages:700,LifecycleStart:800,LifecyclePages:4})
 	if err!=nil{t.Fatal(err)}
-	if err=s.Publish(NoPage,2);err!=nil{t.Fatal(err)}
+	if err=s.Publish(NoPage,1);err!=nil{t.Fatal(err)}
 	if err=FormatLifecycle(s);err!=nil{t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	pa,err:=NewPersistentArena(s,nil,committer);if err!=nil{t.Fatal(err)}
+	if err=pa.CommitPagesAndPublish(nil,nil,nil,NoPage,2,1,nil);err!=nil{t.Fatal(err)}
 	ids:=make([]uint64,600)
 	for i:=range ids{ids[i]=uint64(i+2)}
 	pages,err:=encodeRetireQueuePages([]RetireBatch{{RetireGeneration:1,PageIDs:ids}},7,3)
@@ -90,7 +93,7 @@ func TestPersistentRetireQueueSpansMultiplePages(t *testing.T) {
 	if batches[0].PageIDs[0]!=2 || batches[0].PageIDs[599]!=601 {t.Fatal("queue page ordering was not preserved")}
 	if err=writeFullAt(d,encodeLifecycleState(7,2),int64(800*PageSize));err!=nil{t.Fatal(err)}
 	if err=d.Sync();err!=nil{t.Fatal(err)}
-	pa,err:=NewPersistentArena(s,nil,testCommitter{d:d});if err!=nil{t.Fatal(err)}
+	pa,err=NewPersistentArena(s,nil,committer);if err!=nil{t.Fatal(err)}
 	if stats:=pa.Stats();stats.LivePages!=600{t.Fatalf("multi-page retire records not pinned after reopen: %+v",stats)}
 	if pending:=pa.Pending();len(pending)!=1||len(pending[0].PageIDs)!=600{t.Fatalf("multi-page queue recovery mismatch: %+v",pending)}
 }
