@@ -65,6 +65,22 @@ type ReaderCoordinator interface {
 	LockReaderSet(volumeID string) (unlock func(), err error)
 }
 
+// ContextReaderCoordinator is implemented by distributed coordinators that
+// can cancel lock acquisition when a volume is deactivated.
+type ContextReaderCoordinator interface {
+	LockReaderSetContext(context.Context, string) (unlock func(), err error)
+}
+
+func acquireReaderSetContext(ctx context.Context, c ReaderCoordinator, volumeID string) (func(), error) {
+	if contextual, ok := c.(ContextReaderCoordinator); ok {
+		unlock, err := contextual.LockReaderSetContext(ctx, volumeID)
+		if err != nil { return nil, err }
+		if unlock == nil { return nil, errors.New("reader coordinator returned a nil unlock function") }
+		return unlock, nil
+	}
+	return acquireReaderSet(c, volumeID)
+}
+
 func acquireReaderSet(c ReaderCoordinator, volumeID string) (func(),error) {
 	if c==nil { return nil,ErrReaderCoordinatorRequired }
 	unlock,err:=c.LockReaderSet(volumeID)
