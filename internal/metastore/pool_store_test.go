@@ -16,6 +16,8 @@ type poolImageCommitter struct {
 	images []metastore.PageImage
 }
 
+func (c *poolImageCommitter) ClusterSafe() bool { return true }
+
 func (c *poolImageCommitter) CommitImages(images []metastore.PageImage) error {
 	c.images = append([]metastore.PageImage(nil), images...)
 	if c.fail { return errors.New("injected WAL failure") }
@@ -150,4 +152,59 @@ func descPairOffset(t *testing.T, pool format.Superblock, index uint32) uint64 {
 	off, err := format.VolumeDescriptorPairOffset(pool, index)
 	if err != nil { t.Fatal(err) }
 	return off
+}
+
+
+// TestPoolVolumeOwnerEpochIsWALPublishedAndMonotonic verifies that owner
+// takeover publishes its fencing epoch through the inactive descriptor copy.
+func TestPoolVolumeOwnerEpochIsWALPublishedAndMonotonic(t *testing.T) {
+	path := t.TempDir() + "/pool-owner-epoch.img"
+	f, err := os.Create(path)
+	if err != nil { t.Fatal(err) }
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	if err = f.Close(); err != nil { t.Fatal(err) }
+	dev, err := device.Open(path, true)
+	if err != nil { t.Fatal(err) }
+	defer dev.Close()
+
+	pool, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	if _, err = dev.WriteAt(pool.Encode(), int64(format.SuperAOffset)); err != nil { t.Fatal(err) }
+	pool.Generation = 2
+	if _, err = dev.WriteAt(pool.Encode(), int64(format.SuperBOffset)); err != nil { t.Fatal(err) }
+	if err = dev.Sync(); err != nil { t.Fatal(err) }
+
+	index := uint32(5)
+	pair, err := format.VolumeDescriptorPairOffset(pool, index)
+	if err != nil { t.Fatal(err) }
+	slotBytes := (pool.MetadataSize-pool.ReservedOffset)/uint64(format.MaxVolumeDescriptors)/format.PageSize*format.PageSize
+	arenaStart := pool.ReservedOffset/format.PageSize + uint64(index)*(slotBytes/format.PageSize)
+	desc := format.VolumeDescriptor{
+		VolumeID:"owner-epoch-volume", AG:0, Generation:1, VolumeSequence:1,
+		MappingRootOffset:pool.MappingOffset, BitmapSequence:1, OwnerEpoch:7,
+		ArenaStart:arenaStart, ArenaPages:256, RootPage:^uint64(0),
+		LifecycleStart:arenaStart+256, LifecyclePages:8,
+	}
+	image, err := desc.Encode()
+	if err != nil { t.Fatal(err) }
+	for slot:=uint64(0);slot<2;slot++ {
+		if _,err=dev.WriteAt(image,int64(pair+slot*format.PageSize));err!=nil{t.Fatal(err)}
+	}
+	if err=dev.Sync();err!=nil{t.Fatal(err)}
+
+	store,err:=metastore.OpenPoolVolume(dev,pool,index,desc.VolumeID)
+	if err!=nil{t.Fatal(err)}
+	committer:=&poolImageCommitter{dev:dev}
+	if got:=store.OwnerEpoch();got!=7{t.Fatalf("initial owner epoch=%d, want 7",got)}
+	if err=store.AdvanceOwnerEpoch(8,committer);err!=nil{t.Fatal(err)}
+	if got:=store.OwnerEpoch();got!=8{t.Fatalf("published owner epoch=%d, want 8",got)}
+	if len(committer.images)!=1 || committer.images[0].Offset!=pair+format.PageSize {
+		t.Fatalf("owner epoch must be one inactive descriptor after-image: %+v",committer.images)
+	}
+	if err=store.AdvanceOwnerEpoch(8,committer);err==nil{t.Fatal("same owner epoch was accepted")}
+	if err=store.AdvanceOwnerEpoch(7,committer);err==nil{t.Fatal("stale owner epoch was accepted")}
+
+	reopened,err:=metastore.OpenPoolVolume(dev,pool,index,desc.VolumeID)
+	if err!=nil{t.Fatal(err)}
+	if got:=reopened.OwnerEpoch();got!=8{t.Fatalf("reopened owner epoch=%d, want 8",got)}
 }
