@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -132,5 +134,28 @@ func TestKubernetesOwnerRecordStoreCreateRaceMapsConflict(t *testing.T) {
 	record:=OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:2}
 	if err:=store.CompareAndSwap(context.Background(),"vol-a",nil,record);!errors.Is(err,ErrOwnerRecordConflict) {
 		t.Fatalf("create race error=%v",err)
+	}
+}
+
+func TestKubernetesOwnerRecordStoreRereadsProjectedToken(t *testing.T) {
+	tokenPath:=filepath.Join(t.TempDir(),"token")
+	if err:=os.WriteFile(tokenPath,[]byte("token-one"),0600);err!=nil{t.Fatal(err)}
+	var mu sync.Mutex
+	var seen []string
+	server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+		mu.Lock();seen=append(seen,r.Header.Get("Authorization"));mu.Unlock()
+		http.Error(w,"not found",http.StatusNotFound)
+	}))
+	defer server.Close()
+	store,err:=NewKubernetesOwnerRecordStore(KubernetesOwnerRecordStoreConfig{
+		BaseURL:server.URL,Namespace:"blockmesh-system",TokenFile:tokenPath,HTTPClient:server.Client(),
+	})
+	if err!=nil{t.Fatal(err)}
+	_,_,_=store.Load(context.Background(),"vol-a")
+	if err=os.WriteFile(tokenPath,[]byte("token-two"),0600);err!=nil{t.Fatal(err)}
+	_,_,_=store.Load(context.Background(),"vol-a")
+	mu.Lock();defer mu.Unlock()
+	if len(seen)!=2||seen[0]!="Bearer token-one"||seen[1]!="Bearer token-two"{
+		t.Fatalf("observed Authorization headers=%v",seen)
 	}
 }
