@@ -125,8 +125,9 @@ new COW pages were not also committed.
 
 The two root descriptor slots are at offsets 0 and 4096. The WAL accepts an
 update to either reserved slot only when the image has the metastore magic and
-a valid CRC32C. Ordinary metadata page updates remain restricted to the arena
-and cannot overlap WAL/checkpoint regions.
+a valid CRC32C, and it must be the single final after-image in the transaction.
+The Store API restricts COW page images to the metadata arena; the Journal
+rejects overlap with WAL/checkpoint regions.
 
 `ErrJournalFull` is a pre-commit result and allows the COW page reservation to
 be aborted. Other I/O errors have an uncertain commit outcome; the process
