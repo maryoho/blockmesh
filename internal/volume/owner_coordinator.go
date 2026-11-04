@@ -76,7 +76,7 @@ func NewOwnerCoordinator(cfg OwnerCoordinatorConfig) (*OwnerCoordinator, error) 
 // strictly increasing epoch -> CAS-publish the new authoritative identity.
 // The caller must still replay WAL and publish that epoch in BMDVOL02 before
 // enabling data requests.
-func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, bootID string) (*OwnerLease, error) {
+func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, bootID string) (result *OwnerLease, retErr error) {
 	if c == nil || ctx == nil { return nil, errors.New("owner coordinator and context are required") }
 	if strings.TrimSpace(volumeID)=="" || strings.TrimSpace(nodeID)=="" || strings.TrimSpace(bootID)=="" {
 		return nil, errors.New("volume, node and boot identities are required")
@@ -85,8 +85,15 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	if strings.TrimSpace(resource)=="" { return nil, errors.New("owner sanlock resource is empty") }
 	lease,err:=c.cfg.Locker.Acquire(ctx,resource)
 	if err!=nil { return nil,fmt.Errorf("acquire exclusive Owner sanlock resource: %w",err) }
+	if lease==nil { return nil,errors.New("distributed locker returned a nil Owner lease") }
 	releaseOnError:=true
-	defer func(){ if releaseOnError { _=lease.Close() } }()
+	defer func(){
+		if releaseOnError {
+			if closeErr:=lease.Close();closeErr!=nil {
+				retErr=errors.Join(retErr,fmt.Errorf("release Owner sanlock lease after failed takeover: %w",closeErr))
+			}
+		}
+	}()
 	if !lease.Valid() { return nil,errors.New("Owner sanlock lease became invalid immediately after acquisition") }
 
 	old,exists,err:=c.cfg.Records.Load(ctx,volumeID)
@@ -111,6 +118,10 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	if !lease.Valid() { return nil,errors.New("Owner sanlock lease lost during fencing") }
 	descriptorEpoch,err:=c.cfg.ReadEpoch(ctx,volumeID)
 	if err!=nil { return nil,fmt.Errorf("read durable Volume OwnerEpoch: %w",err) }
+	if descriptorEpoch==0 { return nil,errors.New("durable Volume OwnerEpoch is zero") }
+	if !exists && descriptorEpoch>1 {
+		return nil,errors.New("previous Owner identity is missing while Volume OwnerEpoch indicates prior RW ownership")
+	}
 	base:=descriptorEpoch
 	var expected *OwnerRecord
 	if exists {
@@ -145,6 +156,7 @@ type OwnerLease struct {
 	stop chan struct{}
 	done chan struct{}
 	once sync.Once
+	closeErr error
 	mu sync.Mutex
 	err error
 }
@@ -173,9 +185,12 @@ func (l *OwnerLease) Lost() <-chan error { if l==nil{return nil};return l.lost }
 func (l *OwnerLease) Err() error { if l==nil{return errors.New("nil Owner lease")};l.mu.Lock();defer l.mu.Unlock();return l.err }
 func (l *OwnerLease) Close() error {
 	if l==nil{return nil}
-	l.once.Do(func(){close(l.stop)})
-	<-l.done
-	return l.lease.Close()
+	l.once.Do(func(){
+		close(l.stop)
+		<-l.done
+		l.closeErr=l.lease.Close()
+	})
+	return l.closeErr
 }
 
 // UsesSanlockLocker reports whether this coordinator holds the exact same
