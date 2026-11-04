@@ -72,6 +72,7 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	if dev == nil {
 		return nil, errors.New("nil metadata device")
 	}
+	if err := sb.Validate(); err != nil { return nil, fmt.Errorf("invalid Pool Superblock geometry: %w",err) }
 	if ag >= sb.AGCount || sb.AGCount == 0 {
 		return nil, fmt.Errorf("AG %d out of range", ag)
 	}
