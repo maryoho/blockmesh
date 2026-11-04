@@ -193,7 +193,7 @@ func (j *Journal) Commit(updates []PageUpdate) error {
 	}
 
 	for _, update := range updates {
-		if err = writeAtFull(j.dev, update.Image, int64(update.Offset)); err != nil {
+		if err = j.applyUpdate(update); err != nil {
 			j.poisoned = true
 			return fmt.Errorf("apply WAL transaction %d at offset %d: %w", txID, update.Offset, err)
 		}
@@ -308,7 +308,7 @@ func (j *Journal) Recover() (bool, error) {
 	}
 	for _, txn := range txns {
 		for _, update := range txn.updates {
-			if err = writeAtFull(j.dev, update.Image, int64(update.Offset)); err != nil {
+			if err = j.applyUpdate(update); err != nil {
 				return false, fmt.Errorf("replay WAL transaction %d at offset %d: %w", txn.txID, update.Offset, err)
 			}
 		}
@@ -323,6 +323,24 @@ func (j *Journal) Recover() (bool, error) {
 		if txn.txID > j.lastTx { j.lastTx = txn.txID }
 	}
 	return len(txns) != 0, nil
+}
+
+// applyUpdate makes Volume Descriptor replay order-independent across
+// per-AG journals. Mapping pages are immutable COW images; only the newest
+// descriptor generation may win, even if AG journals are recovered in a
+// different order from the order in which their transactions committed.
+func (j *Journal) applyUpdate(update PageUpdate) error {
+	if isVolumeDescriptor(update.Image) {
+		current := make([]byte, format.PageSize)
+		if err := readAtFull(j.dev, current, int64(update.Offset)); err == nil && validVolumeDescriptor(current) {
+			currentGeneration := binary.LittleEndian.Uint64(current[16:24])
+			newGeneration := binary.LittleEndian.Uint64(update.Image[16:24])
+			if currentGeneration >= newGeneration {
+				return nil
+			}
+		}
+	}
+	return writeAtFull(j.dev, update.Image, int64(update.Offset))
 }
 
 func (j *Journal) validateUpdates(updates []PageUpdate) error {
