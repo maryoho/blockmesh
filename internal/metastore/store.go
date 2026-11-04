@@ -63,6 +63,19 @@ type Page struct {
 	Payload    []byte
 }
 
+// PageImage is a complete, already encoded 4 KiB metadata after-image.
+type PageImage struct {
+	Offset uint64
+	Data   []byte
+}
+
+// Committer durably commits page after-images as one redo-WAL transaction.
+// Implementations must not expose any after-image before the transaction's
+// commit record is durable.
+type Committer interface {
+	CommitImages(images []PageImage) error
+}
+
 type Store struct {
 	mu     sync.RWMutex
 	dev    Device
@@ -196,6 +209,75 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 		return err
 	}
 	if err = s.dev.Sync(); err != nil {
+		return err
+	}
+	s.sb, s.sbSlot = next, slot
+	return nil
+}
+
+// CommitPagesAndPublish commits immutable COW pages and the inactive
+// superblock root descriptor in one WAL transaction. The root descriptor is
+// appended last, so recovery can never publish a root before its pages.
+func (s *Store) CommitPagesAndPublish(pages []Page, rootPage, mappingSequence uint64, committer Committer) error {
+	if committer == nil {
+		return errors.New("nil metadata WAL committer")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if rootPage != NoPage && !s.inArena(rootPage) {
+		return ErrOutOfRange
+	}
+	if mappingSequence <= s.sb.MappingSequence {
+		return errors.New("mapping sequence must increase")
+	}
+	if s.sb.Generation == math.MaxUint64 {
+		return errors.New("superblock generation exhausted")
+	}
+
+	images := make([]PageImage, 0, len(pages)+1)
+	seen := make(map[uint64]struct{}, len(pages))
+	rootIncluded := rootPage == NoPage
+	for _, page := range pages {
+		if !s.inArena(page.ID) {
+			return fmt.Errorf("%w: COW page %d", ErrOutOfRange, page.ID)
+		}
+		if _, exists := seen[page.ID]; exists {
+			return fmt.Errorf("duplicate COW page %d", page.ID)
+		}
+		seen[page.ID] = struct{}{}
+		if page.ID == rootPage {
+			rootIncluded = true
+		}
+		encoded, err := encodePage(page)
+		if err != nil {
+			return fmt.Errorf("encode COW page %d: %w", page.ID, err)
+		}
+		images = append(images, PageImage{Offset: page.ID * PageSize, Data: encoded})
+	}
+	if !rootIncluded {
+		// A non-dirty root is allowed: it already exists and is reachable
+		// from the previous committed tree.
+		if rootPage != NoPage {
+			if _, exists := seen[rootPage]; exists {
+				return errors.New("invalid COW root page set")
+			}
+		}
+	}
+
+	next := s.sb
+	next.Generation++
+	next.RootPage = rootPage
+	next.MappingSequence = mappingSequence
+	slot := uint64(1) - s.sbSlot
+	superblockImage, err := encodeSuperblock(next)
+	if err != nil {
+		return err
+	}
+	// The root descriptor is deliberately the final after-image in the WAL
+	// transaction. Recovery replays page data before making it reachable.
+	images = append(images, PageImage{Offset: slot * PageSize, Data: superblockImage})
+	if err = committer.CommitImages(images); err != nil {
 		return err
 	}
 	s.sb, s.sbSlot = next, slot
