@@ -61,19 +61,24 @@ error, so reusing those page IDs before reopen/recovery would be unsafe.
   only the changed leaf and its ancestors. A leaf split creates two new leaves;
   an internal split creates two new internal pages and can propagate to the
   root. A root split creates one new root. All old pages remain immutable.
-- Deletion removes empty leaves and prunes empty child references. Underfull
-  non-root nodes are currently allowed; internal nodes with one child are
-  encoded with zero separators. A one-child root is collapsed to its child.
-  Merge/redistribution balancing is deferred.
+- Deletion rebalances underfull non-root nodes. Adjacent siblings are combined;
+  if their contents fit, they are merged, otherwise their entries/children are
+  redistributed evenly. Internal separators are regenerated from right-child
+  subtree minima. One-child roots are repeatedly collapsed and an empty tree
+  publishes `NoPage`.
 - `Get` still uses the sorted in-memory item cache, and `Put`/`Delete`
   still copy that slice to maintain `Snapshot`. Disk-page write amplification
   is O(tree height), but CPU/memory mutation cost remains O(N).
-- Old roots and their pages are not reclaimed. This is intentional until the
-  Reader Lease, generation tracking and SAN fencing/reclamation stages are
-  integrated. Do not reuse old-root pages while any reader may still hold an
-  older root. Repeated updates therefore consume arena pages; a persistent
-  retire queue and safe reclamation are required before long-running production
-  use.
+- After successful root publication, pages present in the old reachable graph
+  but absent from the new graph are placed in a process-local retire queue with
+  the old mapping sequence as their retire generation. `RetireQueue.Collect`
+  requires `SafeGeneration > RetireGeneration`, drained old I/O, and explicit
+  fencing confirmation. Heartbeat expiry alone is not a fencing proof.
+- The retire queue is volatile and is not crash-safe. Until WAL persists retire
+  batches and the Reader Lease/SAN fencing layer supplies trustworthy proofs,
+  production callers must not collect retired pages. A restart reconstructs
+  only the currently published graph; persistence/recovery of pending retire
+  batches remains a later WAL responsibility.
 - The arena allocator is process-local. `Open` rebuilds its live set from the
   currently published root. Reopen/reclamation with concurrent old-root
   readers is not production-safe until the persistent retire queue and reader
