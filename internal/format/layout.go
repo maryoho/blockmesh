@@ -12,7 +12,7 @@ const (
 	AGCount         = uint32(PoolSize / AGSize)
 	BitmapBytes     = AGBlocks / 8
 	BitmapPages     = BitmapBytes / PageSize
-	MetadataSize    = uint64(8) * 1024 * 1024 * 1024
+	MetadataSize    = uint64(16) * 1024 * 1024 * 1024
 	NodeTableSize   = uint64(1) * 1024 * 1024
 	WALSegmentSize  = uint64(16) * 1024 * 1024
 	MappingSize     = uint64(5) * 1024 * 1024 * 1024
