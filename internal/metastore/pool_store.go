@@ -96,11 +96,11 @@ func readPoolVolumeDescriptor(dev Device, pool format.Superblock, pair uint64, e
 		if err = d.ValidatePool(pool); err != nil {
 			continue
 		}
-		if expected != "" && d.VolumeID != expected {
-			continue
-		}
 		if found && d.VolumeID != best.VolumeID {
 			return format.VolumeDescriptor{}, 0, errors.New("Volume Descriptor copies contain different Volume IDs")
+		}
+		if expected != "" && d.VolumeID != expected {
+			return format.VolumeDescriptor{}, 0, fmt.Errorf("Volume Descriptor belongs to %q, not %q", d.VolumeID, expected)
 		}
 		if found && d.Generation == best.Generation && d != best {
 			return format.VolumeDescriptor{}, 0, fmt.Errorf("conflicting Volume Descriptor copies at generation %d", d.Generation)
