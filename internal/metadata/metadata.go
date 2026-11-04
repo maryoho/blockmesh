@@ -50,7 +50,6 @@ func OpenStoreDevice(d device.Device) (*Store, error) {
 		sb, errB = format.DecodeSuperblock(b)
 	}
 	if errA != nil && errB != nil {
-		d.Close()
 		return nil, fmt.Errorf("no valid superblock: A=%v; B=%v", errA, errB)
 	}
 	chosen := sa
