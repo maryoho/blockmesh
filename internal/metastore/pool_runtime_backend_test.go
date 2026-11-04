@@ -9,6 +9,7 @@ import (
 	"blockmesh/internal/fence"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
+	"blockmesh/internal/volume"
 )
 
 type poolRuntimeTestOwner struct{}
@@ -74,5 +75,25 @@ func TestNewPoolVolumeRuntimeBackendRequiresSharedReaderLocker(t *testing.T) {
 	cfg.ReaderRecoveryProbe = &SanlockReaderLeaseProbe{Locker: &lock.SanlockLocker{}, ResourceFor: func(string, uint32) string { return "reader-slot" }}
 	if _, err := NewPoolVolumeRuntimeBackend(cfg); err == nil {
 		t.Fatal("reader probe with a different sanlock locker accepted")
+	}
+}
+
+type poolOwnerTestRecords struct{}
+func (poolOwnerTestRecords) Load(context.Context,string)(volume.OwnerRecord,bool,error){return volume.OwnerRecord{},false,nil}
+func (poolOwnerTestRecords) CompareAndSwap(context.Context,string,*volume.OwnerRecord,volume.OwnerRecord)error{return nil}
+
+func TestNewPoolVolumeRuntimeBackendRequiresOwnerCoordinatorToShareSanlockLocker(t *testing.T) {
+	cfg:=validPoolRuntimeConfig()
+	other:=&lock.SanlockLocker{}
+	coordinator,err:=volume.NewOwnerCoordinator(volume.OwnerCoordinatorConfig{
+		Locker:other,ResourceFor:func(string)string{return "owner-resource"},
+		Records:poolOwnerTestRecords{},Fencer:poolRuntimeTestFencer{},
+		ReadEpoch:func(context.Context,string)(uint64,error){return 1,nil},
+		DrainOldOwner:func(context.Context,string,volume.OwnerRecord)error{return nil},
+	})
+	if err!=nil{t.Fatal(err)}
+	cfg.Owner=PoolOwnerCoordinator{Coordinator:coordinator}
+	if _,err=NewPoolVolumeRuntimeBackend(cfg);err==nil{
+		t.Fatal("OwnerCoordinator using a different sanlock locker was accepted")
 	}
 }
