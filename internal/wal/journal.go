@@ -589,10 +589,8 @@ func isVolumeDescriptor(b []byte) bool {
 }
 
 func validVolumeDescriptor(b []byte) bool {
-	if !isVolumeDescriptor(b) || binary.LittleEndian.Uint32(b[8:12]) != format.VolumeDescriptorVersion {
-		return false
-	}
-	return crc32.Checksum(b[:len(b)-4], journalCRC) == binary.LittleEndian.Uint32(b[len(b)-4:])
+	_, err := format.DecodeVolumeDescriptor(b)
+	return err == nil
 }
 
 func allZero(b []byte) bool {
