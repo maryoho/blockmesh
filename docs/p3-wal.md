@@ -104,4 +104,4 @@ scheduling is not included.
 
 The WAL tests cover committed redo, automatic recovery on open, ignoring an
 Intent without Commit, checkpoint bank switching, recovery after reopening,
-startup repair after an interrupted descriptor mirror, and survival of a single descriptor-slot corruption.
+startup repair after an interrupted descriptor mirror, survival of a single descriptor-slot corruption, WAL-full checkpoint retry, and rejection of missing descriptors when either bank contains data.
