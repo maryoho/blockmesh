@@ -472,43 +472,58 @@ func retainOpaqueSubtreePages(root *cowNode, oldPages, newPages []uint64) []uint
 	}
 	return out
 }
+func retiredPageIDs(oldPages,newPages []uint64) []uint64 {
+ current:=make(map[uint64]struct{},len(newPages))
+ for _,id:=range newPages {current[id]=struct{}{}}
+ var retired []uint64
+ for _,id:=range oldPages {if _,ok:=current[id];!ok {retired=append(retired,id)}}
+ return retired
+}
+
 func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64) error {
-	pageCount := countDirty(root)
-	if pageCount == 0 {
-		rootID := metastore.NoPage
-		if root != nil { rootID = root.id }
-		if err := t.store.CommitPagesAndPublish(nil, rootID, sequence, t.journal); err != nil { return fmt.Errorf("WAL commit root descriptor: %w", err) }
-		var newPages []uint64
-		if root != nil { newPages = collectCowPages(root) }
-		newPages = retainOpaqueSubtreePages(root, oldPages, newPages)
-		if err := t.retireSuperseded(oldPages, newPages, oldGeneration); err != nil { return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w", err) }
-		t.items = append([]Item(nil), items...)
-		t.pages, t.root = newPages, rootID
-		return nil
-	}
-	reservation, err := t.arena.Reserve(uint64(pageCount))
-	if err != nil { return err }
-	committed := false
-	defer func() { if !committed { _ = reservation.Abort() } }()
-	ids := reservation.Pages()
-	cursor := 0
-	rootID, pages, err := persistCOWImages(root, ids, &cursor, sequence)
-	if err != nil { return err }
-	if cursor != len(ids) { return fmt.Errorf("internal error: used %d of %d reserved COW pages", cursor, len(ids)) }
-	if err = t.store.CommitPagesAndPublish(pages, rootID, sequence, t.journal); err != nil {
-		// WAL-full is a guaranteed pre-commit failure. Other I/O errors may
-		// follow a durable Commit record, so keep the reservation until recovery.
-		if !errors.Is(err, wal.ErrJournalFull) { committed = true }
-		return fmt.Errorf("WAL commit COW pages and root: %w", err)
-	}
-	if err = reservation.Commit(); err != nil { committed = true; return fmt.Errorf("WAL root committed but arena reservation commit failed: %w", err) }
-	committed = true
-	newPages := collectCowPages(root)
-	newPages = retainOpaqueSubtreePages(root, oldPages, newPages)
-	if err := t.retireSuperseded(oldPages, newPages, oldGeneration); err != nil { return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w", err) }
-	t.items = append([]Item(nil), items...)
-	t.root, t.pages = rootID, newPages
-	return nil
+ pageCount:=countDirty(root)
+ if pageCount==0 {
+  rootID:=metastore.NoPage;if root!=nil {rootID=root.id}
+  var newPages []uint64;if root!=nil {newPages=collectCowPages(root)}
+  newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
+  var err error
+  if t.persistentArena!=nil {
+   err=t.persistentArena.CommitPagesAndPublish(nil,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
+  } else {
+   err=t.store.CommitPagesAndPublish(nil,rootID,sequence,t.journal)
+  }
+  if err!=nil{return fmt.Errorf("WAL commit root descriptor and lifecycle: %w",err)}
+  if t.persistentArena==nil {
+   if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages: %w",err)}
+  }
+  t.items=append([]Item(nil),items...);t.pages,t.root=newPages,rootID
+  return nil
+ }
+ reservation,err:=t.arena.Reserve(uint64(pageCount));if err!=nil{return err}
+ committed:=false
+ defer func(){if !committed {_=reservation.Abort()}}()
+ ids:=reservation.Pages();cursor:=0
+ rootID,pages,err:=persistCOWImages(root,ids,&cursor,sequence);if err!=nil{return err}
+ if cursor!=len(ids){return fmt.Errorf("internal error: used %d of %d reserved COW pages",cursor,len(ids))}
+ newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
+ if t.persistentArena!=nil {
+  err=t.persistentArena.CommitPagesAndPublish(pages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
+ } else {
+  err=t.store.CommitPagesAndPublish(pages,rootID,sequence,t.journal)
+ }
+ if err!=nil {
+  // WAL-full is a guaranteed pre-commit failure. Other errors may follow a
+  // durable Commit record; retain the reservation until recovery/reopen.
+  if !errors.Is(err,wal.ErrJournalFull) {committed=true}
+  return fmt.Errorf("WAL commit COW pages, lifecycle and root: %w",err)
+ }
+ if err=reservation.Commit();err!=nil {committed=true;return fmt.Errorf("WAL root committed but Arena reservation transition failed: %w",err)}
+ committed=true
+ if t.persistentArena==nil {
+  if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w",err)}
+ }
+ t.items=append([]Item(nil),items...);t.root,t.pages=rootID,newPages
+ return nil
 }
 func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 	sb := t.store.Superblock()
