@@ -84,8 +84,10 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 		return nil, errors.New("AG WAL segment outside metadata device")
 	}
 	checkpointEnd := sb.CheckpointOffset + sb.CheckpointSize
-	if checkpointEnd < sb.CheckpointOffset || checkpointEnd > sb.MetadataSize {
-		return nil, errors.New("checkpoint region outside metadata device")
+	if checkpointEnd < sb.CheckpointOffset || checkpointEnd > sb.MetadataSize ||
+		sb.CheckpointOffset < 2*format.PageSize ||
+		(sb.CheckpointOffset < sb.WALOffset+sb.WALSize && checkpointEnd > sb.WALOffset) {
+		return nil, errors.New("checkpoint region outside metadata device or overlaps WAL/superblocks")
 	}
 	if uint64(sb.AGCount)*checkpointSlotsPerAG*checkpointDescriptorSize > sb.CheckpointSize {
 		return nil, errors.New("checkpoint region cannot hold dual per-AG descriptors")
