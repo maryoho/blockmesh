@@ -432,20 +432,17 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	var rootOffset uint64
 	var rootImage []byte
 	var nextDescriptor format.VolumeDescriptor
+	rootSlot := uint64(1) - s.sbSlot
 	if s.poolBacked {
-		var slot uint64
 		var err error
-		nextDescriptor, slot, rootImage, err = s.poolDescriptorAfterImage(rootPage, mappingSequence)
+		nextDescriptor, rootSlot, rootImage, err = s.poolDescriptorAfterImage(rootPage, mappingSequence)
 		if err != nil { return err }
-		rootOffset = s.descriptorPair + slot*PageSize
-		s.sbSlot = slot
+		rootOffset = s.descriptorPair + rootSlot*PageSize
 	} else {
-		slot := uint64(1) - s.sbSlot
 		var err error
 		rootImage, err = encodeSuperblock(next)
 		if err != nil { return err }
-		s.sbSlot = slot
-		rootOffset = slot * PageSize
+		rootOffset = rootSlot * PageSize
 	}
 	// The Volume root descriptor is deliberately the final WAL after-image.
 	images = append(images, PageImage{Offset: rootOffset, Data: rootImage})
@@ -453,6 +450,7 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 		return err
 	}
 	s.sb = next
+	s.sbSlot = rootSlot
 	if s.poolBacked { s.descriptor = nextDescriptor }
 	return nil
 }
