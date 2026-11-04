@@ -15,7 +15,7 @@ import (
 // IDs and epochs; the durable Reader record carries those changing identities.
 type ReaderLeaseConfig struct {
 	Locker *lock.SanlockLocker
-	ResourceFor func(volumeID string, slot uint32, nodeID, bootID string, epoch uint64) string
+	ResourceFor func(volumeID string, slot uint32) string
 	PollInterval time.Duration
 }
 
@@ -62,7 +62,7 @@ func (c ReaderLeaseConfig) AcquireReader(ctx context.Context, volumeID string, s
 	if c.Locker == nil || c.ResourceFor == nil || onLost == nil || volumeID == "" || nodeID == "" || bootID == "" || epoch == 0 {
 		return nil, errors.New("reader lease requires sanlock locker, identity, epoch and fail-stop callback")
 	}
-	resource := c.ResourceFor(volumeID, slot, nodeID, bootID, epoch)
+	resource := c.ResourceFor(volumeID, slot)
 	if resource == "" { return nil, errors.New("reader lease resource is empty") }
 	lease, err := c.Locker.Acquire(ctx, resource)
 	if err != nil { return nil, err }
