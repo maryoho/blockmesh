@@ -138,3 +138,28 @@ The lifecycle checkpoint reconstructs page state from the published tree plus
 retired pages rather than persisting a full free bitmap. This is currently
 appropriate only for the B+Tree-owned metadata Arena; other metadata objects
 must be included in the reachability walk or registered as pinned allocations.
+
+
+## P3-3.7 concrete coordination backends
+
+For multi-node operation, pass a SanlockReaderCoordinator and a
+ClusterSafeCommitter. NewReaderTable and NewPersistentArena reject an ordinary
+process-local Committer when a distributed reader coordinator is configured.
+The production WAL implementation is wal.SharedCommitter: it acquires one
+exclusive sanlock resource per AG, opens a fresh Journal under that lock,
+reloads the checkpoint/append state, and then commits. All processes touching
+the same AG WAL must use the same sanlock resource and SharedCommitter contract;
+do not mix it with long-lived direct Journal instances.
+
+Reader admission uses JoinReaderSession with both a volume.ReaderLeaseConfig
+(per-slot sanlock resource) and a fence.SCSIPRRegistrar (local initiator keys).
+The PR registrar registers and verifies keys before the slot becomes Active.
+On graceful leave, CloseDrained unregisters the keys, persists Closed, and
+releases the sanlock slot resource.
+
+Failed-reader recovery uses ReaderTable.FenceExpiredReader. It first acquires
+the same per-slot sanlock resource held by the reader. Only after that succeeds
+does it issue SCSI PR PREEMPT AND ABORT, verify the target keys are absent on
+all configured paths, and persist Fenced. A timeout or failed verification
+leaves the slot generation-pinning. See docs/p3-reader-fencing.md for resource
+provisioning and SAN qualification requirements.
