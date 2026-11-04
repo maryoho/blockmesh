@@ -18,14 +18,14 @@ type ReaderLeaseProbe interface {
 
 type SanlockReaderLeaseProbe struct {
 	Locker *lock.SanlockLocker
-	ResourceFor func(volumeID string, reader ReaderRecord) string
+	ResourceFor func(volumeID string, slot uint32) string
 }
 
 func (p *SanlockReaderLeaseProbe) AcquireExpiredReader(ctx context.Context, volumeID string, reader ReaderRecord) (func() error, error) {
 	if p == nil || p.Locker == nil || p.ResourceFor == nil {
 		return nil, errors.New("sanlock reader lease probe is not configured")
 	}
-	resource := p.ResourceFor(volumeID, reader)
+	resource := p.ResourceFor(volumeID, reader.Slot)
 	if resource == "" { return nil, errors.New("reader lease resource is empty") }
 	lease, err := p.Locker.Acquire(ctx, resource)
 	if err != nil { return nil, fmt.Errorf("reader lease is still held or cannot be proven free: %w", err) }
