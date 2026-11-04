@@ -233,10 +233,18 @@ func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained boo
  if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
  unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
  safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
- return p.Collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
+ return p.collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
 }
 
 func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
+ if p==nil{return 0,errors.New("nil persistent arena")}
+ if p.coordinator!=nil {
+  unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
+ }
+ return p.collect(proof)
+}
+
+func (p *PersistentArena) collect(proof ReclaimProof)(int,error){
  if p==nil{return 0,errors.New("nil persistent arena")}
  if !proof.IOsDrained||!proof.FencingConfirmed{return 0,ErrUnsafeReclaim}
  p.mu.Lock();defer p.mu.Unlock()
