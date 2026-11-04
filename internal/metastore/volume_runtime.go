@@ -361,10 +361,8 @@ func (m *VolumeRuntimeManager) Shutdown(ctx context.Context) error {
 	m.closed = true
 	m.cancel()
 	ids := make([]string, 0, len(m.runtimes))
-	for id, rt := range m.runtimes {
-		if rt.enabled {
-			ids = append(ids, id)
-		}
+	for id := range m.runtimes {
+		ids = append(ids, id)
 	}
 	m.mu.Unlock()
 	sort.Strings(ids)
@@ -387,8 +385,10 @@ func (m *VolumeRuntimeManager) ActiveVolumes() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ids := make([]string, 0, len(m.runtimes))
-	for id := range m.runtimes {
-		ids = append(ids, id)
+	for id, rt := range m.runtimes {
+		if rt.enabled {
+			ids = append(ids, id)
+		}
 	}
 	sort.Strings(ids)
 	return ids
