@@ -28,7 +28,11 @@ root publication or queue collection. Every page carries the same generation;
 a missing page, duplicate page ID, mismatched generation, invalid index, or
 bad CRC fails closed. Queue capacity is
 `(LifecyclePages - 1) * MaxPersistentRetiredPages` records (253 records per
-4 KiB queue page). A full queue rejects root publication with
+4 KiB queue page). `MaxLifecyclePages` is 32, so the maximum configured queue
+holds 7,843 records. Lifecycle geometry is capped because every queue page is
+rewritten in each root/collection transaction; metadata WAL transactions are
+limited to 64 total page after-images, including COW pages and the root
+descriptor. A full queue rejects root publication with
 `ErrRetireQueueFull`; records are never dropped to make room.
 
 P3-3.5's one-page queue encoding remains readable when the first queue page
