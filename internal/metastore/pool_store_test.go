@@ -87,6 +87,12 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	if len(committer.images) != 10 {
 		t.Fatalf("expected COW page + 8 lifecycle pages + final Volume Descriptor, got %d images", len(committer.images))
 	}
+	if stats := arena.Stats(); stats.LivePages != 1 || stats.ReservedPages != 0 {
+		t.Fatalf("committed reservation did not become Live: %+v", stats)
+	}
+	if err = reservation.Abort(); !errors.Is(err, metastore.ErrReservationDone) {
+		t.Fatalf("committed reservation remained abortable: %v", err)
+	}
 	last := committer.images[len(committer.images)-1]
 	if last.Offset != descPairOffset(t, pool, 3)+format.PageSize {
 		t.Fatalf("root descriptor was not appended as final inactive copy: offset=%d", last.Offset)
