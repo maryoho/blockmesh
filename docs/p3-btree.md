@@ -14,7 +14,7 @@ The node payload starts with a 12-byte header:
 | Offset | Size | Field |
 |---:|---:|---|
 | 0 | 4 | Node magic `BMTN` |
-| 4 | 2 | Node format version (1) |
+| 4 | 2 | Node format version (1 = legacy, 2 = path-copy) |
 | 6 | 2 | Entry count |
 | 8 | 2 | Level (0 for leaf, greater than 0 for internal) |
 | 10 | 2 | Reserved, zero |
@@ -24,7 +24,11 @@ Leaf payload entries are fixed 16-byte little-endian pairs:
 
 An internal node stores `count` separator keys followed by `count+1`
 absolute child page IDs. A separator is the minimum key in the child to its
-right. Internal nodes hold at most 252 separators (253 children).
+right. Internal nodes hold at most 252 separators (253 children). New pages
+are written as node format v2; v1 pages remain readable. Version 2 permits a
+one-child internal node (`count=0`), which is used when deletion leaves an
+underfull non-root internal node. Version 1 continues to require at least one
+separator.
 
 ## Publication protocol
 
