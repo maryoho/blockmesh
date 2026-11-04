@@ -104,8 +104,8 @@ func TestParseReservationNoReservationAndMalformed(t *testing.T) {
 
 func TestVerifyReservationRequiresExpectedHolderAndTypeOnEveryPath(t *testing.T) {
 	e := Evidence{PathCoverageVerified: true, Paths: []PathEvidence{
-		{Device: "/dev/sda", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
-		{Device: "/dev/sdb", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
+		{Device: "/dev/sda", WWID: "naa.6000000000000001", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
+		{Device: "/dev/sdb", WWID: "naa.6000000000000001", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
 	}}
 	got, err := VerifyReservation(e, "0x000000aa", 6)
 	if err != nil || !got.Verified { t.Fatalf("expected verified reservation: %+v, %v", got, err) }
@@ -125,7 +125,7 @@ func TestVerifyReservationRequiresExpectedHolderAndTypeOnEveryPath(t *testing.T)
 
 func TestVerifyReservationFailsClosedForAbsentOrIncompleteReservation(t *testing.T) {
 	e := Evidence{PathCoverageVerified: true, Paths: []PathEvidence{
-		{Device: "/dev/sda", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Parsed: true, Present: false}},
+		{Device: "/dev/sda", WWID: "naa.6000000000000001", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Parsed: true, Present: false}},
 	}}
 	got, err := VerifyReservation(e, "aa", 6)
 	if err != nil || got.Verified || len(got.MismatchPaths) != 1 { t.Fatalf("absent reservation accepted: %+v, %v", got, err) }
@@ -133,4 +133,15 @@ func TestVerifyReservationFailsClosedForAbsentOrIncompleteReservation(t *testing
 	if _, err := VerifyReservation(e, "aa", 6); err == nil { t.Fatal("incomplete path coverage must fail") }
 	if _, err := VerifyReservation(e, "aa", 2); err == nil { t.Fatal("unsupported PR type must fail") }
 	if _, err := VerifyReservation(e, "0", 6); err == nil { t.Fatal("zero holder key must fail") }
+}
+
+func TestVerifyReservationRejectsMissingOrConflictingWWID(t *testing.T) {
+	e := Evidence{PathCoverageVerified: true, Paths: []PathEvidence{
+		{Device: "/dev/sda", WWID: "naa.one", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
+		{Device: "/dev/sdb", WWID: "naa.two", ReadReservation: CommandResult{ExitCode: 0}, Reservation: ReservationEvidence{Present: true, Parsed: true, HolderKey: "aa", Type: 6}},
+	}}
+	if _, err := VerifyReservation(e, "aa", 6); err == nil { t.Fatal("conflicting WWIDs must be rejected") }
+	e.Paths[1].WWID = ""
+	got, err := VerifyReservation(e, "aa", 6)
+	if err != nil || got.Verified || len(got.UnknownPaths) != 1 { t.Fatalf("missing WWID must be inconclusive: %+v, %v", got, err) }
 }
