@@ -20,6 +20,7 @@ const (
 
 var (
  ErrLifecycleUnformatted = errors.New("persistent arena lifecycle region is not initialized")
+ ErrLifecycleAlreadyInitialized = errors.New("persistent arena lifecycle region is already initialized")
  ErrRetireQueueFull = errors.New("persistent retire queue is full")
  ErrLifecycleCorrupt = errors.New("persistent arena lifecycle metadata is corrupt")
 )
@@ -50,12 +51,17 @@ func lifecycleOffsets(sb Superblock)(uint64,uint64,error){
 func FormatLifecycle(store *Store) error {
  if store==nil { return errors.New("nil metastore") }
  stateOff,queueOff,err:=lifecycleOffsets(store.Superblock()); if err!=nil{return err}
+ existingState:=make([]byte,PageSize);if err=readFullAt(store.dev,existingState,int64(stateOff));err!=nil{return err}
+ existingQueue:=make([]byte,PageSize);if err=readFullAt(store.dev,existingQueue,int64(queueOff));err!=nil{return err}
+ if !allZeroLifecycle(existingState)||!allZeroLifecycle(existingQueue){return ErrLifecycleAlreadyInitialized}
  state:=encodeLifecycleState(1,store.Superblock().MappingSequence)
  queue:=encodeRetireQueue(nil)
  if err=writeFullAt(store.dev,state,int64(stateOff));err!=nil{return err}
  if err=writeFullAt(store.dev,queue,int64(queueOff));err!=nil{return err}
  return store.Sync()
 }
+
+func allZeroLifecycle(b []byte)bool{for _,v:=range b{if v!=0{return false}};return true}
 
 func encodeLifecycleState(generation,rootSequence uint64)[]byte{
  b:=make([]byte,PageSize);copy(b[:8],lifecycleStateMagic)
