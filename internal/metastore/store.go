@@ -131,6 +131,13 @@ func Format(dev Device, l Layout) (*Store, error) {
 	if err := dev.Sync(); err != nil {
 		return nil, err
 	}
+	if l.LifecyclePages >= 2 {
+		zero := make([]byte, PageSize)
+		for i := uint64(0); i < 2; i++ {
+			if err := writeFullAt(dev, zero, int64((l.LifecycleStart+i)*PageSize)); err != nil { return nil, err }
+		}
+		if err := dev.Sync(); err != nil { return nil, err }
+	}
 	sb := Superblock{VolumeID: l.VolumeID, Generation: 1, TotalPages: l.TotalPages,
 		ArenaStart: l.ArenaStart, ArenaPages: l.ArenaPages, RootPage: NoPage, LifecycleStart:l.LifecycleStart, LifecyclePages:l.LifecyclePages}
 
