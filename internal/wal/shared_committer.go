@@ -20,19 +20,19 @@ type SharedCommitter struct {
 	Device device.Device
 	Superblock format.Superblock
 	AG uint32
-	Locker lock.Locker
+	Locker lock.DistributedLocker
 	Resource string
 	Timeout time.Duration
 }
 
-func NewSharedCommitter(dev device.Device, sb format.Superblock, ag uint32, locker lock.Locker, resource string) (*SharedCommitter, error) {
-	if dev == nil || locker == nil || resource == "" { return nil, errors.New("device, distributed locker and WAL resource are required") }
+func NewSharedCommitter(dev device.Device, sb format.Superblock, ag uint32, locker lock.DistributedLocker, resource string) (*SharedCommitter, error) {
+	if dev == nil || locker == nil || !locker.Distributed() || resource == "" { return nil, errors.New("device, distributed locker and WAL resource are required") }
 	if ag >= sb.AGCount { return nil, fmt.Errorf("AG %d out of range", ag) }
 	return &SharedCommitter{Device:dev,Superblock:sb,AG:ag,Locker:locker,Resource:resource},nil
 }
 
 func (c *SharedCommitter) withJournal(fn func(*Journal) error) error {
-	if c == nil || c.Device == nil || c.Locker == nil || c.Resource == "" { return errors.New("shared WAL committer is not configured") }
+	if c == nil || c.Device == nil || c.Locker == nil || !c.Locker.Distributed() || c.Resource == "" { return errors.New("shared WAL committer is not configured") }
 	timeout:=c.Timeout
 	if timeout<=0 { timeout=30*time.Second }
 	ctx,cancel:=context.WithTimeout(context.Background(),timeout)
@@ -60,4 +60,6 @@ func (c *SharedCommitter) Checkpoint() error {
 	return c.withJournal(func(j *Journal) error { return j.Checkpoint() })
 }
 
-var _ metastore.Committer = (*SharedCommitter)(nil)
+func (*SharedCommitter) ClusterSafe() bool { return true }
+
+var _ metastore.ClusterSafeCommitter = (*SharedCommitter)(nil)
