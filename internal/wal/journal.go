@@ -64,8 +64,15 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	if sb.WALSize < uint64(sb.AGCount)*format.WALSegmentSize {
 		return nil, errors.New("WAL region is smaller than configured AG segments")
 	}
+	if sb.MetadataSize == 0 || dev.Size() < 0 || uint64(dev.Size()) < sb.MetadataSize {
+		return nil, errors.New("metadata device is smaller than the superblock geometry")
+	}
+	if sb.WALOffset > math.MaxUint64-sb.WALSize {
+		return nil, errors.New("WAL region overflows address space")
+	}
 	base := sb.WALOffset + uint64(ag)*format.WALSegmentSize
-	if base < sb.WALOffset || base > sb.MetadataSize || format.WALSegmentSize > sb.MetadataSize-base {
+	if base < sb.WALOffset || base > sb.MetadataSize || format.WALSegmentSize > sb.MetadataSize-base ||
+		uint64(ag)*format.WALSegmentSize > sb.WALSize || format.WALSegmentSize > sb.WALSize-uint64(ag)*format.WALSegmentSize {
 		return nil, errors.New("AG WAL segment outside metadata device")
 	}
 	j := &Journal{
@@ -73,11 +80,12 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 		metadataSize: sb.MetadataSize, walStart: sb.WALOffset,
 		walEnd: sb.WALOffset + sb.WALSize, nextTx: 1,
 	}
-	_, end, next, err := j.scanLocked()
-	if err != nil {
-		return nil, err
+	// Recovery is mandatory before a caller can issue new transactions. This
+	// prevents reads or later writes from observing pages left half-applied by
+	// a crash after the durable Commit record.
+	if _, err := j.Recover(); err != nil {
+		return nil, fmt.Errorf("recover AG %d WAL: %w", ag, err)
 	}
-	j.end, j.nextTx = end, next
 	return j, nil
 }
 
