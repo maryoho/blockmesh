@@ -214,6 +214,7 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
 // slots are excluded only after graceful I/O drain or successful SAN fencing.
 func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained bool) (int,error) {
  if readers==nil { return 0,errors.New("durable reader table is required") }
+ if readers.store==nil || readers.store.Superblock().VolumeID!=p.store.Superblock().VolumeID { return 0,ErrGeometry }
  safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
  return p.Collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
 }
