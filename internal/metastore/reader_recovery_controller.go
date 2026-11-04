@@ -122,7 +122,9 @@ func (c *ReaderRecoveryController) RecoverOnce(ctx context.Context) (ReaderRecov
 		key:=readerRecoveryKey{Slot:reader.Slot,Epoch:reader.Epoch,NodeID:reader.NodeID,BootID:reader.BootID}
 		if !c.shouldAttempt(key,now) { report.RetryDeferred++;continue }
 		c.markAttempt(key,now)
-		if err:=c.Table.FenceExpiredReader(ctx,reader.Slot,reader.NodeID,reader.BootID,reader.Epoch,c.Probe,c.Fencer);err!=nil {
+		staleBefore:=now.Add(-c.Config.HeartbeatTimeout-c.Config.MaxClockSkew)
+		if err:=c.Table.FenceExpiredReaderIfStale(ctx,reader.Slot,reader.NodeID,reader.BootID,reader.Epoch,staleBefore,c.Probe,c.Fencer);err!=nil {
+			if errors.Is(err,ErrReaderNotStale) { c.clearAttempt(key); continue }
 			report.Failed++
 			failures=append(failures,fmt.Errorf("recover reader slot %d (%s/%s): %w",reader.Slot,reader.NodeID,reader.BootID,err))
 			if c.Config.OnError!=nil { c.Config.OnError(reader,err) }
