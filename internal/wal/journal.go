@@ -79,6 +79,10 @@ func New(dev device.Device, sb format.Superblock, ag uint32) (*Journal, error) {
 	if sb.WALOffset > math.MaxUint64-sb.WALSize {
 		return nil, errors.New("WAL region overflows address space")
 	}
+	if sb.WALOffset < 2*format.PageSize || sb.WALOffset > sb.MetadataSize ||
+		sb.WALSize > sb.MetadataSize-sb.WALOffset {
+		return nil, errors.New("WAL region outside metadata device or overlaps superblocks")
+	}
 	segmentBase := sb.WALOffset + uint64(ag)*format.WALSegmentSize
 	if segmentBase < sb.WALOffset || segmentBase > sb.MetadataSize || format.WALSegmentSize > sb.MetadataSize-segmentBase ||
 		uint64(ag)*format.WALSegmentSize > sb.WALSize || format.WALSegmentSize > sb.WALSize-uint64(ag)*format.WALSegmentSize {
