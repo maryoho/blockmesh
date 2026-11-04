@@ -67,6 +67,7 @@ type volumeRuntime struct {
 	reader   RuntimeReaderSession
 	enabled  bool
 	stopping bool
+	recoveryStarted bool
 }
 
 // VolumeRuntimeManager serializes per-volume activation/deactivation and owns
@@ -145,6 +146,12 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	rt := &volumeRuntime{spec: spec}
 	fail := func(cause error) error {
 		cleanupErr := m.rollbackActivation(ctx, rt)
+		if cleanupErr != nil {
+			// Preserve partially acquired resources so Deactivate can retry
+			// cleanup. Never orphan an open device/lease after a failed close.
+			rt.stopping = true
+			m.runtimes[spec.VolumeID] = rt
+		}
 		return errors.Join(cause, cleanupErr)
 	}
 
@@ -194,11 +201,18 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		delete(m.runtimes, spec.VolumeID)
 		return fail(fmt.Errorf("start reader recovery supervisor: %w", err))
 	}
+	rt.recoveryStarted = true
 	if err = m.backend.EnableRequests(ctx, spec, rt.metadata); err != nil {
-		_ = m.backend.StopRequests(ctx, spec.VolumeID)
-		_ = m.supervisor.Deactivate(ctx, spec.VolumeID)
+		stopErr := m.backend.StopRequests(ctx, spec.VolumeID)
+		recoveryErr := m.supervisor.Deactivate(ctx, spec.VolumeID)
+		if recoveryErr != nil {
+			rt.stopping = true
+			m.runtimes[spec.VolumeID] = rt
+			return errors.Join(fmt.Errorf("enable volume requests: %w", err), stopErr, fmt.Errorf("stop recovery after failed activation: %w", recoveryErr))
+		}
+		rt.recoveryStarted = false
 		delete(m.runtimes, spec.VolumeID)
-		return fail(fmt.Errorf("enable volume requests: %w", err))
+		return fail(errors.Join(fmt.Errorf("enable volume requests: %w", err), stopErr))
 	}
 	rt.enabled = true
 	return nil
@@ -222,6 +236,12 @@ func validateRuntimeMetadata(spec VolumeRuntimeSpec, metadata *VolumeRuntimeMeta
 // No requests have been admitted, so a joined reader can be closed as drained.
 func (m *VolumeRuntimeManager) rollbackActivation(ctx context.Context, rt *volumeRuntime) error {
 	var failures []error
+	if rt.recoveryStarted {
+		if err := m.supervisor.Deactivate(ctx, rt.spec.VolumeID); err != nil {
+			return fmt.Errorf("stop recovery during activation rollback: %w", err)
+		}
+		rt.recoveryStarted = false
+	}
 	if rt.reader != nil {
 		if err := rt.reader.CloseDrained(ctx, true); err != nil {
 			failures = append(failures, fmt.Errorf("close reader session during activation rollback: %w", err))
@@ -277,6 +297,7 @@ func (m *VolumeRuntimeManager) Deactivate(ctx context.Context, volumeID string) 
 	if err := m.supervisor.Deactivate(ctx, volumeID); err != nil {
 		return fmt.Errorf("stop reader recovery worker: %w", err)
 	}
+	rt.recoveryStarted = false
 	if err := m.backend.DrainMetadataIO(ctx, volumeID); err != nil {
 		return fmt.Errorf("drain metadata I/O: %w", err)
 	}
