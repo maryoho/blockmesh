@@ -1,6 +1,6 @@
-// Package metastore implements the fixed-LBA, 4 KiB-page metadata format.
-// It deliberately contains no allocator or transaction policy: callers must
-// persist new metadata pages and Sync before publishing a new superblock root.
+// Package metastore implements the fixed-LBA, 4 KiB-page metadata format and
+// process-local Metadata Arena allocation. Callers must persist new metadata
+// pages and Sync before publishing a new superblock root.
 package metastore
 
 import (
