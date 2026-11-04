@@ -280,6 +280,26 @@ func (s *Store) AdvanceOwnerEpoch(epoch uint64, committer Committer) error {
 	return nil
 }
 
+// PoolDescriptor returns a copy of the currently selected BMDVOL02
+// descriptor. It refreshes the redundant pair first so callers use the
+// authoritative AG and generation after WAL recovery.
+func (s *Store) PoolDescriptor() (format.VolumeDescriptor, error) {
+	if s == nil { return format.VolumeDescriptor{}, errors.New("nil metastore") }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.poolBacked { return format.VolumeDescriptor{}, errors.New("Volume is not Pool-backed") }
+	if err := s.refreshLocked(); err != nil { return format.VolumeDescriptor{}, err }
+	return s.descriptor, nil
+}
+
+func (s *Store) PoolSuperblock() (format.Superblock, error) {
+	if s == nil { return format.Superblock{}, errors.New("nil metastore") }
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.poolBacked { return format.Superblock{}, errors.New("Volume is not Pool-backed") }
+	return s.poolSB, nil
+}
+
 func (s *Store) Superblock() Superblock {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
