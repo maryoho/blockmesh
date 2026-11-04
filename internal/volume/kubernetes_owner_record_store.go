@@ -103,7 +103,9 @@ func NewInClusterKubernetesOwnerRecordStore() (*KubernetesOwnerRecordStore, erro
 	if err != nil { return nil, fmt.Errorf("read ServiceAccount CA: %w", err) }
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caBytes) { return nil, errors.New("ServiceAccount CA contains no valid certificates") }
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok { return nil, errors.New("default HTTP transport is not an *http.Transport") }
+	transport := baseTransport.Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	return NewKubernetesOwnerRecordStore(KubernetesOwnerRecordStoreConfig{
 		BaseURL: "https://" + net.JoinHostPort(host, port),
@@ -218,6 +220,10 @@ func (s *KubernetesOwnerRecordStore) CompareAndSwap(ctx context.Context, volumeI
 		current,decodeErr:=decodeKubernetesOwnerRecord(obj,volumeID)
 		if decodeErr!=nil { return decodeErr }
 		if current!=*expected { return ErrOwnerRecordConflict }
+		meta,_:=obj["metadata"].(map[string]any)
+		if meta==nil || strings.TrimSpace(fmt.Sprint(meta["resourceVersion"]))=="" || meta["resourceVersion"]==nil {
+			return errors.New("Kubernetes OwnerRecord Lease has no resourceVersion; refusing non-CAS update")
+		}
 		writeOwnerRecord(obj,next)
 		_,_,err=s.request(ctx,http.MethodPut,s.objectURL(volumeID),obj)
 		if errors.Is(err,ErrKubernetesOwnerRecordConflict) { return ErrOwnerRecordConflict }
