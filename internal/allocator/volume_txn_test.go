@@ -18,7 +18,7 @@ func TestAllocateOneTxnPublishesAllMetadata(t *testing.T) {
  if err=metadata.Init(path,0,true); err != nil { t.Fatal(err) }
  store,err:=metadata.OpenStoreWritable(path); if err!=nil { t.Fatal(err) }; defer store.Close()
  pair,err:=allocator.VolumeDescriptorPairOffset(store.SB,0); if err!=nil { t.Fatal(err) }
- initial,err:=allocator.EncodeVolumeDescriptor(allocator.VolumeDescriptor{VolumeID:"vol-atomic",AG:0,Generation:1,VolumeSequence:1,MappingRootOffset:store.SB.MappingOffset,BitmapSequence:1,OwnerEpoch:7,ArenaStart:store.SB.MappingOffset/format.PageSize,ArenaPages:format.MappingSize/format.PageSize,RootPage:^uint64(0)})
+ initial,err:=allocator.EncodeVolumeDescriptor(allocator.VolumeDescriptor{VolumeID:"vol-atomic",AG:0,Generation:1,VolumeSequence:1,MappingRootOffset:store.SB.MappingOffset,BitmapSequence:1,OwnerEpoch:7,ArenaStart:store.SB.ReservedOffset/format.PageSize,ArenaPages:100,RootPage:^uint64(0)})
  if err!=nil { t.Fatal(err) }
  if n,e:=store.Device().WriteAt(initial,int64(pair)); e!=nil || n!=len(initial) { t.Fatalf("write descriptor n=%d err=%v",n,e) }
  if err=store.Device().Sync(); err!=nil { t.Fatal(err) }
