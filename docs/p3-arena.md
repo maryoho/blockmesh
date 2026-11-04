@@ -38,8 +38,9 @@ New writes use the paged encoding. Lifecycle superblocks remain format version
 
 ## Allocation and recovery
 
-Use `btree.OpenPersistent(store, journal)` after the per-AG WAL has been
-recovered. The legacy `btree.Open` and `metastore.NewArena` deliberately
+Use `btree.OpenPersistent(store, journal, readerCoordinator)` after the
+per-AG WAL has been recovered when multi-node reader generation management is
+enabled. The coordinator is optional only for single-node use. The legacy `btree.Open` and `metastore.NewArena` deliberately
 reject lifecycle-enabled layouts. The Arena's Live set is reconstructed from
 the current B+Tree graph plus every durable retire record. Reservations remain
 process-local: uncommitted, unreachable COW pages can be reused after restart.
@@ -89,7 +90,8 @@ after all reads are stopped and in-flight I/O is drained.
 `PersistentArena.CollectWithReaders(readers, ioDrained)` derives the safe
 generation from this table and combines it with the I/O-drain condition. It
 requires a `ReaderCoordinator` on both objects. The same cluster-wide
-exclusive reader-set barrier must also be supplied to `NewPersistentArena`;
+exclusive reader-set barrier is passed through `btree.OpenPersistent` to
+`NewPersistentArena`;
 root publication acquires it so a reader cannot register on the old root
 between the generation snapshot and reclamation. Reader registration acquires
 the same barrier and joins at the current root. This barrier must be backed by
