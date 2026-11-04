@@ -194,3 +194,29 @@ func TestCheckpointDescriptorMirrorSurvivesSingleSlotCorruption(t *testing.T) {
 		t.Fatal("remaining descriptor copy did not preserve current checkpoint")
 	}
 }
+
+
+func TestJournalFullCanCheckpointAndRetry(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wal-full-checkpoint-*.img")
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	if err = f.Truncate(int64(format.MetadataSize)); err != nil { t.Fatal(err) }
+	d, err := device.Open(f.Name(), true)
+	if err != nil { t.Fatal(err) }
+	defer d.Close()
+	sb, err := format.NewSuperblock(0)
+	if err != nil { t.Fatal(err) }
+	j, err := New(d, sb, 0)
+	if err != nil { t.Fatal(err) }
+	j.end = j.size - 1 // leave insufficient room for the next record
+	image := make([]byte, format.PageSize)
+	copy(image, []byte("retry-after-cp"))
+	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset, Image: image}}); err != ErrJournalFull {
+		t.Fatalf("expected ErrJournalFull, got %v", err)
+	}
+	if j.poisoned { t.Fatal("clean WAL-full condition must not poison the Journal") }
+	if err = j.Checkpoint(); err != nil { t.Fatalf("checkpoint after full: %v", err) }
+	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset, Image: image}}); err != nil {
+		t.Fatalf("commit after checkpoint: %v", err)
+	}
+}
