@@ -372,3 +372,34 @@ func TestWALBackedCOWPublishesPagesAndRootAtomically(t *testing.T) {
 		t.Fatalf("recovered root=%d, want %d", reopened.RootPage(), newRoot)
 	}
 }
+
+func TestCOWDoesNotRetireDescendantsOfUnchangedInternalSubtree(t *testing.T) {
+	store, _, _ := newTree(t, 128)
+	write := func(id uint64, typ uint16, payload []byte) {
+		t.Helper()
+		if err := store.WritePage(metastore.Page{ID:id, Type:typ, Generation:1, Payload:payload}); err != nil {
+			t.Fatalf("write page %d: %v", id, err)
+		}
+	}
+	write(2, leafPageType, encodeLeaf([]Item{{Key:1, Value:10}}))
+	write(3, leafPageType, encodeLeaf([]Item{{Key:10, Value:100}}))
+	write(4, leafPageType, encodeLeaf([]Item{{Key:20, Value:200}}))
+	write(5, leafPageType, encodeLeaf([]Item{{Key:30, Value:300}}))
+	write(6, internalPageType, encodeInternal([]nodeRef{{id:2, minKey:1, level:0}, {id:3, minKey:10, level:0}}, 1))
+	write(7, internalPageType, encodeInternal([]nodeRef{{id:4, minKey:20, level:0}, {id:5, minKey:30, level:0}}, 1))
+	write(8, internalPageType, encodeInternal([]nodeRef{{id:6, minKey:1, level:1}, {id:7, minKey:20, level:1}}, 2))
+	if err := store.Sync(); err != nil { t.Fatal(err) }
+	if err := store.Publish(8, 1); err != nil { t.Fatal(err) }
+
+	tree, err := Open(store)
+	if err != nil { t.Fatal(err) }
+	if err = tree.Put(2, 22); err != nil { t.Fatal(err) }
+	if got, getErr := tree.Get(2); getErr != nil || got != 22 {
+		t.Fatalf("updated key lookup: got=%d err=%v", got, getErr)
+	}
+	// The untouched right-hand internal subtree was not loaded. Its child
+	// leaves must not be mistaken for unreachable pages by the retire queue.
+	if pending := tree.RetiredPages(); len(pending) != 0 {
+		t.Fatalf("opaque subtree pages were incorrectly retired: %+v", pending)
+	}
+}
