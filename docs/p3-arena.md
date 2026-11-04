@@ -1,90 +1,109 @@
-# P3 Metadata Arena and persistent retirement lifecycle
+# P3 Metadata Arena, Retire Queue and Reader Generations
 
 The metadata device uses 4 KiB pages. The allocatable Arena is
-`[ArenaStart, ArenaStart + ArenaPages)`. P3-3.5 optionally reserves a
-separate lifecycle region outside the Arena through `Layout.LifecycleStart`
-and `Layout.LifecyclePages`. The first two pages are the Arena lifecycle
-checkpoint and persistent Retire Queue. Existing layouts with
+`[ArenaStart, ArenaStart + ArenaPages)`. A lifecycle region is reserved
+outside the Arena through `Layout.LifecycleStart` and
+`Layout.LifecyclePages`. Its first page is the lifecycle checkpoint; every
+remaining page belongs to the persistent Retire Queue. Layouts with
 `LifecyclePages == 0` retain the legacy process-local behavior.
 
-## Durable lifecycle format
+## Lifecycle and multi-page Retire Queue
 
-The lifecycle pages are initialized explicitly with
-`metastore.FormatLifecycle(store)` while the device is exclusively owned.
-When converting an existing volume from the process-local Arena, first stop
-all writers, fence every old reader, drain all I/O, and perform an offline
-reachability/reclamation pass. Initializing an empty Retire Queue cannot
-reconstruct retirement records that were previously only in process memory.
-The two 4 KiB pages contain:
+Initialize the region with `metastore.FormatLifecycle(store)` while the
+metadata device is exclusively owned. Formatting clears the complete
+configured lifecycle region. When converting an existing volume from the
+process-local Arena, stop writers, fence old readers, drain I/O, and perform
+an offline reachability/reclamation pass first; an empty queue cannot recover
+retirement records that existed only in process memory.
+
 - `BMARNA01`: lifecycle generation and the root Mapping Sequence covered by
   the checkpoint.
-- `BMRETR01`: a CRC32C-protected list of retired page IDs and their retire
-  generations.
+- `BMRETR01`: one or more CRC32C-protected queue pages. Each page records
+  the queue generation, page index/count, and retired page IDs with their
+  retire generations.
 
-Lifecycle-enabled metastore superblocks use format version 2 and store the
-lifecycle region geometry in previously reserved bytes. Version-1 superblocks
-remain readable with the legacy process-local API; a version-1 superblock
-cannot be opened with `btree.OpenPersistent`. Older binaries reject version 2,
-preventing an unsafe downgrade that would ignore persistent retire records.
+The queue uses a fixed page range, not a linked mutable list. All queue pages
+and the lifecycle checkpoint are included in the same WAL transaction as a
+root publication or queue collection. Every page carries the same generation;
+a missing page, duplicate page ID, mismatched generation, invalid index, or
+bad CRC fails closed. Queue capacity is
+`(LifecyclePages - 1) * MaxPersistentRetiredPages` records (253 records per
+4 KiB queue page). A full queue rejects root publication with
+`ErrRetireQueueFull`; records are never dropped to make room.
+
+P3-3.5's one-page queue encoding remains readable when the lifecycle region
+contains exactly two pages. New writes use the paged encoding. Lifecycle
+superblocks remain format version 2; the queue page encoding has its own
+version.
 
 ## Allocation and recovery
 
 Use `btree.OpenPersistent(store, journal)` after the per-AG WAL has been
-recovered. The legacy `btree.Open` deliberately returns
-`ErrPersistentArenaRequired`, and `metastore.NewArena` returns
-`ErrPersistentArenaRequired`, for version-2 lifecycle layouts so callers
-cannot accidentally ignore durable retirement records. It loads the current B+Tree graph, loads every durable retire
-record, and reconstructs the Arena's Live set from both. Pages in the retire
-queue remain Live and cannot be reserved.
+recovered. The legacy `btree.Open` and `metastore.NewArena` deliberately
+reject lifecycle-enabled layouts. The Arena's Live set is reconstructed from
+the current B+Tree graph plus every durable retire record. Reservations remain
+process-local: uncommitted, unreachable COW pages can be reused after restart.
 
-Reservations remain process-local by design. If a process crashes before its
-WAL Commit becomes durable, the reservation disappears; its COW pages are
-unreachable and can safely be reused. If Commit is durable, the same WAL
-transaction contains:
+A root transaction contains:
 1. all newly written immutable COW pages;
-2. the updated lifecycle generation and retire queue;
-3. the new redundant superblock root descriptor as the final after-image.
+2. the lifecycle checkpoint after-image;
+3. every page in the updated Retire Queue;
+4. the inactive superblock root descriptor as the final after-image.
 
 Thus a recovered root cannot become visible without its corresponding
-retirement records. After commit, the in-memory reservation transitions from
-Reserved to Live.
+retirement records. Queue collection similarly WAL-commits the shortened queue
+before pages become Free in memory.
 
-## Retirement and reclamation
+## Reader Generation Table
 
-Old pages are added to the persistent Retire Queue in the same WAL transaction
-that publishes the replacement root. `Tree.RetiredPages()` reads the durable
-queue when the tree was opened with `OpenPersistent`.
+`metastore.NewReaderTable(store, startPage, slots, committer)` creates a
+persistent table with one dedicated 4 KiB page per reader slot. The caller
+must reserve this range outside the Arena and lifecycle region and must also
+ensure it does not overlap WAL/checkpoint regions (the WAL validates that
+condition on commit). The geometry and slot assignment policy are deployment
+configuration and must be identical on every node. A cluster lock/lease
+service must serialize slot assignment; two nodes must never register into the
+same slot concurrently.
 
-`Tree.CollectRetired(proof)` requires all three conditions:
-- `SafeGeneration > RetireGeneration`;
-- `IOsDrained == true`;
-- `FencingConfirmed == true`.
+Each record stores NodeID, BootID, monotonically increasing Reader Epoch,
+Root Generation, heartbeat sequence, and state:
+- Active: participates in the minimum safe generation.
+- Leaving: still pins its generation until clean I/O drain or fencing.
+- Fenced: excluded only after the fencer succeeds, or after the graceful
+  close path confirms the caller has stopped new reads and drained all I/O.
 
-The shortened queue is WAL-committed and synced before pages are returned to
-the in-memory free allocator. A crash after that durable queue update is safe:
-the old pages are no longer reachable from the root and have passed the
-reclamation proof. A crash before the update leaves them in the durable queue
-and they remain pinned after reopen.
+A new process instance must use a new BootID and a strictly higher Epoch before
+reusing a fenced slot. Heartbeats may advance Root Generation but cannot move
+it backwards. `SafeGeneration()` returns the minimum Root Generation across
+all non-fenced slots, or MaxUint64 if there are none.
 
-## Capacity and integration limits
+Use `FenceAndClose` to call the configured `fence.Fencer`; the durable slot
+is marked Fenced only after fencing succeeds. A heartbeat timeout alone never
+changes a slot to Fenced. Graceful shutdown may use `CloseDrained`, but only
+after all reads are stopped and in-flight I/O is drained.
 
-The first implementation uses one 4 KiB Retire Queue page. It can hold at most
-`MaxPersistentRetiredPages` (253) page records. When full, root publication
-fails with `ErrRetireQueueFull`; it never drops records or frees pages to make
-space. A future extension should use a multi-page COW queue or segmented
-retirement log.
+`PersistentArena.CollectWithReaders(readers, ioDrained)` derives the safe
+generation from this table and combines it with the I/O-drain condition.
+Every reader that can access the LUN must be represented in the table, and
+fenced state must only be written by the trusted fencing/graceful-close path.
+The lower-level `Collect(ReclaimProof)` remains a trusted integration API;
+callers can violate safety if they fabricate its proof.
+
+## Remaining integration boundaries
+
+This stage supplies durable reader slots and generation calculations, not a
+complete distributed lease/slot-allocation service. It does not implement
+sanlock, SCSI Persistent Reservations, PREEMPT AND ABORT across multipath, or
+automatic node-failure detection. Production deployment must provide:
+- cluster-serialized reader slot allocation and ownership;
+- owner/reader leases and monotonically increasing epochs;
+- a real SAN fencer that revokes every path before marking a failed reader
+  Fenced;
+- per-volume I/O drain coordination before reclamation;
+- configuration that reserves reader pages outside WAL/checkpoint and all
+  other metadata regions.
 
 The lifecycle checkpoint reconstructs page state from the published tree plus
-retired pages rather than persisting a full free bitmap. The allocator cursor
-and in-flight reservations are volatile; after restart the allocator rebuilds
-its Live set from durable reachability and the Retire Queue, and treats all
-other Arena pages as Free. This is safe for the
-current B+Tree-owned metadata Arena; additional metadata object types must be
-included in the root reachability walk or registered as pinned allocations
-before they can share this Arena.
-
-The caller remains responsible for real reader-generation tracking, lease
-expiry, SAN fencing, and in-flight I/O drain. The proof object is an
-integration contract, not a fencing implementation. Heartbeat timeout alone
-is not sufficient. Do not use the process-local `NewArena` / `RetireQueue`
-path for multi-process crash-safe reclamation.
+retired pages rather than persisting a full free bitmap. This is currently
+appropriate only for the B+Tree-owned metadata Arena; other metadata objects
+must be included in the reachability walk or registered as pinned allocations.
