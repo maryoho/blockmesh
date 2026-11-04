@@ -99,6 +99,7 @@ func validateLayout(l Layout) error {
 	if l.ArenaStart > l.TotalPages || l.ArenaPages > l.TotalPages-l.ArenaStart {
 		return ErrGeometry
 	}
+	if l.LifecyclePages == 0 && l.LifecycleStart != 0 { return ErrGeometry }
 	if l.LifecyclePages != 0 {
 		if l.LifecyclePages < 2 || l.LifecycleStart < 2 || l.LifecycleStart > l.TotalPages ||
 			l.LifecyclePages > l.TotalPages-l.LifecycleStart {
@@ -370,6 +371,7 @@ func encodeSuperblock(s Superblock) ([]byte, error) {
 		s.ArenaPages > s.TotalPages-s.ArenaStart {
 		return nil, ErrGeometry
 	}
+	if s.LifecyclePages == 0 && s.LifecycleStart != 0 { return nil, ErrGeometry }
 	if s.LifecyclePages != 0 {
 		if s.LifecyclePages < 2 || s.LifecycleStart < 2 ||
 			s.LifecycleStart > s.TotalPages || s.LifecyclePages > s.TotalPages-s.LifecycleStart {
