@@ -7,9 +7,9 @@ import (
 	"os"
 	"testing"
 
-	"bblockmesh/internal/format"
-	"bblockmesh/internal/lock"
-	"bblockmesh/internal/metadata"
+	"blockmesh/internal/format"
+	"blockmesh/internal/lock"
+	"blockmesh/internal/metadata"
 )
 
 func TestAllocateOneUpdatesBitmapAndMapping(t *testing.T) {
@@ -25,7 +25,7 @@ func TestAllocateOneUpdatesBitmapAndMapping(t *testing.T) {
 	if err = metadata.Init(path, 0, true); err != nil {
 		t.Fatal(err)
 	}
-	store, err := metadata.OpenWritable(path)
+	store, err := metadata.OpenStoreWritable(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestConcurrentAllocationsSameAGAreUnique(t *testing.T) {
 	if err = metadata.Init(path, 0, true); err != nil {
 		t.Fatal(err)
 	}
-	store, err := metadata.OpenWritable(path)
+	store, err := metadata.OpenStoreWritable(path)
 	if err != nil {
 		t.Fatal(err)
 	}
