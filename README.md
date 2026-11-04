@@ -12,7 +12,7 @@ This repository is a buildable P3 control-plane reference for Linux 5.15 BlockMe
 
 This code deliberately does not pretend to implement SAN fencing or a distributed lease service. `fence.Fencer` and `volume.Lease` are mandatory integration points. Production implementations must use sanlock (or an equivalent cluster lock service) and SCSI Persistent Reservations with PREEMPT AND ABORT across every multipath path. `MemoryLease` and `NoopFencer` are test-only and MUST NOT be used in production.
 
-The included `metadata.Engine` is still a single-volume JSON snapshot reference engine with an append-only redo WAL. It is not safe for multiple nodes to open the same files. The new `internal/metastore` package implements fixed-LBA 4 KiB metadata pages, redundant superblocks, checksums, root publication ordering, and a process-local Metadata Arena page allocator. The allocator is volatile and is rebuilt from the published root after recovery; it does not provide AG locks, distributed reader slots, fencing, or crash-safe page reclamation.
+The included `metadata.Engine` is still a single-volume JSON snapshot reference engine with an append-only redo WAL. It is not safe for multiple nodes to open the same files. The new `internal/metastore` package implements fixed-LBA 4 KiB metadata pages, redundant superblocks, checksums, root publication ordering, and both legacy process-local and version-2 WAL-persisted Arena lifecycle modes. In persistent mode, Live pages are reconstructed from the published B+Tree graph plus the durable Retire Queue; reservations remain volatile and uncommitted pages become reusable after recovery. This does not provide distributed reader slots, SAN fencing, or autonomous crash-safe reclamation proofs.
 
 ## P3 implementation status
 
