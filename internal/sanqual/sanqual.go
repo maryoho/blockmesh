@@ -330,27 +330,51 @@ func prTypeName(prType uint8) string {
 	}
 }
 
+type ReservationPathStatus struct {
+	Device string `json:"device"`
+	WWID string `json:"wwid"`
+	Present bool `json:"present"`
+	HolderKey string `json:"holder_key,omitempty"`
+	Type uint8 `json:"type,omitempty"`
+	TypeName string `json:"type_name,omitempty"`
+	Parsed bool `json:"parsed"`
+}
+
 type ReservationVerification struct {
 	ExpectedHolderKey string `json:"expected_holder_key"`
 	ExpectedType uint8 `json:"expected_type"`
+	WWID string `json:"wwid"`
 	Verified bool `json:"verified"`
+	Paths []ReservationPathStatus `json:"paths"`
 	MismatchPaths []string `json:"mismatch_paths,omitempty"`
 	UnknownPaths []string `json:"unknown_paths,omitempty"`
 }
 
 // VerifyReservation checks the active reservation identity and type on every
 // component path. It only evaluates captured evidence and never changes PR state.
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values { if existing == value { return values } }
+	return append(values, value)
+}
+
 func VerifyReservation(e Evidence, expectedHolderKey string, expectedType uint8) (ReservationVerification, error) {
 	key := normalizeKey(expectedHolderKey)
 	if len(key) > 16 { return ReservationVerification{}, errors.New("expected PR holder key exceeds 64 bits") }
-	if _, err := strconv.ParseUint(key, 16, 64); err != nil { return ReservationVerification{}, fmt.Errorf("invalid expected PR holder key %q", expectedHolderKey) }
+	parsedKey, keyErr := strconv.ParseUint(key, 16, 64)
+	if keyErr != nil || parsedKey == 0 { return ReservationVerification{}, fmt.Errorf("invalid or zero expected PR holder key %q", expectedHolderKey) }
 	if !validPRType(expectedType) { return ReservationVerification{}, fmt.Errorf("invalid expected SCSI PR type %d", expectedType) }
 	if len(e.Paths) == 0 { return ReservationVerification{}, errors.New("evidence has no SAN paths") }
 	if !e.PathCoverageVerified { return ReservationVerification{}, errors.New("multipath component-path coverage and common WWID are not verified; refusing a reservation conclusion") }
 	result := ReservationVerification{ExpectedHolderKey: "0x"+key, ExpectedType: expectedType, Verified: true}
+	seen := make(map[string]bool, len(e.Paths))
 	for _, path := range e.Paths {
+		if path.Device == "" || seen[path.Device] { return ReservationVerification{}, fmt.Errorf("empty or duplicate evidence path %q", path.Device) }
+		seen[path.Device] = true
+		if path.WWID == "" { result.Verified = false; result.UnknownPaths = append(result.UnknownPaths, path.Device) } else if result.WWID == "" { result.WWID = path.WWID } else if result.WWID != path.WWID { return ReservationVerification{}, errors.New("reservation evidence contains multiple WWIDs") }
+		status := ReservationPathStatus{Device: path.Device, WWID: path.WWID, Present: path.Reservation.Present, HolderKey: path.Reservation.HolderKey, Type: path.Reservation.Type, TypeName: path.Reservation.TypeName, Parsed: path.Reservation.Parsed}
+		result.Paths = append(result.Paths, status)
 		if path.ReadReservation.ExitCode != 0 || !path.Reservation.Parsed {
-			result.UnknownPaths = append(result.UnknownPaths, path.Device)
+			result.UnknownPaths = appendUnique(result.UnknownPaths, path.Device)
 			result.Verified = false
 			continue
 		}
