@@ -113,6 +113,8 @@ type volumeRuntime struct {
 	ownerWatchCancel context.CancelFunc
 	ownerWatchDone chan struct{}
 	ownerLost atomic.Bool
+	ownerFailureMu sync.Mutex
+	ownerFailure error
 }
 
 // VolumeRuntimeManager serializes per-volume activation/deactivation and owns
@@ -244,7 +246,11 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 				case cause, open := <-monitor.Lost():
 					if !open || cause == nil { cause = errors.New("Owner Lease lost") }
 					rt.ownerLost.Store(true)
-					_ = handler.HandleOwnerLeaseLost(context.Background(), spec, cause)
+					if handleErr := handler.HandleOwnerLeaseLost(context.Background(), spec, cause); handleErr != nil {
+						rt.ownerFailureMu.Lock()
+						rt.ownerFailure = handleErr
+						rt.ownerFailureMu.Unlock()
+					}
 				}
 			}()
 		} else if _, requiresMonitor := m.backend.(RuntimeOwnerLeaseLossHandler); requiresMonitor {
@@ -398,6 +404,15 @@ func (m *VolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID st
 	rt.recoveryStarted = false
 	if err := m.backend.DrainMetadataIO(ctx, volumeID); err != nil {
 		return fmt.Errorf("drain metadata I/O: %w", err)
+	}
+	rt.ownerFailureMu.Lock()
+	ownerFailure := rt.ownerFailure
+	rt.ownerFailureMu.Unlock()
+	if ownerFailure != nil {
+		// A lease-loss fail-stop hook failed. Keep the metadata device and
+		// remaining resources pinned for operator recovery; do not pretend
+		// that an ordinary software drain repairs a failed hardware fence.
+		return fmt.Errorf("Owner Lease fail-stop did not complete; retaining runtime resources: %w", ownerFailure)
 	}
 	if rt.reader != nil {
 		if err := rt.reader.CloseDrained(ctx, true); err != nil {
