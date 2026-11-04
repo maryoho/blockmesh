@@ -98,6 +98,13 @@ func NewReaderTable(store *Store, startPage uint64, slots uint32, committer Comm
 	return &ReaderTable{store:store,startPage:startPage,slots:slots,committer:committer,coordinator:coordinator},nil
 }
 
+func (t *ReaderTable) lockReaderSet() (func(), error) {
+	if t.coordinator == nil {
+		return func() {}, nil // single-node mode only
+	}
+	return acquireReaderSet(t.coordinator, t.store.Superblock().VolumeID)
+}
+
 func (t *ReaderTable) readLocked(slot uint32) (ReaderRecord,error) {
 	if slot>=t.slots { return ReaderRecord{},ErrReaderSlot }
 	b:=make([]byte,PageSize)
@@ -128,6 +135,7 @@ func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGenera
 }
 
 func (t *ReaderTable) Heartbeat(slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
+	unlock, lockErr := t.lockReaderSet(); if lockErr != nil { return lockErr }; defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	if err:=t.store.Refresh();err!=nil{return err}
 	r,err:=t.readLocked(slot);if err!=nil{return err}
@@ -142,6 +150,7 @@ func (t *ReaderTable) Heartbeat(slot uint32,nodeID,bootID string,epoch,rootGener
 // against its old root, drained every in-flight request that may reference
 // that generation, and refreshed its B+Tree to the new committed root.
 func (t *ReaderTable) AdvanceGeneration(slot uint32,nodeID,bootID string,epoch,newRootGeneration uint64,oldGenerationIOsDrained bool) error {
+	unlock, lockErr := t.lockReaderSet(); if lockErr != nil { return lockErr }; defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	if err:=t.store.Refresh();err!=nil{return err}
 	r,err:=t.readLocked(slot);if err!=nil{return err}
@@ -154,6 +163,7 @@ func (t *ReaderTable) AdvanceGeneration(slot uint32,nodeID,bootID string,epoch,n
 }
 
 func (t *ReaderTable) BeginLeave(slot uint32,nodeID,bootID string,epoch uint64) error {
+	unlock, lockErr := t.lockReaderSet(); if lockErr != nil { return lockErr }; defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	r,err:=t.readLocked(slot);if err!=nil{return err}
 	if r.State!=ReaderActive || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
@@ -165,6 +175,7 @@ func (t *ReaderTable) BeginLeave(slot uint32,nodeID,bootID string,epoch uint64) 
 // every in-flight I/O before marking the slot reusable.
 func (t *ReaderTable) CloseDrained(slot uint32,nodeID,bootID string,epoch uint64,ioDrained bool) error {
 	if !ioDrained { return ErrUnsafeReclaim }
+	unlock, lockErr := t.lockReaderSet(); if lockErr != nil { return lockErr }; defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	r,err:=t.readLocked(slot);if err!=nil{return err}
 	if (r.State!=ReaderActive && r.State!=ReaderLeaving) || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
@@ -177,6 +188,8 @@ func (t *ReaderTable) CloseDrained(slot uint32,nodeID,bootID string,epoch uint64
 // fencing succeeds; a timeout or heartbeat loss never changes the slot.
 func (t *ReaderTable) FenceAndClose(ctx context.Context,slot uint32,nodeID,bootID string,epoch uint64,fencer fence.Fencer) error {
 	if fencer==nil { return ErrReaderNotFenced }
+	if t.coordinator == nil { return ErrReaderCoordinatorRequired }
+	unlock, lockErr := t.lockReaderSet(); if lockErr != nil { return lockErr }; defer unlock()
 	t.mu.Lock()
 	r,err:=t.readLocked(slot)
 	if err!=nil { t.mu.Unlock();return err }
