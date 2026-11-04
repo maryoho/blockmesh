@@ -7,7 +7,6 @@ import (
 
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
-	"blockmesh/internal/metadata"
 	"blockmesh/internal/metastore"
 )
 
@@ -44,8 +43,21 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	if _, err = dev.WriteAt(pool.Encode(), int64(format.SuperBOffset)); err != nil { t.Fatal(err) }
 	if err = dev.Sync(); err != nil { t.Fatal(err) }
 
-	desc, err := metadata.InitVolume(dev, pool, 3, "pool-volume-3", 9, 8)
+	pair, err := format.VolumeDescriptorPairOffset(pool, 3)
 	if err != nil { t.Fatal(err) }
+	desc := format.VolumeDescriptor{
+		VolumeID: "pool-volume-3", AG: 0, Generation: 1, VolumeSequence: 1,
+		MappingRootOffset: pool.MappingOffset, BitmapSequence: 1, OwnerEpoch: 9,
+		ArenaStart: pool.ReservedOffset / format.PageSize, ArenaPages: 256,
+		RootPage: ^uint64(0),
+	}
+	image, err := desc.Encode()
+	if err != nil { t.Fatal(err) }
+	if err = desc.ValidatePool(pool); err != nil { t.Fatal(err) }
+	for slot := uint64(0); slot < 2; slot++ {
+		if _, err = dev.WriteAt(image, int64(pair+slot*format.PageSize)); err != nil { t.Fatal(err) }
+	}
+	if err = dev.Sync(); err != nil { t.Fatal(err) }
 	store, err := metastore.OpenPoolVolume(dev, pool, 3, "pool-volume-3")
 	if err != nil { t.Fatal(err) }
 
