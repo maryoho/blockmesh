@@ -45,7 +45,7 @@ type Tree struct {
 	arena *metastore.Arena
 	items []Item // sorted in-memory read cache; disk pages remain authoritative
 	pages  []uint64
-	retire *metastore.RetireQueue
+	retire  *metastore.RetireQueue
 	journal metastore.Committer
 	root   uint64
 }
@@ -60,7 +60,13 @@ func Open(store *metastore.Store, journals ...metastore.Committer) (*Tree, error
 		return nil, errors.New("nil metastore")
 	}
 	sb := store.Superblock()
-	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}\n\tif len(journals) == 1 {\n\t\tif journals[0] == nil {\n\t\t\treturn nil, errors.New("nil WAL committer")\n\t\t}\n\t\tt.journal = journals[0]\n\t}
+	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}
+	if len(journals) == 1 {
+		if journals[0] == nil {
+			return nil, errors.New("nil WAL committer")
+		}
+		t.journal = journals[0]
+	}
 	var live []uint64
 	if sb.RootPage != metastore.NoPage {
 		seen := make(map[uint64]struct{})
