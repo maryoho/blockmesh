@@ -115,3 +115,61 @@ identity, boot ID, and epoch. It must resolve to the pre-initialized sanlock
 resource assigned to that slot. SanlockReaderLeaseProbe.ResourceFor must
 resolve the exact same resource so recovery can acquire it only after the
 previous Reader process has released it.
+
+
+## 8. P3-3.8 Reader Recovery Controller
+
+Reader Table page version 2 persists `HeartbeatUnixNano` in the previously
+reserved bytes. Version 1 records remain readable, but their timestamp is
+reported as zero. The controller deliberately skips those legacy records
+until their owner writes a version 2 heartbeat; it never fabricates a
+timestamp during migration.
+
+Configure all nodes with synchronized wall clocks (for example, chrony).
+The timeout decision is:
+
+    age > HeartbeatTimeout + MaxClockSkew
+
+A timestamp farther in the future than MaxClockSkew is treated as a clock
+anomaly and skipped. A timestamp slightly in the future is also not stale.
+Heartbeat timeout only makes a record a recovery candidate; it does not
+change Reader state.
+
+Example controller wiring:
+
+    controller := &metastore.ReaderRecoveryController{
+        Table: readerTable,
+        Probe: &metastore.SanlockReaderLeaseProbe{
+            Locker: sanlockLocker,
+            ResourceFor: readerSlotResource,
+        },
+        Fencer: scsiPRFencer,
+        Arena: persistentArena,
+        Drain: metadataIODrainBarrier,
+        Config: metastore.ReaderRecoveryConfig{
+            HeartbeatTimeout: 15 * time.Second,
+            MaxClockSkew: 2 * time.Second,
+            ScanInterval: time.Second,
+            RetryInterval: 5 * time.Second,
+            OnError: reportRecoveryError,
+        },
+    }
+    go controller.Run(ctx)
+
+The resource resolver used by ReaderLeaseConfig and
+SanlockReaderLeaseProbe must resolve to exactly the same stable per-slot
+sanlock resource. It must not include BootID or Epoch in the resource name;
+those values identify the durable reader instance, not the lock resource.
+
+RecoverOnce is also exposed for deterministic tests and externally managed
+controllers. It returns counts for scanned/stale/fenced/failed/deferred
+records. Failed candidates remain Active/Leaving and continue pinning their
+generation. Retry backoff is process-local; after controller restart, stale
+candidates are reconsidered immediately, which is safe because every attempt
+repeats the sanlock probe and PR verification.
+
+If Arena is configured, a successful fencing pass is followed by the
+configured MetadataIODrainBarrier and then CollectWithReaders. The drain
+barrier must cover metadata-page IOs and must be an independently trusted
+cluster-wide proof; SAN PREEMPT AND ABORT alone is not sufficient. If no
+drain barrier is configured, fencing may complete but reclamation is skipped.
