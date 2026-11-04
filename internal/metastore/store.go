@@ -207,11 +207,49 @@ func (s *Store) Superblock() Superblock {
 	return s.sb
 }
 
+// Refresh reloads the newest valid redundant superblock. Read-only nodes use
+// it before publishing a Reader Generation heartbeat so they never claim a
+// root generation that is not yet visible on the metadata device.
+func (s *Store) Refresh() error {
+	if s==nil { return errors.New("nil metastore") }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refreshLocked()
+}
+
+func (s *Store) refreshLocked() error {
+	var best Superblock
+	found:=false
+	for _,slot:=range []uint64{Superblock0,Superblock1} {
+		b:=make([]byte,PageSize)
+		if err:=readFullAt(s.dev,b,int64(slot*PageSize));err!=nil { continue }
+		candidate,err:=decodeSuperblock(b)
+		if err!=nil || candidate.VolumeID!=s.sb.VolumeID { continue }
+		if !found || candidate.Generation>best.Generation { best=candidate;found=true }
+	}
+	if !found { return ErrUnformatted }
+	if best.TotalPages!=s.sb.TotalPages || best.ArenaStart!=s.sb.ArenaStart ||
+		best.ArenaPages!=s.sb.ArenaPages || best.LifecycleStart!=s.sb.LifecycleStart ||
+		best.LifecyclePages!=s.sb.LifecyclePages { return ErrGeometry }
+	if best.Generation>s.sb.Generation {
+		s.sb=best
+		for _,slot:=range []uint64{Superblock0,Superblock1} {
+			b:=make([]byte,PageSize)
+			if readFullAt(s.dev,b,int64(slot*PageSize))==nil {
+				candidate,err:=decodeSuperblock(b)
+				if err==nil && candidate.Generation==best.Generation { s.sbSlot=slot;break }
+			}
+		}
+	}
+	return nil
+}
+
 // Publish atomically advances the root descriptor by writing the inactive
 // superblock and flushing it. It never overwrites the currently selected copy.
 func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err:=s.refreshLocked();err!=nil{return err}
 	if rootPage != NoPage && !s.inArena(rootPage) {
 		return ErrOutOfRange
 	}
@@ -268,6 +306,7 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err:=s.refreshLocked();err!=nil{return err}
 
 	if rootPage != NoPage && !s.inArena(rootPage) {
 		return ErrOutOfRange
