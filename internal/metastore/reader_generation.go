@@ -93,6 +93,7 @@ func (t *ReaderTable) writeLocked(r ReaderRecord) error {
 func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
 	t.mu.Lock();defer t.mu.Unlock()
 	if slot>=t.slots || nodeID=="" || bootID=="" || len(nodeID)>readerIdentitySize || len(bootID)>readerIdentitySize || epoch==0 { return ErrReaderSlot }
+	if rootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
 	old,err:=t.readLocked(slot);if err!=nil{return err}
 	if old.State!=ReaderEmpty && old.State!=ReaderFenced { return ErrReaderSlot }
 	if old.Epoch>=epoch { return ErrReaderIdentity }
@@ -103,7 +104,7 @@ func (t *ReaderTable) Heartbeat(slot uint32,nodeID,bootID string,epoch,rootGener
 	t.mu.Lock();defer t.mu.Unlock()
 	r,err:=t.readLocked(slot);if err!=nil{return err}
 	if r.State!=ReaderActive || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
-	if rootGeneration<r.RootGeneration { return ErrReaderGeneration }
+	if rootGeneration<r.RootGeneration || rootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
 	if r.HeartbeatSequence==math.MaxUint64 { return errors.New("reader heartbeat sequence exhausted") }
 	r.RootGeneration=rootGeneration;r.HeartbeatSequence++
 	return t.writeLocked(r)
