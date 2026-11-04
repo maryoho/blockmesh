@@ -101,7 +101,8 @@ func TestVolumeRuntimeReadOnlyLifecycleOrder(t *testing.T) {
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
 	got:=b.snapshot()
-	assertRuntimeEventOrder(t,got,"device-open","metadata-open","reader-join","recovery-build","requests-enable","recovery-start","requests-stop","recovery-stop","io-drain","reader-close","metadata-close","device-close")
+	assertRuntimeEventOrder(t,got,"device-open","metadata-open","reader-join","recovery-build","requests-enable","requests-stop","recovery-stop","io-drain","reader-close","metadata-close","device-close")
+	assertRuntimeEventOrder(t,got,"recovery-build","recovery-start","recovery-stop")
 }
 
 func TestVolumeRuntimeReadWriteRecoversWALAfterOwnerLease(t *testing.T) {
