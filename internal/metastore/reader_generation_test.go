@@ -1,0 +1,74 @@
+package metastore
+
+import (
+	"context"
+	"testing"
+
+	"blockmesh/internal/fence"
+)
+
+type recordingFencer struct { called bool }
+func (f *recordingFencer) FenceNode(_ context.Context,nodeID,bootID string) error {
+	f.called=true
+	if nodeID!="node-b" || bootID!="boot-b" { panic("unexpected fencing identity") }
+	return nil
+}
+
+func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
+	d:=newMemdev(32)
+	s,err:=Format(d,Layout{VolumeID:"reader-test",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil {t.Fatal(err)}
+	committer:=testCommitter{d:d}
+	readers,err:=NewReaderTable(s,18,4,committer);if err!=nil{t.Fatal(err)}
+	if err=readers.Register(0,"node-a","boot-a",1,10);err!=nil{t.Fatal(err)}
+	if err=readers.Register(1,"node-b","boot-b",1,12);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=10{t.Fatalf("safe generation=%d err=%v",got,err)}
+	if err=readers.Heartbeat(0,"node-a","boot-a",1,11);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=11{t.Fatalf("safe generation after heartbeat=%d err=%v",got,err)}
+	if err=readers.BeginLeave(0,"node-a","boot-a",1);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=11{t.Fatalf("Leaving reader must pin generation: %d %v",got,err)}
+	if err=readers.CloseDrained(0,"node-a","boot-a",1,false);err==nil{t.Fatal("expected undrained close rejection")}
+	if err=readers.CloseDrained(0,"node-a","boot-a",1,true);err!=nil{t.Fatal(err)}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("safe generation after clean close=%d err=%v",got,err)}
+
+	f:=&recordingFencer{}
+	if err=readers.FenceAndClose(context.Background(),1,"node-b","boot-b",1,f);err!=nil{t.Fatal(err)}
+	if !f.called{t.Fatal("fencer was not called")}
+	if got,err:=readers.SafeGeneration();err!=nil||got!=^uint64(0){t.Fatalf("all readers fenced: safe=%d err=%v",got,err)}
+	if err=readers.Register(1,"node-b","boot-c",2,13);err!=nil{t.Fatalf("fenced slot should be reusable with a new epoch: %v",err)}
+
+	reopened,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
+	readers2,err:=NewReaderTable(reopened,18,4,committer);if err!=nil{t.Fatal(err)}
+	snapshot,err:=readers2.Snapshot();if err!=nil{t.Fatal(err)}
+	if len(snapshot)!=1 || snapshot[0].BootID!="boot-c" || snapshot[0].Epoch!=2 {t.Fatalf("unexpected recovered reader table: %+v",snapshot)}
+}
+
+func TestPersistentRetireQueueSpansMultiplePages(t *testing.T) {
+	d:=newMemdev(1000)
+	s,err:=Format(d,Layout{VolumeID:"multi-queue",TotalPages:1000,ArenaStart:2,ArenaPages:700,LifecycleStart:800,LifecyclePages:4})
+	if err!=nil{t.Fatal(err)}
+	if err=s.Publish(NoPage,2);err!=nil{t.Fatal(err)}
+	ids:=make([]uint64,600)
+	for i:=range ids{ids[i]=uint64(i+2)}
+	pages,err:=encodeRetireQueuePages([]RetireBatch{{RetireGeneration:1,PageIDs:ids}},7,3)
+	if err!=nil{t.Fatal(err)}
+	if len(pages)!=3{t.Fatalf("got %d queue pages, want 3",len(pages))}
+	for i,page:=range pages {
+		if err=writeFullAt(d,page,int64((801+uint64(i))*PageSize));err!=nil{t.Fatal(err)}
+	}
+	if err=d.Sync();err!=nil{t.Fatal(err)}
+	batches,generation,err:=readRetireQueuePages(s)
+	if err!=nil{t.Fatal(err)}
+	if generation!=7 || len(batches)!=1 || len(batches[0].PageIDs)!=600 {t.Fatalf("decoded queue generation=%d batches=%+v",generation,batches)}
+	if batches[0].PageIDs[0]!=2 || batches[0].PageIDs[599]!=601 {t.Fatal("queue page ordering was not preserved")}
+}
+
+func TestReaderTableRejectsOverlappingReservedRegions(t *testing.T) {
+	d:=newMemdev(24)
+	s,err:=Format(d,Layout{VolumeID:"reader-overlap",TotalPages:24,ArenaStart:2,ArenaPages:10,LifecycleStart:16,LifecyclePages:2})
+	if err!=nil{t.Fatal(err)}
+	if _,err=NewReaderTable(s,10,2,testCommitter{d:d});err==nil{t.Fatal("reader table must not overlap Arena")}
+	if _,err=NewReaderTable(s,17,2,testCommitter{d:d});err==nil{t.Fatal("reader table must not overlap lifecycle region")}
+}
+
+var _ fence.Fencer = (*recordingFencer)(nil)
