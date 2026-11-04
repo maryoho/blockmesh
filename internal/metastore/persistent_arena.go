@@ -186,6 +186,7 @@ func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
  if p==nil{return 0,errors.New("nil persistent arena")}
  if !proof.IOsDrained||!proof.FencingConfirmed{return 0,ErrUnsafeReclaim}
  p.mu.Lock();defer p.mu.Unlock()
+ if p.store.Superblock().MappingSequence!=p.rootSequence{return 0,ErrLifecycleCorrupt}
  kept:=make([]RetireBatch,0,len(p.batches));var release []uint64
  for _,b:=range p.batches {if proof.SafeGeneration>b.RetireGeneration {release=append(release,b.PageIDs...)}else{kept=append(kept,b)}}
  if len(release)==0{return 0,nil}
