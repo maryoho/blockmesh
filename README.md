@@ -10,9 +10,9 @@ This repository is a buildable P3 control-plane reference for Linux 5.15 BlockMe
 
 ## Important integration boundary
 
-This code deliberately does not pretend to implement SAN fencing or a distributed lease service. `fence.Fencer` and `volume.Lease` are mandatory integration points. Production implementations must use sanlock (or an equivalent cluster lock service) and SCSI Persistent Reservations with PREEMPT AND ABORT across every multipath path. `MemoryLease` and `NoopFencer` are test-only and MUST NOT be used in production.
+The repository now includes a sanlock-backed distributed resource locker, per-reader sanlock lease sessions, a shared-WAL committer that reloads each AG journal under a sanlock lock, and an sg_persist-based SCSI PR registrar/fencer using PREEMPT AND ABORT with per-path verification. `MemoryLease`, `FileLocker`, and `NoopFencer` remain test/development-only. Hardware qualification, sanlock resource provisioning, trusted key management, local DM fail-stop callbacks, and global I/O-drain orchestration remain deployment responsibilities.
 
-The included `metadata.Engine` is still a single-volume JSON snapshot reference engine with an append-only redo WAL. It is not safe for multiple nodes to open the same files. The new `internal/metastore` package implements fixed-LBA 4 KiB metadata pages, redundant superblocks, checksums, root publication ordering, and both legacy process-local and version-2 WAL-persisted Arena lifecycle modes. Persistent mode supports a multi-page Retire Queue and durable Reader Generation slots; Live pages are reconstructed from the published B+Tree graph plus queued retired pages. Reader slot allocation, cluster leases, SAN fencing, and trusted I/O-drain coordination remain deployment integration points.
+The included `metadata.Engine` is still a single-volume JSON snapshot reference engine with an append-only redo WAL. It is not safe for multiple nodes to open the same files. The new `internal/metastore` package implements fixed-LBA 4 KiB metadata pages, redundant superblocks, checksums, root publication ordering, and both legacy process-local and version-2 WAL-persisted Arena lifecycle modes. Persistent mode supports a multi-page Retire Queue and durable Reader Generation slots; Live pages are reconstructed from the published B+Tree graph plus queued retired pages. Reader slots are coupled to process-lifetime sanlock leases and SCSI PR registration. Failed-reader recovery must acquire the old slot lease, fence and verify every target PR key, then persist Fenced. See docs/p3-reader-fencing.md for provisioning and operational ordering. A deployment must still provide trusted key resolution, local DM fail-stop callbacks, and global I/O-drain coordination.
 
 ## P3 implementation status
 
@@ -23,7 +23,7 @@ The included `metadata.Engine` is still a single-volume JSON snapshot reference 
 * P3-5: crash recovery and fault-injection tests.
 * P3-6: Linux DM Target integration.
 
-See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md](docs/p3-arena.md), and [docs/p3-wal.md](docs/p3-wal.md) for the on-disk layout, page lifecycle, and WAL contract.
+See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md](docs/p3-arena.md), [docs/p3-wal.md](docs/p3-wal.md), and [docs/p3-reader-fencing.md](docs/p3-reader-fencing.md) for the on-disk layout, page lifecycle, WAL contract, and sanlock/SCSI PR integration.
 
 ## Layout
 
@@ -32,8 +32,10 @@ See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md]
 * `internal/wal`: per-AG fixed-LBA CRC32C redo WAL with Intent/Commit, recovery-before-open, dual-bank checkpoint rotation, and `CommitImages` for atomic COW page/root publication.
 * `internal/metadata`: current JSON-backed reference engine, descriptor and retire queue.
 * `internal/allocator`: 4 MiB allocation bitmap and per-AG WAL transaction publishing Bitmap, immutable Mapping COW page, and Volume Descriptor.
-* `internal/fence`: fencing contract and test-only no-op implementation.
-* `internal/volume`: lease contract and test-only in-memory lease.
+* `internal/fence`: SCSI PR registration, PREEMPT AND ABORT fencing, and test-only no-op implementation.
+* `internal/lock`: local test locker and sanlock-backed distributed resource leases.
+* `cmd/bm-lock-helper`: parent-death-bound helper used by sanlock client command.
+* `internal/volume`: volume lease contract, test-only in-memory lease, and process-lifetime sanlock reader leases.
 
 ## Run
 
