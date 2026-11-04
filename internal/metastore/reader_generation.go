@@ -172,7 +172,7 @@ func (t *ReaderTable) SafeGeneration() (uint64,error) {
 }
 
 func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
-	if r.Slot==math.MaxUint32 || r.NodeID=="" || r.BootID=="" || len(r.NodeID)>readerIdentitySize || len(r.BootID)>readerIdentitySize ||
+	if r.NodeID=="" || r.BootID=="" || len(r.NodeID)>readerIdentitySize || len(r.BootID)>readerIdentitySize ||
 		r.Epoch==0 || (r.State!=ReaderActive && r.State!=ReaderLeaving && r.State!=ReaderFenced) { return nil,ErrReaderSlot }
 	b:=make([]byte,PageSize);copy(b[:8],readerPageMagic)
 	binary.LittleEndian.PutUint32(b[8:12],readerPageVersion)
