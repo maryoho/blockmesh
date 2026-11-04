@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"blockmesh/internal/device"
 	"blockmesh/internal/fence"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
