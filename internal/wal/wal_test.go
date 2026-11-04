@@ -105,6 +105,8 @@ func TestOpenIgnoresIntentWithoutCommit(t *testing.T) {
 	defer d.Close()
 	sb, err := format.NewSuperblock(0)
 	if err != nil { t.Fatal(err) }
+	j, err := New(d, sb, 0) // initialize the dual checkpoint descriptors
+	if err != nil { t.Fatal(err) }
 	target := sb.MappingOffset
 	image := make([]byte, format.PageSize)
 	copy(image, []byte("not-committed"))
@@ -112,7 +114,7 @@ func TestOpenIgnoresIntentWithoutCommit(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	record, err := encodeJournalRecord(journalIntent, 1, payload)
 	if err != nil { t.Fatal(err) }
-	if n, writeErr := d.WriteAt(record, int64(sb.WALOffset)); writeErr != nil || n != len(record) {
+	if n, writeErr := d.WriteAt(record, int64(j.base)); writeErr != nil || n != len(record) {
 		t.Fatalf("write intent: n=%d err=%v", n, writeErr)
 	}
 	if err = d.Sync(); err != nil { t.Fatal(err) }
