@@ -3,6 +3,7 @@ package metastore
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"blockmesh/internal/lock"
@@ -29,10 +30,6 @@ func (c *SanlockReaderCoordinator) LockReaderSet(volumeID string) (func(), error
 	release, err := c.Locker.Lock(ctx, resource)
 	cancel()
 	if err != nil { return nil, err }
-	var once bool
-	return func() {
-		if once { return }
-		once = true
-		_ = release()
-	}, nil
+	var once sync.Once
+	return func() { once.Do(func() { _ = release() }) }, nil
 }
