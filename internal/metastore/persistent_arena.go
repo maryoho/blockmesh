@@ -135,12 +135,33 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 // and the new root descriptor in one WAL transaction. A non-ErrJournalFull
 // error may have an uncertain commit outcome; callers must stop using this
 // instance and reopen/recover rather than aborting the reservation.
-func (p *PersistentArena) CommitPagesAndPublish(pages []Page,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
+func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
  p.mu.Lock();defer p.mu.Unlock()
  if mappingSequence<=p.rootSequence||retireGeneration>=mappingSequence{return errors.New("invalid lifecycle generation")}
  if p.store.Superblock().MappingSequence!=p.rootSequence{return ErrLifecycleCorrupt}
  if p.stateGeneration==math.MaxUint64{return errors.New("lifecycle generation exhausted")}
+ // Validate the volatile reservation against the exact COW page set before
+ // recording any durable after-images.
+ p.arena.mu.Lock()
+ if reservation==nil {
+  if len(pages)!=0 {p.arena.mu.Unlock();return errors.New("COW pages require an Arena reservation")}
+ } else {
+  if reservation.arena!=p.arena||reservation.done||len(reservation.pages)!=len(pages) {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  reservedIDs:=make(map[uint64]struct{},len(reservation.pages))
+  for _,id:=range reservation.pages {owner,ok:=p.arena.reserved[id];if !ok||owner!=reservation.id {p.arena.mu.Unlock();return ErrInvalidPageSet};reservedIDs[id]=struct{}{}}
+  for _,page:=range pages {if _,ok:=reservedIDs[page.ID];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet};delete(reservedIDs,page.ID)}
+  if len(reservedIDs)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }
+ retiredSeen:=make(map[uint64]struct{},len(retired))
+ currentRoot:=p.store.Superblock().RootPage
+ for _,id:=range retired {
+  if id< p.arena.start||id-p.arena.start>=p.arena.pages||id==currentRoot {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=retiredSeen[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet};retiredSeen[id]=struct{}{}
+  if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=p.arena.reserved[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }
+ p.arena.mu.Unlock()
  nextBatches:=make([]RetireBatch,len(p.batches));for i,b:=range p.batches{nextBatches[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
  if len(retired)>0 {nextBatches=append(nextBatches,RetireBatch{RetireGeneration:retireGeneration,PageIDs:append([]uint64(nil),retired...)})}
  queueImage,err:=encodeRetireQueue(nextBatches);if err!=nil{return err}
