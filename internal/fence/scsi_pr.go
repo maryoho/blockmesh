@@ -55,6 +55,47 @@ var (
 	plainKeyLinePattern = regexp.MustCompile(`(?i)^\s*0x([0-9a-f]{1,16})\s*$`)
 )
 
+
+type ReaderRegistrar interface {
+	RegisterReader(context.Context, string, string) error
+}
+
+type SCSIPRRegistrar struct {
+	Binary string
+	Paths []PRPath
+	Timeout time.Duration
+	Runner CommandRunner
+}
+
+func (r *SCSIPRRegistrar) RegisterReader(ctx context.Context, nodeID, bootID string) error {
+	if r == nil || len(r.Paths) == 0 { return errors.New("SCSI PR registrar requires local paths") }
+	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(bootID) == "" { return errors.New("reader identity is required") }
+	binary:=r.Binary
+	if binary=="" { binary="sg_persist" }
+	runner:=r.Runner
+	if runner==nil { runner=execRunner{} }
+	timeout:=r.Timeout
+	if timeout<=0 { timeout=30*time.Second }
+	ctx,cancel:=context.WithTimeout(ctx,timeout)
+	defer cancel()
+	for _,path:=range r.Paths {
+		if strings.TrimSpace(path.Device)=="" || path.LocalKey==0 { return errors.New("every PR registration path needs a device and nonzero local key") }
+		present,err:=(&SCSIPRFencer{}).keyPresent(ctx,runner,binary,path.Device,path.LocalKey)
+		if err!=nil { return fmt.Errorf("read local PR keys on %s: %w",path.Device,err) }
+		if !present {
+			output,runErr:=runner.Run(ctx,binary,"--out","--register","--param-rk=0",
+				fmt.Sprintf("--param-sark=%x",path.LocalKey),"--param-aptpl","--device="+path.Device)
+			if runErr!=nil { return fmt.Errorf("register local PR key for %s/%s on %s: %w: %s",nodeID,bootID,path.Device,runErr,strings.TrimSpace(string(output))) }
+		}
+	}
+	for _,path:=range r.Paths {
+		present,err:=(&SCSIPRFencer{}).keyPresent(ctx,runner,binary,path.Device,path.LocalKey)
+		if err!=nil { return fmt.Errorf("verify local PR key on %s: %w",path.Device,err) }
+		if !present { return fmt.Errorf("local PR key %x is not registered on %s",path.LocalKey,path.Device) }
+	}
+	return nil
+}
+
 func (f *SCSIPRFencer) FenceNode(ctx context.Context, nodeID, bootID string) error {
 	if f == nil || f.Keys == nil || len(f.Paths) == 0 {
 		return errors.New("SCSI PR fencer requires paths and a registration-key resolver")
