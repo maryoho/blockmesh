@@ -35,6 +35,10 @@ func main() {
 		err = runFormat(os.Args[2:])
 	case "inspect":
 		err = runInspect(os.Args[2:])
+	case "volume-init":
+		err = runVolumeInit(os.Args[2:])
+	case "volume-inspect":
+		err = runVolumeInspect(os.Args[2:])
 	case "demo":
 		err = runDemo(os.Args[2:])
 	case "help", "-h", "--help":
@@ -55,11 +59,16 @@ func usage() {
 Usage:
   bm-meta inspect --device /dev/mapper/<metadata-lun>
   bm-meta format  --device /dev/mapper/<metadata-lun> --data-start-sector <sector> --confirm-format
+  bm-meta volume-init --device /dev/mapper/<metadata-lun> --index <slot> --volume-id <id> --owner-epoch <epoch> --confirm-init
+  bm-meta volume-inspect --device /dev/mapper/<metadata-lun> --index <slot>
   bm-meta demo [demo flags] <demo command>
 
 format is destructive: it writes BMPOOL02 Pool Superblocks at LBA 0/1 and
 initializes Pool-level AG metadata. It does not initialize Volume Descriptors.
 inspect is read-only and does not acquire a cluster lease.
+volume-init is destructive to one empty Node Table slot and requires external
+Pool quiesce/fencing; local O_EXCL is not a distributed lock.
+volume-inspect is read-only.
 
 The demo command uses JSON state files, MemoryLease and NoopFencer. It is
 not production-safe.`)
@@ -90,6 +99,53 @@ func runInspect(args []string) error {
 	dev,err:=device.OpenBlockDevice(*path,false,false);if err!=nil{return err};defer dev.Close()
 	store,err:=metadata.OpenStoreDevice(dev);if err!=nil{return fmt.Errorf("open Pool metadata: %w",err)}
 	return writeReport(dev,store,true)
+}
+
+type volumeDeviceReport struct {
+	DevicePath string `json:"device_path"`
+	VolumeIndex uint32 `json:"volume_index"`
+	Descriptor format.VolumeDescriptor `json:"volume_descriptor"`
+}
+
+func runVolumeInit(args []string) error {
+	fs := flag.NewFlagSet("volume-init", flag.ContinueOnError)
+	path := fs.String("device", "", "Linux block device or multipath device")
+	index := fs.Uint("index", 0, "Node Table Volume slot")
+	volumeID := fs.String("volume-id", "", "unique Volume ID")
+	ownerEpoch := fs.Uint64("owner-epoch", 0, "initial non-zero Owner Epoch")
+	lifecyclePages := fs.Uint64("lifecycle-pages", 32, "reserved Lifecycle pages (2..32)")
+	confirm := fs.Bool("confirm-init", false, "confirm Volume Descriptor initialization")
+	if err := fs.Parse(args); err != nil { return err }
+	if fs.NArg() != 0 { return errors.New("unexpected positional arguments") }
+	if *path == "" || *volumeID == "" || *ownerEpoch == 0 { return errors.New("--device, --volume-id and non-zero --owner-epoch are required") }
+	if !*confirm { return errors.New("refusing Volume initialization without --confirm-init") }
+	if uint64(*index) >= format.MaxVolumeDescriptors { return errors.New("Volume index exceeds Node Table capacity") }
+	dev, err := device.OpenBlockDevice(*path, true, true)
+	if err != nil { return err }
+	defer dev.Close()
+	pool, err := metadata.OpenStoreDevice(dev)
+	if err != nil { return fmt.Errorf("open Pool metadata: %w", err) }
+	desc, err := metadata.InitVolume(dev, pool.SB, uint32(*index), *volumeID, *ownerEpoch, *lifecyclePages)
+	if err != nil { return fmt.Errorf("initialize Volume Descriptor: %w", err) }
+	return json.NewEncoder(os.Stdout).Encode(volumeDeviceReport{DevicePath: dev.Path(), VolumeIndex: uint32(*index), Descriptor: desc})
+}
+
+func runVolumeInspect(args []string) error {
+	fs := flag.NewFlagSet("volume-inspect", flag.ContinueOnError)
+	path := fs.String("device", "", "Linux block device or multipath device")
+	index := fs.Uint("index", 0, "Node Table Volume slot")
+	if err := fs.Parse(args); err != nil { return err }
+	if fs.NArg() != 0 { return errors.New("unexpected positional arguments") }
+	if *path == "" { return errors.New("--device is required") }
+	if uint64(*index) >= format.MaxVolumeDescriptors { return errors.New("Volume index exceeds Node Table capacity") }
+	dev, err := device.OpenBlockDevice(*path, false, false)
+	if err != nil { return err }
+	defer dev.Close()
+	pool, err := metadata.OpenStoreDevice(dev)
+	if err != nil { return fmt.Errorf("open Pool metadata: %w", err) }
+	desc, err := metadata.ReadVolumeDescriptor(dev, pool.SB, uint32(*index))
+	if err != nil { return err }
+	return json.NewEncoder(os.Stdout).Encode(volumeDeviceReport{DevicePath: dev.Path(), VolumeIndex: uint32(*index), Descriptor: desc})
 }
 
 func writeReport(dev *device.BlockDevice,store *metadata.Store,readOnly bool) error {
