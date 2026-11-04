@@ -132,7 +132,13 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
  batches,queueGeneration,err:=readRetireQueuePages(store);if err!=nil{return nil,err}
  if rootSequence!=store.Superblock().MappingSequence||queueGeneration!=generation{return nil,ErrLifecycleCorrupt}
  live:=append([]uint64(nil),livePages...)
- for _,batch:=range batches {live=append(live,batch.PageIDs...)}
+ reachable:=make(map[uint64]struct{},len(livePages)+1)
+ for _,id:=range livePages { reachable[id]=struct{}{} }
+ if root:=store.Superblock().RootPage;root!=NoPage { reachable[root]=struct{}{} }
+ for _,batch:=range batches { for _,id:=range batch.PageIDs {
+  if _,ok:=reachable[id];ok { return nil,ErrLifecycleCorrupt }
+  live=append(live,id)
+ }}
  arena,err:=newArena(store,live);if err!=nil{return nil,err}
  return &PersistentArena{store:store,arena:arena,committer:committer,stateGeneration:generation,rootSequence:rootSequence,batches:batches},nil
 }
