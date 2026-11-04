@@ -499,7 +499,10 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   t.items=append([]Item(nil),items...);t.pages,t.root=newPages,rootID
   return nil
  }
- reservation,err:=t.arena.Reserve(uint64(pageCount));if err!=nil{return err}
+ var reservation *metastore.Reservation
+ var err error
+ if t.persistentArena!=nil {reservation,err=t.persistentArena.Reserve(uint64(pageCount))} else {reservation,err=t.arena.Reserve(uint64(pageCount))}
+ if err!=nil{return err}
  committed:=false
  defer func(){if !committed {_=reservation.Abort()}}()
  ids:=reservation.Pages();cursor:=0
