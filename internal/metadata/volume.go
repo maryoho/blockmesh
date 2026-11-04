@@ -46,6 +46,7 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 		LifecycleStart:lifecycleStart,LifecyclePages:lifecyclePages,
 	}
 	if err=d.ValidatePool(sb);err!=nil{return zero,fmt.Errorf("invalid Volume Descriptor geometry: %w",err)}
+	if err=validateVolumeDescriptorSlot(sb,index,d);err!=nil{return zero,fmt.Errorf("invalid Volume slot geometry: %w",err)}
 	image,err:=d.Encode();if err!=nil{return zero,err}
 	// Initialize the lifecycle extent before making the descriptor visible.
 	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
@@ -79,5 +80,18 @@ func ReadVolumeDescriptor(dev device.Device, sb format.Superblock, index uint32)
 	}
 	if !found{return zero,format.ErrVolumeDescriptor}
 	if err:=best.ValidatePool(sb);err!=nil{return zero,fmt.Errorf("Volume Descriptor does not fit Pool geometry: %w",err)}
+	if err:=validateVolumeDescriptorSlot(sb,index,best);err!=nil{return zero,fmt.Errorf("Volume Descriptor crosses its reserved slot: %w",err)}
 	return best,nil
+}
+
+func validateVolumeDescriptorSlot(sb format.Superblock,index uint32,d format.VolumeDescriptor) error {
+	if uint64(index)>=format.MaxVolumeDescriptors { return format.ErrVolumeDescriptor }
+	reservedBytes:=sb.MetadataSize-sb.ReservedOffset
+	slotBytes:=(reservedBytes/uint64(format.MaxVolumeDescriptors))/format.PageSize*format.PageSize
+	slotPages:=slotBytes/format.PageSize
+	slotStart:=sb.ReservedOffset/format.PageSize+uint64(index)*slotPages
+	slotEnd:=slotStart+slotPages
+	if d.ArenaStart<slotStart||d.ArenaStart>slotEnd||d.ArenaPages>slotEnd-d.ArenaStart{return format.ErrVolumeDescriptor}
+	if d.LifecyclePages!=0&&(d.LifecycleStart<slotStart||d.LifecycleStart>slotEnd||d.LifecyclePages>slotEnd-d.LifecycleStart){return format.ErrVolumeDescriptor}
+	return nil
 }
