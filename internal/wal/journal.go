@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ErrJournalFull = errors.New("AG WAL segment is full")
+	ErrJournalFull = errors.New("AG WAL bank is full")
 	ErrJournalCorrupt = errors.New("AG WAL segment is corrupt")
 )
 
@@ -156,7 +156,7 @@ func (j *Journal) Commit(updates []PageUpdate) error {
 		return err
 	}
 	if err = j.appendLocked(intent); err != nil {
-		j.poisoned = true
+		if !errors.Is(err, ErrJournalFull) { j.poisoned = true }
 		return err
 	}
 	if err = j.dev.Sync(); err != nil {
@@ -172,7 +172,10 @@ func (j *Journal) Commit(updates []PageUpdate) error {
 		return err
 	}
 	if err = j.appendLocked(commit); err != nil {
-		j.poisoned = true
+		// ErrJournalFull is a known no-write condition. The durable Intent is
+		// uncommitted and may be discarded by a checkpoint; other errors are
+		// ambiguous and require recovery.
+		if !errors.Is(err, ErrJournalFull) { j.poisoned = true }
 		return err
 	}
 	if err = j.dev.Sync(); err != nil {
