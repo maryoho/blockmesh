@@ -237,9 +237,11 @@ func deleteCOW(store *metastore.Store, n *cowNode, key uint64) (*cowNode, bool, 
 	if updated == nil {
 		n.children = append(n.children[:idx], n.children[idx+1:]...)
 	} else {
-		n.children[idx] = cowChild{
-			id: updated.id, minKey: updated.minKey(),
-			level: updated.level, node: updated,
+		n.children[idx] = refForNode(updated)
+		if isUnderfull(updated) && len(n.children) > 1 {
+			if err := rebalanceChild(store, n, idx); err != nil {
+				return nil, false, err
+			}
 		}
 	}
 	n.dirty = true
@@ -247,6 +249,77 @@ func deleteCOW(store *metastore.Store, n *cowNode, key uint64) (*cowNode, bool, 
 		return nil, true, nil
 	}
 	return n, true, nil
+}
+
+func refForNode(n *cowNode) cowChild {
+	return cowChild{id: n.id, minKey: n.minKey(), level: n.level, node: n}
+}
+
+func minLeafEntries() int { return (maxLeafEntries + 1) / 2 }
+func minInternalChildren() int { return (maxInternalChildren + 1) / 2 }
+
+func isUnderfull(n *cowNode) bool {
+	if n.leaf {
+		return len(n.items) < minLeafEntries()
+	}
+	return len(n.children) < minInternalChildren()
+}
+
+// rebalanceChild combines an underfull child with an adjacent sibling. If the
+// combined contents fit in one page they merge; otherwise both pages are
+// redistributed evenly. Parent separators are regenerated during encoding.
+func rebalanceChild(store *metastore.Store, parent *cowNode, idx int) error {
+	leftIdx, rightIdx := idx, idx+1
+	if idx > 0 {
+		leftIdx, rightIdx = idx-1, idx
+	}
+	left := parent.children[leftIdx].node
+	if left == nil {
+		var err error
+		left, err = loadCowNode(store, parent.children[leftIdx].id)
+		if err != nil { return err }
+	}
+	right := parent.children[rightIdx].node
+	if right == nil {
+		var err error
+		right, err = loadCowNode(store, parent.children[rightIdx].id)
+		if err != nil { return err }
+	}
+	if left.level != right.level || left.leaf != right.leaf {
+		return fmt.Errorf("%w: sibling level mismatch", ErrCorruptTree)
+	}
+	if left.leaf {
+		combined := make([]Item, 0, len(left.items)+len(right.items))
+		combined = append(combined, left.items...)
+		combined = append(combined, right.items...)
+		if len(combined) <= maxLeafEntries {
+			merged := &cowNode{level: 0, leaf: true, dirty: true, items: combined}
+			parent.children[leftIdx] = refForNode(merged)
+			parent.children = append(parent.children[:rightIdx], parent.children[rightIdx+1:]...)
+			return nil
+		}
+		mid := len(combined) / 2
+		left.items = append([]Item(nil), combined[:mid]...)
+		right.items = append([]Item(nil), combined[mid:]...)
+		left.dirty, right.dirty = true, true
+		parent.children[leftIdx], parent.children[rightIdx] = refForNode(left), refForNode(right)
+		return nil
+	}
+	combined := make([]cowChild, 0, len(left.children)+len(right.children))
+	combined = append(combined, left.children...)
+	combined = append(combined, right.children...)
+	if len(combined) <= maxInternalChildren {
+		merged := &cowNode{level: left.level, dirty: true, children: combined}
+		parent.children[leftIdx] = refForNode(merged)
+		parent.children = append(parent.children[:rightIdx], parent.children[rightIdx+1:]...)
+		return nil
+	}
+	mid := len(combined) / 2
+	left.children = append([]cowChild(nil), combined[:mid]...)
+	right.children = append([]cowChild(nil), combined[mid:]...)
+	left.dirty, right.dirty = true, true
+	parent.children[leftIdx], parent.children[rightIdx] = refForNode(left), refForNode(right)
+	return nil
 }
 
 func countDirty(n *cowNode) int {
