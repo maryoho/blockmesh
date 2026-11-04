@@ -33,8 +33,8 @@ func openWithMode(path string, writable bool) (*Store, error) {
 	var a, b []byte
 	a = make([]byte, format.PageSize)
 	b = make([]byte, format.PageSize)
-	errA := d.ReadAt(a, int64(format.SuperAOffset))
-	errB := d.ReadAt(b, int64(format.SuperBOffset))
+	errA := readAtFull(d, a, int64(format.SuperAOffset))
+	errB := readAtFull(d, b, int64(format.SuperBOffset))
 	var sa, sb format.Superblock
 	if errA == nil {
 		sa, errA = format.DecodeSuperblock(a)
@@ -68,7 +68,7 @@ func Init(path string, dataStartSector uint64, force bool) error {
 	}
 	if !force {
 		buf := make([]byte, format.PageSize)
-		if d.ReadAt(buf, 0) == nil {
+		if readAtFull(d, buf, 0) == nil {
 			for _, v := range buf {
 				if v != 0 {
 					return fmt.Errorf("device is not empty; pass --force to overwrite")
@@ -80,14 +80,14 @@ func Init(path string, dataStartSector uint64, force bool) error {
 	if err != nil {
 		return err
 	}
-	if err = d.WriteAt(sb.Encode(), int64(format.SuperAOffset)); err != nil {
+	if err = writeAtFull(d, sb.Encode(), int64(format.SuperAOffset)); err != nil {
 		return err
 	}
 	if err = d.Sync(); err != nil {
 		return err
 	}
 	sb.Generation = 2
-	if err = d.WriteAt(sb.Encode(), int64(format.SuperBOffset)); err != nil {
+	if err = writeAtFull(d, sb.Encode(), int64(format.SuperBOffset)); err != nil {
 		return err
 	}
 	if err = d.Sync(); err != nil {
@@ -161,7 +161,7 @@ func (s *Store) SetBitmapBit(ag uint32, localBlock uint64, allocated bool) error
 
 func readBitmap(d device.Device, ag uint32, base uint64) ([]byte, uint64, error) {
 	desc := make([]byte, format.PageSize)
-	if err := d.ReadAt(desc, int64(base)); err != nil {
+	if err := readAtFull(d, desc, int64(base)); err != nil {
 		return nil, 0, err
 	}
 	if binary.LittleEndian.Uint64(desc[0:8]) != bitmapDescriptorMagic {
@@ -173,7 +173,7 @@ func readBitmap(d device.Device, ag uint32, base uint64) ([]byte, uint64, error)
 	seq := binary.LittleEndian.Uint64(desc[16:24])
 	want := binary.LittleEndian.Uint32(desc[24:28])
 	bm := make([]byte, format.BitmapBytes)
-	if err := d.ReadAt(bm, int64(base+format.PageSize)); err != nil {
+	if err := readAtFull(d, bm, int64(base+format.PageSize)); err != nil {
 		return nil, 0, err
 	}
 	if crc32.Checksum(bm, crc32.MakeTable(crc32.Castagnoli)) != want {
@@ -187,7 +187,7 @@ func writeBitmap(d device.Device, ag uint32, base uint64, bm []byte, seq uint64)
 		return fmt.Errorf("invalid bitmap size")
 	}
 	// Write bitmap data first, then descriptor. This is not a transaction; P2 WAL will provide crash atomicity.
-	if err := d.WriteAt(bm, int64(base+format.PageSize)); err != nil {
+	if err := writeAtFull(d, bm, int64(base+format.PageSize)); err != nil {
 		return err
 	}
 	if err := d.Sync(); err != nil {
@@ -199,7 +199,7 @@ func writeBitmap(d device.Device, ag uint32, base uint64, bm []byte, seq uint64)
 	binary.LittleEndian.PutUint32(desc[12:16], 1)
 	binary.LittleEndian.PutUint64(desc[16:24], seq)
 	binary.LittleEndian.PutUint32(desc[24:28], crc32.Checksum(bm, crc32.MakeTable(crc32.Castagnoli)))
-	return d.WriteAt(desc, int64(base))
+	return writeAtFull(d, desc, int64(base))
 }
 
 // Device exposes the metadata device to the WAL and allocator packages.
@@ -212,8 +212,30 @@ func (s *Store) ReadPage(offset uint64) ([]byte, error) {
 		return nil, fmt.Errorf("invalid metadata page offset %d", offset)
 	}
 	b := make([]byte, format.PageSize)
-	if err := s.dev.ReadAt(b, int64(offset)); err != nil {
+	if err := readAtFull(s.dev, b, int64(offset)); err != nil {
 		return nil, err
 	}
 	return b, nil
+}
+
+func readAtFull(d device.Device, b []byte, off int64) error {
+	n, err := d.ReadAt(b, off)
+	if err != nil && !(err == io.EOF && n == len(b)) {
+		return err
+	}
+	if n != len(b) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+
+func writeAtFull(d device.Device, b []byte, off int64) error {
+	n, err := d.WriteAt(b, off)
+	if err != nil {
+		return err
+	}
+	if n != len(b) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
