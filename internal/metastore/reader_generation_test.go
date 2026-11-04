@@ -36,6 +36,8 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 
 	remote,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
 	if err=remote.Publish(NoPage,13);err!=nil{t.Fatal(err)}
+	if err=readers.Heartbeat(0,"node-a","boot-a",1,12);err!=nil{t.Fatal(err)}
+	if err=readers.AdvanceGeneration(0,"node-a","boot-a",1,13,false);err==nil{t.Fatal("generation advance without old I/O drain must fail")}
 	if err=readers.AdvanceGeneration(1,"node-b","boot-b",1,13,true);err!=nil{t.Fatal(err)}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=12{t.Fatalf("slow reader must pin old generation: %d %v",got,err)}
 	if err=readers.AdvanceGeneration(0,"node-a","boot-a",1,13,true);err!=nil{t.Fatal(err)}
