@@ -27,7 +27,9 @@ type ReaderLease struct {
 	lost chan struct{}
 	done chan struct{}
 	monitorDone chan struct{}
-	once sync.Once
+	stopOnce sync.Once
+	releaseOnce sync.Once
+	releaseErr error
 	errMu sync.Mutex
 	err error
 }
@@ -44,10 +46,12 @@ func (l *ReaderLease) Err() error {
 }
 func (l *ReaderLease) Close() error {
 	if l == nil { return nil }
-	l.once.Do(func() { close(l.done) })
+	l.stopOnce.Do(func() { close(l.done) })
 	if l.monitorDone != nil { <-l.monitorDone }
-	if l.lease != nil { return l.lease.Close() }
-	return nil
+	l.releaseOnce.Do(func() {
+		if l.lease != nil { l.releaseErr = l.lease.Close() }
+	})
+	return l.releaseErr
 }
 
 // AcquireReader acquires a unique sanlock resource for one reader instance.
