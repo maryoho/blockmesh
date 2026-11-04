@@ -66,9 +66,11 @@ persistent table with one dedicated 4 KiB page per reader slot. The caller
 must reserve this range outside the Arena and lifecycle region and must also
 ensure it does not overlap WAL/checkpoint regions (the WAL validates that
 condition on commit). The geometry and slot assignment policy are deployment
-configuration and must be identical on every node. A cluster lock/lease
-service must serialize slot assignment; two nodes must never register into the
-same slot concurrently.
+configuration and must be identical on every node. The entire slot range must
+be zeroed during offline volume provisioning before first use; do not point
+the table at arbitrary nonzero metadata pages. A cluster lock/lease service
+must serialize slot assignment; two nodes must never register into the same
+slot concurrently.
 
 Each record stores NodeID, BootID, monotonically increasing Reader Epoch,
 Root Generation, heartbeat sequence, and state. A joining reader must call
