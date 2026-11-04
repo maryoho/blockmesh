@@ -133,7 +133,6 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
  return &PersistentArena{store:store,arena:arena,committer:committer,stateGeneration:generation,rootSequence:rootSequence,batches:batches},nil
 }
 
-func (p *PersistentArena) Arena()*Arena {if p==nil{return nil};return p.arena}
 func (p *PersistentArena) Reserve(count uint64)(*Reservation,error){if p==nil{return nil,errors.New("nil persistent arena")};return p.arena.Reserve(count)}
 func (p *PersistentArena) Stats()ArenaStats{return p.arena.Stats()}
 func (p *PersistentArena) Pending()[]RetireBatch{
