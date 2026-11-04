@@ -18,6 +18,7 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 	d:=newMemdev(32)
 	s,err:=Format(d,Layout{VolumeID:"reader-test",TotalPages:32,ArenaStart:2,ArenaPages:12,LifecycleStart:16,LifecyclePages:2})
 	if err!=nil {t.Fatal(err)}
+	if err=s.Publish(NoPage,12);err!=nil{t.Fatal(err)}
 	committer:=testCommitter{d:d}
 	readers,err:=NewReaderTable(s,18,4,committer);if err!=nil{t.Fatal(err)}
 	if err=readers.Register(0,"node-a","boot-a",1,10);err!=nil{t.Fatal(err)}
@@ -35,6 +36,7 @@ func TestReaderGenerationTracksMinimumAndFencing(t *testing.T) {
 	if err=readers.FenceAndClose(context.Background(),1,"node-b","boot-b",1,f);err!=nil{t.Fatal(err)}
 	if !f.called{t.Fatal("fencer was not called")}
 	if got,err:=readers.SafeGeneration();err!=nil||got!=^uint64(0){t.Fatalf("all readers fenced: safe=%d err=%v",got,err)}
+	if err=s.Publish(NoPage,13);err!=nil{t.Fatal(err)}
 	if err=readers.Register(1,"node-b","boot-c",2,13);err!=nil{t.Fatalf("fenced slot should be reusable with a new epoch: %v",err)}
 
 	reopened,err:=Open(d,"reader-test");if err!=nil{t.Fatal(err)}
