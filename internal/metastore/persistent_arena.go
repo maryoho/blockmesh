@@ -149,7 +149,7 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
  p.mu.Lock();defer p.mu.Unlock()
- if mappingSequence<=p.rootSequence||retireGeneration>=mappingSequence{return errors.New("invalid lifecycle generation")}
+ if p.rootSequence==math.MaxUint64||mappingSequence!=p.rootSequence+1||retireGeneration!=p.rootSequence{return errors.New("invalid lifecycle generation")}
  if p.store.Superblock().MappingSequence!=p.rootSequence{return ErrLifecycleCorrupt}
  if p.stateGeneration==math.MaxUint64{return errors.New("lifecycle generation exhausted")}
  // Validate the volatile reservation against the exact COW page set before
