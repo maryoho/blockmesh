@@ -38,7 +38,9 @@ var (
 
 // ReaderRecord is the durable state of one reader instance. BootID must be
 // unique per process/host boot; NodeID alone is not sufficient to distinguish
-// a restarted node from its stale predecessor.
+// a restarted node from its stale predecessor. A new reader must register at
+// the current committed root before it begins reading; later heartbeats may
+// advance its generation monotonically.
 type ReaderRecord struct {
 	Slot uint32
 	NodeID string
@@ -95,7 +97,7 @@ func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGenera
 	t.mu.Lock();defer t.mu.Unlock()
 	if err:=t.store.Refresh();err!=nil{return err}
 	if slot>=t.slots || nodeID=="" || bootID=="" || len(nodeID)>readerIdentitySize || len(bootID)>readerIdentitySize || epoch==0 { return ErrReaderSlot }
-	if rootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
+	if rootGeneration!=t.store.Superblock().MappingSequence { return ErrReaderGeneration }
 	old,err:=t.readLocked(slot);if err!=nil{return err}
 	if old.State!=ReaderEmpty && old.State!=ReaderFenced && old.State!=ReaderClosed { return ErrReaderSlot }
 	if old.Epoch>=epoch { return ErrReaderIdentity }
