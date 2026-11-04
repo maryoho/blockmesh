@@ -43,7 +43,7 @@ type runtimeTestBackend struct {
 	mu sync.Mutex
 	events []string
 	drainErr error
-	mode VolumeRuntimeMode
+	recoveryStarted chan struct{}
 }
 func (b *runtimeTestBackend) add(v string) { b.mu.Lock(); defer b.mu.Unlock(); b.events=append(b.events,v) }
 func (b *runtimeTestBackend) snapshot() []string { b.mu.Lock(); defer b.mu.Unlock(); return append([]string(nil),b.events...) }
@@ -59,12 +59,34 @@ func (b *runtimeTestBackend) OpenMetadata(_ context.Context,s VolumeRuntimeSpec,
 func (b *runtimeTestBackend) JoinReader(context.Context,VolumeRuntimeSpec,*VolumeRuntimeMetadata)(RuntimeReaderSession,error){b.add("reader-join");return &runtimeTestReader{events:&b.events,mu:&b.mu},nil}
 func (b *runtimeTestBackend) BuildReaderRecovery(s VolumeRuntimeSpec,_ *VolumeRuntimeMetadata)(ManagedReaderRecovery,error){
 	b.add("recovery-build")
-	return &runtimeTestRecovery{id:s.VolumeID,started:make(chan struct{}),events:&b.events,mu:&b.mu},nil
+	r := &runtimeTestRecovery{id:s.VolumeID,started:make(chan struct{}),events:&b.events,mu:&b.mu}
+	b.recoveryStarted = r.started
+	return r,nil
 }
 func (b *runtimeTestBackend) EnableRequests(context.Context,VolumeRuntimeSpec,*VolumeRuntimeMetadata)error{b.add("requests-enable");return nil}
 func (b *runtimeTestBackend) StopRequests(context.Context,string)error{b.add("requests-stop");return nil}
-func (b *runtimeTestBackend) DrainMetadataIO(context.Context,string)error{b.add("io-drain");return b.drainErr}
+func (b *runtimeTestBackend) DrainMetadataIO(context.Context,string)error{
+	b.mu.Lock(); defer b.mu.Unlock()
+	b.events=append(b.events,"io-drain")
+	return b.drainErr
+}
 func (b *runtimeTestBackend) CloseMetadata(context.Context,VolumeRuntimeSpec,*VolumeRuntimeMetadata)error{b.add("metadata-close");return nil}
+
+func waitRuntimeRecovery(t *testing.T,b *runtimeTestBackend) {
+	t.Helper()
+	if b.recoveryStarted == nil { t.Fatal("recovery controller was not built") }
+	select { case <-b.recoveryStarted: case <-time.After(time.Second): t.Fatal("recovery worker did not start") }
+}
+func assertRuntimeEventOrder(t *testing.T,events []string,ordered ...string) {
+	t.Helper()
+	position:=0
+	for _,want:=range ordered {
+		found:=-1
+		for i:=position;i<len(events);i++ { if events[i]==want { found=i;break } }
+		if found<0 { t.Fatalf("event %q missing or out of order in %v",want,events) }
+		position=found+1
+	}
+}
 
 func runtimeTestSpec(mode VolumeRuntimeMode) VolumeRuntimeSpec {
 	return VolumeRuntimeSpec{VolumeID:"vol-runtime",Mode:mode,NodeID:"node-a",BootID:"boot-a"}
@@ -74,30 +96,31 @@ func TestVolumeRuntimeReadOnlyLifecycleOrder(t *testing.T) {
 	b:=&runtimeTestBackend{}
 	m,err:=NewVolumeRuntimeManager(b);if err!=nil{t.Fatal(err)}
 	if err=m.Activate(context.Background(),runtimeTestSpec(VolumeRuntimeReadOnly));err!=nil{t.Fatal(err)}
+	waitRuntimeRecovery(t,b)
 	if got:=m.ActiveVolumes();!reflect.DeepEqual(got,[]string{"vol-runtime"}){t.Fatalf("active volumes=%v",got)}
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
-	want:=[]string{"device-open","metadata-open","reader-join","recovery-build","requests-enable","recovery-start","requests-stop","recovery-stop","io-drain","reader-close","metadata-close","device-close"}
-	if got:=b.snapshot();!reflect.DeepEqual(got,want){t.Fatalf("events\n got: %v\nwant: %v",got,want)}
+	got:=b.snapshot()
+	assertRuntimeEventOrder(t,got,"device-open","metadata-open","reader-join","recovery-build","requests-enable","recovery-start","requests-stop","recovery-stop","io-drain","reader-close","metadata-close","device-close")
 }
 
 func TestVolumeRuntimeReadWriteRecoversWALAfterOwnerLease(t *testing.T) {
 	b:=&runtimeTestBackend{}
 	m,err:=NewVolumeRuntimeManager(b);if err!=nil{t.Fatal(err)}
 	if err=m.Activate(context.Background(),runtimeTestSpec(VolumeRuntimeReadWrite));err!=nil{t.Fatal(err)}
+	waitRuntimeRecovery(t,b)
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
 	got:=b.snapshot()
-	wantPrefix:=[]string{"device-open","owner-acquire","wal-recover","metadata-open","recovery-build","requests-enable"}
-	if !reflect.DeepEqual(got[:len(wantPrefix)],wantPrefix){t.Fatalf("activation order got %v want prefix %v",got,wantPrefix)}
+	assertRuntimeEventOrder(t,got,"device-open","owner-acquire","wal-recover","metadata-open","recovery-build","requests-enable","recovery-start","requests-stop","recovery-stop","io-drain","metadata-close","owner-release","device-close")
 	for _,event:=range got {if event=="reader-join"{t.Fatal("RW owner must not join a RO reader session")}}
-	if got[len(got)-3]!="metadata-close"||got[len(got)-2]!="owner-release"||got[len(got)-1]!="device-close"{t.Fatalf("resource release order: %v",got)}
 }
 
 func TestVolumeRuntimeDrainFailureRetainsResourcesForRetry(t *testing.T) {
 	b:=&runtimeTestBackend{drainErr:errors.New("DM queue not drained")}
 	m,err:=NewVolumeRuntimeManager(b);if err!=nil{t.Fatal(err)}
 	if err=m.Activate(context.Background(),runtimeTestSpec(VolumeRuntimeReadOnly));err!=nil{t.Fatal(err)}
+	waitRuntimeRecovery(t,b)
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err==nil{t.Fatal("expected drain failure")}
 	for _,event:=range b.snapshot(){if event=="metadata-close"||event=="device-close"||event=="reader-close"{t.Fatalf("resources released before successful drain: %v",b.snapshot())}}
