@@ -84,3 +84,26 @@ func VolumeDescriptorPairOffset(sb Superblock,index uint32)(uint64,error) {
 	if sb.NodeTableOffset!=NodeTableOffset { return 0, errors.New("unsupported Node Table offset") }
 	return sb.NodeTableOffset+uint64(index)*VolumeDescriptorPairSize,nil
 }
+
+// ValidatePool verifies that descriptor offsets are contained in the Pool
+// regions described by the authoritative BMPOOL02 superblock.
+func (d VolumeDescriptor) ValidatePool(sb Superblock) error {
+	if err:=sb.Validate();err!=nil{return err}
+	if d.AG>=sb.AGCount || d.BitmapSequence==0 { return ErrVolumeDescriptor }
+	if d.MappingRootOffset%PageSize!=0 || d.MappingRootOffset<sb.MappingOffset ||
+		d.MappingRootOffset>sb.MappingOffset+sb.MappingSize ||
+		PageSize>sb.MappingOffset+sb.MappingSize-d.MappingRootOffset {
+		return ErrVolumeDescriptor
+	}
+	reservedStart,reservedEnd:=sb.ReservedOffset/PageSize,sb.MetadataSize/PageSize
+	if d.ArenaStart<reservedStart || d.ArenaStart>reservedEnd || d.ArenaPages>reservedEnd-d.ArenaStart {
+		return ErrVolumeDescriptor
+	}
+	arenaEnd:=d.ArenaStart+d.ArenaPages
+	if d.LifecyclePages==0 {
+		if d.LifecycleStart!=0 { return ErrVolumeDescriptor }
+	} else if d.LifecycleStart<arenaEnd || d.LifecycleStart>reservedEnd || d.LifecyclePages>reservedEnd-d.LifecycleStart {
+		return ErrVolumeDescriptor
+	}
+	return nil
+}
