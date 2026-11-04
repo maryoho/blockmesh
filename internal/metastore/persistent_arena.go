@@ -277,10 +277,7 @@ func encodeRetireQueuePages(batches []RetireBatch, generation, pageCount uint64)
  if pageCount == 0 { return nil, ErrLifecycleUnformatted }
  if pageCount>uint64(^uint32(0)) { return nil,ErrGeometry }
  total:=0
- for _,batch:=range batches {
-  if len(batch.PageIDs)>math.MaxInt-total { return nil, ErrRetireQueueFull }
-  total+=len(batch.PageIDs)
- }
+ for _,batch:=range batches { total+=len(batch.PageIDs) }
  capacity:=int(pageCount)*MaxPersistentRetiredPages
  if total>capacity { return nil, ErrRetireQueueFull }
  pages:=make([][]byte,int(pageCount))
