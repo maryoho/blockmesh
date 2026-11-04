@@ -161,9 +161,12 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 }
 
 // CommitPagesAndPublish persists new pages, lifecycle state, retire records,
-// and the new root descriptor in one WAL transaction. A non-ErrJournalFull
-// error may have an uncertain commit outcome; callers must stop using this
-// instance and reopen/recover rather than aborting the reservation.
+// and the new root descriptor in one WAL transaction. On success it atomically
+// transitions reservation pages to Live; callers must not call Reservation.Commit
+// or Abort afterward. The Arena mutex is held through the WAL commit so another
+// goroutine cannot abort/reuse a page while its after-image is in flight.
+// A non-ErrJournalFull error may have an uncertain commit outcome; callers must
+// stop using this instance and reopen/recover rather than aborting the reservation.
 func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
  if p.coordinator!=nil {
