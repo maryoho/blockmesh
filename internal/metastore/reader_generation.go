@@ -8,13 +8,14 @@ import (
 	"hash/crc32"
 	"math"
 	"sync"
+	"time"
 
 	"blockmesh/internal/fence"
 )
 
 const (
 	readerPageMagic = "BMREAD01"
-	readerPageVersion = uint32(1)
+	readerPageVersion = uint32(2)
 	readerHeaderSize = 48
 	readerIdentitySize = 128
 )
@@ -49,6 +50,7 @@ type ReaderRecord struct {
 	Epoch uint64
 	RootGeneration uint64
 	HeartbeatSequence uint64
+	HeartbeatUnixNano int64
 	State ReaderState
 }
 
@@ -135,7 +137,7 @@ func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGenera
 	old,err:=t.readLocked(slot);if err!=nil{return err}
 	if old.State!=ReaderEmpty && old.State!=ReaderFenced && old.State!=ReaderClosed { return ErrReaderSlot }
 	if old.Epoch>=epoch { return ErrReaderIdentity }
-	return t.writeLocked(ReaderRecord{Slot:slot,NodeID:nodeID,BootID:bootID,Epoch:epoch,RootGeneration:rootGeneration,HeartbeatSequence:1,State:ReaderActive})
+	return t.writeLocked(ReaderRecord{Slot:slot,NodeID:nodeID,BootID:bootID,Epoch:epoch,RootGeneration:rootGeneration,HeartbeatSequence:1,HeartbeatUnixNano:time.Now().UnixNano(),State:ReaderActive})
 }
 
 func (t *ReaderTable) Heartbeat(slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
@@ -147,6 +149,7 @@ func (t *ReaderTable) Heartbeat(slot uint32,nodeID,bootID string,epoch,rootGener
 	if rootGeneration!=r.RootGeneration { return ErrReaderGeneration }
 	if r.HeartbeatSequence==math.MaxUint64 { return errors.New("reader heartbeat sequence exhausted") }
 	r.HeartbeatSequence++
+	r.HeartbeatUnixNano=time.Now().UnixNano()
 	return t.writeLocked(r)
 }
 
@@ -162,7 +165,7 @@ func (t *ReaderTable) AdvanceGeneration(slot uint32,nodeID,bootID string,epoch,n
 	if !oldGenerationIOsDrained || newRootGeneration<=r.RootGeneration ||
 		newRootGeneration>t.store.Superblock().MappingSequence { return ErrReaderGeneration }
 	if r.HeartbeatSequence==math.MaxUint64 { return errors.New("reader heartbeat sequence exhausted") }
-	r.RootGeneration=newRootGeneration;r.HeartbeatSequence++
+	r.RootGeneration=newRootGeneration;r.HeartbeatSequence++;r.HeartbeatUnixNano=time.Now().UnixNano()
 	return t.writeLocked(r)
 }
 
@@ -230,13 +233,14 @@ func (t *ReaderTable) SafeGeneration() (uint64,error) {
 
 func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
 	if r.NodeID=="" || r.BootID=="" || len(r.NodeID)>readerIdentitySize || len(r.BootID)>readerIdentitySize ||
-		r.Epoch==0 || (r.State!=ReaderActive && r.State!=ReaderLeaving && r.State!=ReaderFenced && r.State!=ReaderClosed) { return nil,ErrReaderSlot }
+		r.Epoch==0 || r.HeartbeatUnixNano<=0 || (r.State!=ReaderActive && r.State!=ReaderLeaving && r.State!=ReaderFenced && r.State!=ReaderClosed) { return nil,ErrReaderSlot }
 	b:=make([]byte,PageSize);copy(b[:8],readerPageMagic)
 	binary.LittleEndian.PutUint32(b[8:12],readerPageVersion)
 	binary.LittleEndian.PutUint32(b[12:16],uint32(r.State))
 	binary.LittleEndian.PutUint64(b[16:24],r.Epoch)
 	binary.LittleEndian.PutUint64(b[24:32],r.RootGeneration)
 	binary.LittleEndian.PutUint64(b[32:40],r.HeartbeatSequence)
+	binary.LittleEndian.PutUint64(b[304:312],uint64(r.HeartbeatUnixNano))
 	binary.LittleEndian.PutUint16(b[40:42],uint16(len(r.NodeID)))
 	binary.LittleEndian.PutUint16(b[42:44],uint16(len(r.BootID)))
 	copy(b[readerHeaderSize:readerHeaderSize+readerIdentitySize],r.NodeID)
@@ -246,7 +250,8 @@ func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
 }
 
 func decodeReaderRecord(slot uint32,b []byte) (ReaderRecord,error) {
-	if len(b)!=PageSize || string(b[:8])!=readerPageMagic || binary.LittleEndian.Uint32(b[8:12])!=readerPageVersion ||
+	version:=binary.LittleEndian.Uint32(b[8:12])
+	if len(b)!=PageSize || string(b[:8])!=readerPageMagic || (version!=1 && version!=readerPageVersion) ||
 		crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) { return ReaderRecord{},ErrLifecycleCorrupt }
 	state:=ReaderState(binary.LittleEndian.Uint32(b[12:16]))
 	nl,bl:=int(binary.LittleEndian.Uint16(b[40:42])),int(binary.LittleEndian.Uint16(b[42:44]))
@@ -255,10 +260,15 @@ func decodeReaderRecord(slot uint32,b []byte) (ReaderRecord,error) {
 	for _,v:=range b[44:readerHeaderSize] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
 	for _,v:=range b[readerHeaderSize+nl:readerHeaderSize+readerIdentitySize] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
 	for _,v:=range b[readerHeaderSize+readerIdentitySize+bl:readerHeaderSize+2*readerIdentitySize] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
-	for _,v:=range b[readerHeaderSize+2*readerIdentitySize:PageSize-4] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
+	if version==1 {
+		for _,v:=range b[readerHeaderSize+2*readerIdentitySize:PageSize-4] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
+	} else {
+		for _,v:=range b[312:PageSize-4] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
+	}
 	r:=ReaderRecord{Slot:slot,State:state,Epoch:binary.LittleEndian.Uint64(b[16:24]),RootGeneration:binary.LittleEndian.Uint64(b[24:32]),
-		HeartbeatSequence:binary.LittleEndian.Uint64(b[32:40]),NodeID:string(b[readerHeaderSize:readerHeaderSize+nl]),
+		HeartbeatSequence:binary.LittleEndian.Uint64(b[32:40]),HeartbeatUnixNano:int64(binary.LittleEndian.Uint64(b[304:312])),NodeID:string(b[readerHeaderSize:readerHeaderSize+nl]),
 		BootID:string(b[readerHeaderSize+readerIdentitySize:readerHeaderSize+readerIdentitySize+bl])}
 	if r.Epoch==0 || r.HeartbeatSequence==0 {return ReaderRecord{},ErrLifecycleCorrupt}
+	if version==1 { r.HeartbeatUnixNano=0 } else if r.HeartbeatUnixNano<=0 { return ReaderRecord{},ErrLifecycleCorrupt }
 	return r,nil
 }
