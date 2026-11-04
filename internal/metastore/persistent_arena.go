@@ -146,7 +146,7 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 // and the new root descriptor in one WAL transaction. A non-ErrJournalFull
 // error may have an uncertain commit outcome; callers must stop using this
 // instance and reopen/recover rather than aborting the reservation.
-func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
+func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
  if p==nil{return errors.New("nil persistent arena")}
  p.mu.Lock();defer p.mu.Unlock()
  if mappingSequence<=p.rootSequence||retireGeneration>=mappingSequence{return errors.New("invalid lifecycle generation")}
@@ -164,11 +164,22 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
   for _,page:=range pages {if _,ok:=reservedIDs[page.ID];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet};delete(reservedIDs,page.ID)}
   if len(reservedIDs)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
  }
+ newLiveSet:=make(map[uint64]struct{},len(newLivePages))
+ for _,id:=range newLivePages {
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  newLiveSet[id]=struct{}{}
+  if owner,ok:=p.arena.reserved[id];ok {
+   if reservation==nil||owner!=reservation.id {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  } else if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }
+ if rootPage!=NoPage {if _,ok:=newLiveSet[rootPage];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}}
  retiredSeen:=make(map[uint64]struct{},len(retired))
  currentRoot:=p.store.Superblock().RootPage
  for _,id:=range retired {
-  if id< p.arena.start||id-p.arena.start>=p.arena.pages||id==currentRoot {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages||id==currentRoot {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=retiredSeen[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet};retiredSeen[id]=struct{}{}
+  if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
   if _,ok:=p.arena.reserved[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
  }
