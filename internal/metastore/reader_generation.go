@@ -239,7 +239,11 @@ func (t *ReaderTable) snapshotLocked() ([]ReaderRecord,error) {
 }
 
 func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
-	unlock,err:=t.lockReaderSet();if err!=nil{return nil,err};defer unlock()
+	return t.SnapshotContext(context.Background())
+}
+
+func (t *ReaderTable) SnapshotContext(ctx context.Context) ([]ReaderRecord,error) {
+	unlock,err:=acquireReaderSetContext(ctx,t.coordinator,t.store.Superblock().VolumeID);if err!=nil{return nil,err};defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	return t.snapshotLocked()
 }
