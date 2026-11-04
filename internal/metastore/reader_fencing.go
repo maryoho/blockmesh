@@ -61,34 +61,48 @@ func (t *ReaderTable) fenceExpiredReader(ctx context.Context, slot uint32, nodeI
 	staleBefore time.Time, probe ReaderLeaseProbe, fencer fence.Fencer) (retErr error) {
 	if probe == nil || fencer == nil { return ErrReaderNotFenced }
 	if t.coordinator == nil { return ErrReaderCoordinatorRequired }
-	unlock, err := t.lockReaderSet()
-	if err != nil { return err }
+
+	// Lock order is Slot Lease -> Reader Set Barrier -> AG WAL lock. Reader
+	// admission and heartbeats already hold the slot lease before taking the
+	// reader-set barrier; reversing this order here would deadlock join against
+	// recovery.
+	t.mu.Lock()
+	if err:=t.store.Refresh();err!=nil { t.mu.Unlock();return err }
+	reader,err:=t.readLocked(slot)
+	t.mu.Unlock()
+	if err!=nil { return err }
+	if reader.State!=ReaderActive && reader.State!=ReaderLeaving { return ErrReaderIdentity }
+	if reader.NodeID!=nodeID || reader.BootID!=bootID || reader.Epoch!=epoch { return ErrReaderIdentity }
+
+	releaseProbe,err:=probe.AcquireExpiredReader(ctx,t.store.Superblock().VolumeID,reader)
+	if err!=nil { return err }
+	if releaseProbe==nil { return errors.New("reader lease probe returned a nil release function") }
+	defer func(){ retErr=errors.Join(retErr,releaseProbe()) }()
+
+	unlock,err:=t.lockReaderSet()
+	if err!=nil { return err }
 	defer unlock()
 
 	t.mu.Lock()
-	reader, err := t.readLocked(slot)
+	current,err:=t.readLocked(slot)
+	if err!=nil { t.mu.Unlock();return err }
+	if current.State!=ReaderActive && current.State!=ReaderLeaving { t.mu.Unlock();return ErrReaderIdentity }
+	if current.NodeID!=nodeID || current.BootID!=bootID || current.Epoch!=epoch { t.mu.Unlock();return ErrReaderIdentity }
+	if !staleBefore.IsZero() && (current.HeartbeatUnixNano<=0 || !time.Unix(0,current.HeartbeatUnixNano).Before(staleBefore)) {
+		t.mu.Unlock()
+		return ErrReaderNotStale
+	}
 	t.mu.Unlock()
-	if err != nil { return err }
-	if reader.State != ReaderActive && reader.State != ReaderLeaving { return ErrReaderIdentity }
-	if !staleBefore.IsZero() && (reader.HeartbeatUnixNano<=0 || !time.Unix(0,reader.HeartbeatUnixNano).Before(staleBefore)) { return ErrReaderNotStale }
-	if reader.NodeID != nodeID || reader.BootID != bootID || reader.Epoch != epoch { return ErrReaderIdentity }
 
-	releaseProbe, err := probe.AcquireExpiredReader(ctx, t.store.Superblock().VolumeID, reader)
-	if err != nil { return err }
-	if releaseProbe == nil { return errors.New("reader lease probe returned a nil release function") }
-	defer func() { retErr = errors.Join(retErr, releaseProbe()) }()
-
-	if err = fencer.FenceNode(ctx, nodeID, bootID); err != nil {
-		return fmt.Errorf("fence expired reader %s/%s: %w", nodeID, bootID, err)
+	if err=fencer.FenceNode(ctx,nodeID,bootID);err!=nil {
+		return fmt.Errorf("fence expired reader %s/%s: %w",nodeID,bootID,err)
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	current, err := t.readLocked(slot)
-	if err != nil { return err }
-	if current.NodeID != nodeID || current.BootID != bootID || current.Epoch != epoch ||
-		(current.State != ReaderActive && current.State != ReaderLeaving) {
-		return ErrReaderIdentity
-	}
-	current.State = ReaderFenced
+	current,err=t.readLocked(slot)
+	if err!=nil { return err }
+	if current.NodeID!=nodeID || current.BootID!=bootID || current.Epoch!=epoch ||
+		(current.State!=ReaderActive && current.State!=ReaderLeaving) { return ErrReaderIdentity }
+	current.State=ReaderFenced
 	return t.writeLocked(current)
 }
