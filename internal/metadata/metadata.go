@@ -52,10 +52,16 @@ func OpenStoreDevice(d device.Device) (*Store, error) {
 	if errA != nil && errB != nil {
 		return nil, fmt.Errorf("no valid superblock: A=%v; B=%v", errA, errB)
 	}
+	if errA == nil && errB == nil {
+		a,b:=sa,sb
+		a.Generation,b.Generation=0,0
+		if a!=b { return nil, fmt.Errorf("Pool Superblock copies describe different Pool geometry or UUID") }
+	}
 	chosen := sa
 	if errA != nil || (errB == nil && sb.Generation > sa.Generation) {
 		chosen = sb
 	}
+	if d.Size()<0 || uint64(d.Size())<chosen.MetadataSize { return nil, fmt.Errorf("metadata device is smaller than Pool geometry") }
 	return &Store{dev: d, SB: chosen}, nil
 }
 
