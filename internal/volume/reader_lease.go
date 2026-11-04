@@ -26,6 +26,7 @@ type ReaderLease struct {
 	lease lock.Lease
 	lost chan struct{}
 	done chan struct{}
+	monitorDone chan struct{}
 	once sync.Once
 	errMu sync.Mutex
 	err error
@@ -40,6 +41,7 @@ func (l *ReaderLease) Err() error {
 func (l *ReaderLease) Close() error {
 	if l == nil { return nil }
 	l.once.Do(func() { close(l.done) })
+	if l.monitorDone != nil { <-l.monitorDone }
 	if l.lease != nil { return l.lease.Close() }
 	return nil
 }
@@ -55,10 +57,11 @@ func (c ReaderLeaseConfig) AcquireReader(ctx context.Context, volumeID, nodeID, 
 	if resource == "" { return nil, errors.New("reader lease resource is empty") }
 	lease, err := c.Locker.Acquire(ctx, resource)
 	if err != nil { return nil, err }
-	r := &ReaderLease{lease: lease, lost: make(chan struct{}), done: make(chan struct{})}
+	r := &ReaderLease{lease: lease, lost: make(chan struct{}), done: make(chan struct{}), monitorDone: make(chan struct{})}
 	interval := c.PollInterval
 	if interval <= 0 { interval = 250 * time.Millisecond }
 	go func() {
+		defer close(r.monitorDone)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
