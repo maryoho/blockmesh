@@ -514,7 +514,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  if err!=nil {
   // WAL-full is a guaranteed pre-commit failure. Other errors may follow a
   // durable Commit record; retain the reservation until recovery/reopen.
-  if !errors.Is(err,wal.ErrJournalFull) {committed=true}
+  if !errors.Is(err,wal.ErrJournalFull) && !errors.Is(err,metastore.ErrRetireQueueFull) {committed=true}
   return fmt.Errorf("WAL commit COW pages, lifecycle and root: %w",err)
  }
  if err=reservation.Commit();err!=nil {committed=true;return fmt.Errorf("WAL root committed but Arena reservation transition failed: %w",err)}
