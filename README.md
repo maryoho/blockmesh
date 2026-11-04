@@ -22,7 +22,7 @@ The included `metadata.Engine` is still a single-volume JSON snapshot reference 
 * P3-4: multi-node leases, AG coordination, shared reader visibility and SAN fencing.
 * P3-5: crash recovery and fault-injection tests.
 * **P3-3.10 / P3-3.11:** per-volume Recovery Controller supervisor and retryable `VolumeRuntimeManager` lifecycle orchestration.
-* **P3-3.12 / P3-3.12.1:** Linux block-device access; unified BMPOOL02 Pool Superblock and BMDVOL02 Volume Descriptor v2; Pool-level `bm-meta format` / `inspect`; WAL protects LBA 0/1 on formatted Pool devices. The Pool-backed migration of COW B+Tree Store, Persistent Arena, Reader Table and Retire Queue is still pending; do not open a BMPOOL02 device with the legacy `metastore.Store`. See [docs/p3-3.12.md](docs/p3-3.12.md).
+* **P3-3.12 / P3-3.12.1:** Linux block-device access; unified BMPOOL02 Pool Superblock and BMDVOL02 Volume Descriptor v2; Pool-level `bm-meta format` / `inspect`; WAL protects LBA 0/1 on formatted Pool devices. The Pool-backed migration of COW B+Tree Store, Persistent Arena, Reader Table and Retire Queue is still pending; do not open a BMPOOL02 device with the legacy `metastore.Store`. See [docs/p3-3.12.md](docs/p3-3.12.md) and [docs/p3-3.12.1.md](docs/p3-3.12.1.md).
 * P3-6: Linux DM Target integration.
 
 See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md](docs/p3-arena.md), [docs/p3-wal.md](docs/p3-wal.md), and [docs/p3-reader-fencing.md](docs/p3-reader-fencing.md) for the on-disk layout, page lifecycle, WAL contract, and sanlock/SCSI PR integration.
@@ -45,12 +45,10 @@ See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md]
 go test ./...
 
 # Read-only fixed-LBA superblock inspection
-go run ./cmd/bm-meta inspect --device /dev/mapper/mpath-meta --volume-id volume-0001
+go run ./cmd/bm-meta inspect --device /dev/mapper/mpath-meta
 
 # Destructive initialization: calculate geometry for the actual LUN first
-go run ./cmd/bm-meta format --device /dev/mapper/mpath-meta --volume-id volume-0001 \\
-  --arena-start 2 --arena-pages 100000 --lifecycle-start 100002 --lifecycle-pages 16 \\
-  --confirm-format
+go run ./cmd/bm-meta format --device /dev/mapper/mpath-meta --data-start-sector 0 --confirm-format
 
 # Isolated JSON/WAL reference demo
 go run ./cmd/bm-meta demo -wal /var/lib/blockmesh/vol-a.wal -state /var/lib/blockmesh/vol-a.state
