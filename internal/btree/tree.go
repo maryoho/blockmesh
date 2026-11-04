@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -12,12 +13,12 @@ import (
 )
 
 const (
-	leafPageType     uint16 = 1
-	internalPageType uint16 = 2
-	nodeHeaderSize          = 12
-	maxLeafEntries           = (metastore.PagePayloadMax - nodeHeaderSize) / 16
-	maxInternalKeys          = (metastore.PagePayloadMax - 20) / 16
-	maxInternalChildren      = maxInternalKeys + 1
+	leafPageType        uint16 = 1
+	internalPageType    uint16 = 2
+	nodeHeaderSize             = 12
+	maxLeafEntries             = (metastore.PagePayloadMax - nodeHeaderSize) / 16
+	maxInternalKeys            = (metastore.PagePayloadMax - 20) / 16
+	maxInternalChildren        = maxInternalKeys + 1
 )
 
 var (
