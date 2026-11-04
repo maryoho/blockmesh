@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"os"
 	"testing"
 
@@ -289,7 +290,7 @@ func TestMissingDescriptorsNeverAssumeInactiveBankIsEmpty(t *testing.T) {
 		t.Fatalf("write bank1 marker: %d %v", n, writeErr)
 	}
 	if err = d.Sync(); err != nil { t.Fatal(err) }
-	if _, err = New(d, sb, 0); err != ErrCheckpointMissing {
+	if _, err = New(d, sb, 0); !errors.Is(err, ErrCheckpointMissing) {
 		t.Fatalf("expected ErrCheckpointMissing, got %v", err)
 	}
 }
