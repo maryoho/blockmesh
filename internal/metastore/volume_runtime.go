@@ -39,6 +39,10 @@ type VolumeRuntimeMetadata struct {
 	Store       *Store
 	ReaderTable *ReaderTable
 	Arena       *PersistentArena
+	// PublishOwnerEpoch must commit the newly acquired owner lease epoch to
+	// the BMDVOL02 descriptor through the cluster-safe WAL before admission.
+	// It is required for RW runtimes and must be backed by Store.AdvanceOwnerEpoch.
+	PublishOwnerEpoch func(context.Context, uint64) error
 }
 
 // RuntimeMetadataDevice is the complete random-access device contract needed
@@ -55,13 +59,21 @@ type RuntimeReaderSession interface {
 	CloseDrained(context.Context, bool) error
 }
 
+// RuntimeOwnerLease represents a successfully acquired distributed owner
+// lease. Implementations must not return until any previous owner has been
+// fenced from every SAN path; the epoch is monotonically increasing per Volume.
+type RuntimeOwnerLease interface {
+	io.Closer
+	Epoch() uint64
+}
+
 // VolumeRuntimeBackend contains the platform-specific operations. Production
 // implementations must use a block-device backend, distributed sanlock
 // leases, a cluster-safe WAL committer, SAN PR fencing and a real DM I/O drain
 // barrier. FileDevice/MemoryLease/NoopFencer are not production adapters.
 type VolumeRuntimeBackend interface {
 	OpenDevice(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error)
-	AcquireOwnerLease(context.Context, VolumeRuntimeSpec) (io.Closer, error)
+	AcquireOwnerLease(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease, error)
 	RecoverWAL(context.Context, VolumeRuntimeSpec, RuntimeMetadataDevice) error
 	OpenMetadata(context.Context, VolumeRuntimeSpec, RuntimeMetadataDevice) (*VolumeRuntimeMetadata, error)
 	JoinReader(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) (RuntimeReaderSession, error)
@@ -75,7 +87,7 @@ type VolumeRuntimeBackend interface {
 type volumeRuntime struct {
 	spec     VolumeRuntimeSpec
 	device   RuntimeMetadataDevice
-	owner    io.Closer
+	owner    RuntimeOwnerLease
 	metadata *VolumeRuntimeMetadata
 	reader   RuntimeReaderSession
 	enabled  bool
@@ -207,6 +219,18 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	}
 	if err = validateRuntimeMetadata(spec, rt.metadata); err != nil {
 		return fail(err)
+	}
+
+	if spec.Mode == VolumeRuntimeReadWrite {
+		if rt.owner == nil || rt.owner.Epoch() == 0 {
+			return fail(errors.New("RW runtime requires a valid distributed owner lease epoch"))
+		}
+		if rt.metadata.PublishOwnerEpoch == nil {
+			return fail(errors.New("RW runtime requires durable Pool Volume owner-epoch publication"))
+		}
+		if err = rt.metadata.PublishOwnerEpoch(ctx, rt.owner.Epoch()); err != nil {
+			return fail(fmt.Errorf("publish durable Volume owner epoch: %w", err))
+		}
 	}
 
 	if spec.Mode == VolumeRuntimeReadOnly {
