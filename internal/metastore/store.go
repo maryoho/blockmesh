@@ -216,6 +216,10 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 		if image.Offset%PageSize != 0 || len(image.Data) != PageSize || image.Offset > s.sb.TotalPages*PageSize || PageSize > s.sb.TotalPages*PageSize-image.Offset {
 			return fmt.Errorf("invalid extra metadata after-image at offset %d", image.Offset)
 		}
+		if s.sb.LifecyclePages == 0 || image.Offset < s.sb.LifecycleStart*PageSize ||
+			image.Offset >= (s.sb.LifecycleStart+s.sb.LifecyclePages)*PageSize {
+			return fmt.Errorf("extra metadata after-image %d is outside lifecycle region", image.Offset)
+		}
 		if _, exists := seen[image.Offset/PageSize]; exists { return fmt.Errorf("duplicate metadata after-image at offset %d", image.Offset) }
 		seen[image.Offset/PageSize] = struct{}{}
 		images = append(images, PageImage{Offset:image.Offset, Data:append([]byte(nil), image.Data...)})
@@ -380,7 +384,7 @@ func decodeSuperblock(b []byte) (Superblock, error) {
 		return Superblock{}, ErrCorrupt
 	}
 	id := strings.TrimRight(string(b[64:128]), "\x00")
-	s := Superblock{VolumeID: id, Generation: binary.LittleEndian.Uint64(b[16:24]), TotalPages: binary.LittleEndian.Uint64(b[24:32]), ArenaStart: binary.LittleEndian.Uint64(b[32:40]), ArenaPages: binary.LittleEndian.Uint64(b[40:48]), RootPage: binary.LittleEndian.Uint64(b[48:56]), MappingSequence: binary.LittleEndian.Uint64(b[56:64])}
+	s := Superblock{VolumeID: id, Generation: binary.LittleEndian.Uint64(b[16:24]), TotalPages: binary.LittleEndian.Uint64(b[24:32]), ArenaStart: binary.LittleEndian.Uint64(b[32:40]), ArenaPages: binary.LittleEndian.Uint64(b[40:48]), RootPage: binary.LittleEndian.Uint64(b[48:56]), MappingSequence: binary.LittleEndian.Uint64(b[56:64]), LifecycleStart: binary.LittleEndian.Uint64(b[128:136]), LifecyclePages: binary.LittleEndian.Uint64(b[136:144])}
 	if len(id) == 0 || s.TotalPages < 3 || s.TotalPages > uint64(math.MaxInt64/PageSize) || s.ArenaPages == 0 || s.ArenaStart < 2 || s.ArenaStart > s.TotalPages || s.ArenaPages > s.TotalPages-s.ArenaStart || (s.RootPage != NoPage && !(s.RootPage >= s.ArenaStart && s.RootPage-s.ArenaStart < s.ArenaPages)) {
 		return Superblock{}, ErrGeometry
 	}
