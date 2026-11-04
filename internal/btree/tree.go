@@ -46,17 +46,21 @@ type Tree struct {
 	items []Item // sorted in-memory read cache; disk pages remain authoritative
 	pages  []uint64
 	retire *metastore.RetireQueue
+	journal metastore.Committer
 	root   uint64
 }
 
 // Open loads and validates the published tree, then reconstructs the
 // process-local arena allocation state from its reachable pages.
-func Open(store *metastore.Store) (*Tree, error) {
+func Open(store *metastore.Store, journals ...metastore.Committer) (*Tree, error) {
+	if len(journals) > 1 {
+		return nil, errors.New("at most one WAL committer may be supplied")
+	}
 	if store == nil {
 		return nil, errors.New("nil metastore")
 	}
 	sb := store.Superblock()
-	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}
+	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}\n\tif len(journals) == 1 {\n\t\tif journals[0] == nil {\n\t\t\treturn nil, errors.New("nil WAL committer")\n\t\t}\n\t\tt.journal = journals[0]\n\t}
 	var live []uint64
 	if sb.RootPage != metastore.NoPage {
 		seen := make(map[uint64]struct{})
