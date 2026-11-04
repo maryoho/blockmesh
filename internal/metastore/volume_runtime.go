@@ -203,16 +203,11 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	}
 	rt.recoveryStarted = true
 	if err = m.backend.EnableRequests(ctx, spec, rt.metadata); err != nil {
-		stopErr := m.backend.StopRequests(ctx, spec.VolumeID)
-		recoveryErr := m.supervisor.Deactivate(ctx, spec.VolumeID)
-		if recoveryErr != nil {
-			rt.stopping = true
-			m.runtimes[spec.VolumeID] = rt
-			return errors.Join(fmt.Errorf("enable volume requests: %w", err), stopErr, fmt.Errorf("stop recovery after failed activation: %w", recoveryErr))
-		}
-		rt.recoveryStarted = false
-		delete(m.runtimes, spec.VolumeID)
-		return fail(errors.Join(fmt.Errorf("enable volume requests: %w", err), stopErr))
+		// EnableRequests may have partially admitted I/O before returning an
+		// error. Reuse the full teardown path (including drain) rather than
+		// assuming the volume remained quiescent.
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(fmt.Errorf("enable volume requests: %w", err), cleanupErr)
 	}
 	rt.enabled = true
 	return nil
@@ -287,6 +282,12 @@ func (m *VolumeRuntimeManager) Deactivate(ctx context.Context, volumeID string) 
 	if rt == nil {
 		return nil
 	}
+	return m.deactivateLocked(ctx, volumeID, rt)
+}
+
+// deactivateLocked requires m.mu. It deliberately stops at the first unsafe
+// boundary so a retry can continue without releasing resources prematurely.
+func (m *VolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID string, rt *volumeRuntime) error {
 	if !rt.stopping {
 		if err := m.backend.StopRequests(ctx, volumeID); err != nil {
 			return fmt.Errorf("stop new volume requests: %w", err)
