@@ -29,9 +29,12 @@ func loadCowNode(store *metastore.Store, id uint64) (*cowNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read B+Tree page %d: %w", id, err)
 	}
-	if len(p.Payload) < nodeHeaderSize || string(p.Payload[:4]) != "BMTN" ||
-		binary.LittleEndian.Uint16(p.Payload[4:6]) != 1 {
+	if len(p.Payload) < nodeHeaderSize || string(p.Payload[:4]) != "BMTN" {
 		return nil, fmt.Errorf("%w: invalid node header at page %d", ErrCorruptTree, id)
+	}
+	nodeVersion := binary.LittleEndian.Uint16(p.Payload[4:6])
+	if nodeVersion != nodeFormatVersionV1 && nodeVersion != nodeFormatVersion {
+		return nil, fmt.Errorf("%w: unsupported node version %d at page %d", ErrCorruptTree, nodeVersion, id)
 	}
 	count := int(binary.LittleEndian.Uint16(p.Payload[6:8]))
 	level := binary.LittleEndian.Uint16(p.Payload[8:10])
@@ -55,7 +58,7 @@ func loadCowNode(store *metastore.Store, id uint64) (*cowNode, error) {
 			}
 		}
 	case internalPageType:
-		if level == 0 || count > maxInternalKeys ||
+		if level == 0 || count > maxInternalKeys || (count == 0 && nodeVersion < nodeFormatVersion) ||
 			len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
 			return nil, fmt.Errorf("%w: invalid internal page %d", ErrCorruptTree, id)
 		}
@@ -99,8 +102,11 @@ func readSubtreeMinKey(store *metastore.Store, id uint64, expectedLevel uint16) 
 		return 0, err
 	}
 	if len(p.Payload) < nodeHeaderSize || string(p.Payload[:4]) != "BMTN" ||
-		binary.LittleEndian.Uint16(p.Payload[4:6]) != 1 ||
 		binary.LittleEndian.Uint16(p.Payload[8:10]) != expectedLevel {
+		return 0, fmt.Errorf("%w: invalid leftmost path at page %d", ErrCorruptTree, id)
+	}
+	nodeVersion := binary.LittleEndian.Uint16(p.Payload[4:6])
+	if nodeVersion != nodeFormatVersionV1 && nodeVersion != nodeFormatVersion {
 		return 0, fmt.Errorf("%w: invalid leftmost path at page %d", ErrCorruptTree, id)
 	}
 	count := int(binary.LittleEndian.Uint16(p.Payload[6:8]))
@@ -111,7 +117,7 @@ func readSubtreeMinKey(store *metastore.Store, id uint64, expectedLevel uint16) 
 		}
 		return binary.LittleEndian.Uint64(p.Payload[nodeHeaderSize : nodeHeaderSize+8]), nil
 	case internalPageType:
-		if expectedLevel == 0 || count > maxInternalKeys ||
+		if expectedLevel == 0 || count > maxInternalKeys || (count == 0 && nodeVersion < nodeFormatVersion) ||
 			len(p.Payload) != nodeHeaderSize+count*8+(count+1)*8 {
 			return 0, fmt.Errorf("%w: invalid leftmost internal node %d", ErrCorruptTree, id)
 		}
