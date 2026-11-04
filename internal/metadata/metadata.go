@@ -63,7 +63,8 @@ func Init(path string, dataStartSector uint64, force bool) error {
 		return err
 	}
 	defer d.Close()
-	if d.Size() < format.MetadataSize {
+	size := d.Size()
+	if size < 0 || uint64(size) < format.MetadataSize {
 		return fmt.Errorf("metadata device too small: have %d bytes, need at least %d", d.Size(), format.MetadataSize)
 	}
 	if !force {
