@@ -126,6 +126,14 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	if stats := reopenedArena.Stats(); stats.LivePages != 1 {
 		t.Fatalf("reopened PersistentArena live pages=%d, want 1", stats.LivePages)
 	}
+	readerCommitter := &poolImageCommitter{dev: dev}
+	readerTable, err := metastore.NewReaderTable(reopened, readerStart, 1, readerCommitter)
+	if err != nil { t.Fatal(err) }
+	if err = readerTable.Register(0, "node-reader", "boot-1", 1, 1); err != nil { t.Fatal(err) }
+	readers, err := readerTable.Snapshot()
+	if err != nil || len(readers) != 1 || readers[0].State != metastore.ReaderActive {
+		t.Fatalf("Pool-backed ReaderTable snapshot=%+v err=%v", readers, err)
+	}
 
 	// Neither root publication nor COW page writes may alter Pool Superblocks.
 	for _, off := range []uint64{format.SuperAOffset, format.SuperBOffset} {
