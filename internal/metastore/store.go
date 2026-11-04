@@ -255,13 +255,15 @@ func (s *Store) CommitPagesAndPublish(pages []Page, rootPage, mappingSequence ui
 		}
 		images = append(images, PageImage{Offset: page.ID * PageSize, Data: encoded})
 	}
-	if !rootIncluded {
-		// A non-dirty root is allowed: it already exists and is reachable
-		// from the previous committed tree.
-		if rootPage != NoPage {
-			if _, exists := seen[rootPage]; exists {
-				return errors.New("invalid COW root page set")
-			}
+	if !rootIncluded && rootPage != NoPage {
+		// Root collapse may publish an existing child without rewriting it.
+		// Validate that the referenced page is already durable and readable.
+		b := make([]byte, PageSize)
+		if err := readFullAt(s.dev, b, int64(rootPage*PageSize)); err != nil {
+			return fmt.Errorf("read existing COW root page %d: %w", rootPage, err)
+		}
+		if _, err := decodePage(rootPage, b); err != nil {
+			return fmt.Errorf("validate existing COW root page %d: %w", rootPage, err)
 		}
 	}
 
