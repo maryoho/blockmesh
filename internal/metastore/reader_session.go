@@ -35,8 +35,9 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, slot, nodeID, bootID, epoch, onLeaseLost)
 	if err != nil { return nil, err }
 	if err = registrar.RegisterReader(ctx,nodeID,bootID); err != nil {
-		_ = lease.Close()
-		return nil, err
+		cleanupErr:=registrar.UnregisterReader(ctx,nodeID,bootID)
+		if cleanupErr==nil { _ = lease.Close() }
+		return nil, errors.Join(err,cleanupErr)
 	}
 	if err = table.Register(slot, nodeID, bootID, epoch, rootGeneration); err != nil {
 		cleanupErr:=registrar.UnregisterReader(ctx,nodeID,bootID)
