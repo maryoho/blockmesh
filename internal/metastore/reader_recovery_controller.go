@@ -95,14 +95,20 @@ func (c *ReaderRecoveryController) ValidateProduction() error {
 		return errors.New("reader probe and reader-set barrier must use the same distributed sanlock locker")
 	}
 	committer, ok := c.Table.committer.(ClusterSafeCommitter)
-	if !ok || !committer.ClusterSafe() {
-		return ErrClusterSafeCommitterRequired
-	}
+	if !ok || !committer.ClusterSafe() { return ErrClusterSafeCommitterRequired }
+	arenaCommitter, ok := c.Arena.committer.(ClusterSafeCommitter)
+	if !ok || !arenaCommitter.ClusterSafe() { return ErrClusterSafeCommitterRequired }
+	if c.Arena.store != c.Table.store { return ErrGeometry }
 	arenaCoordinator, ok := c.Arena.coordinator.(*SanlockReaderCoordinator)
 	if !ok || arenaCoordinator != coordinator {
 		return errors.New("persistent arena and reader table must share the same sanlock reader-set coordinator")
 	}
 	return nil
+}
+
+func (c *ReaderRecoveryController) VolumeID() string {
+	if c == nil || c.Table == nil || c.Table.store == nil { return "" }
+	return c.Table.store.Superblock().VolumeID
 }
 
 func (c *ReaderRecoveryController) now() time.Time {
