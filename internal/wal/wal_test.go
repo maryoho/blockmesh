@@ -167,7 +167,7 @@ func TestCheckpointSwitchesBanksAndRecoversAfterReopen(t *testing.T) {
 	if string(got[:16]) != "after-checkpoint" { t.Fatalf("post-checkpoint data lost: %q", got[:16]) }
 }
 
-func TestCheckpointDescriptorFallbackAfterTornNewSlot(t *testing.T) {
+func TestCheckpointDescriptorMirrorSurvivesSingleSlotCorruption(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "wal-checkpoint-torn-*.img")
 	if err != nil { t.Fatal(err) }
 	defer f.Close()
@@ -181,8 +181,8 @@ func TestCheckpointDescriptorFallbackAfterTornNewSlot(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if err = j.Commit([]PageUpdate{{Offset: sb.MappingOffset, Image: make([]byte, format.PageSize)}}); err != nil { t.Fatal(err) }
 	if err = j.Checkpoint(); err != nil { t.Fatal(err) }
-	// Corrupt the newest descriptor. The older valid descriptor must remain
-	// selectable; its bank was not overwritten by the attempted switch.
+	// Both descriptor slots are mirrored before Checkpoint returns. Corrupt
+	// one copy and verify the other still selects the current active bank.
 	newestOffset, err := checkpointOffset(sb, 0, j.checkpointSlot)
 	if err != nil { t.Fatal(err) }
 	bad := make([]byte, format.PageSize)
@@ -190,7 +190,7 @@ func TestCheckpointDescriptorFallbackAfterTornNewSlot(t *testing.T) {
 	if err = d.Sync(); err != nil { t.Fatal(err) }
 	reopened, err := New(d, sb, 0)
 	if err != nil { t.Fatal(err) }
-	if reopened.activeBank == j.activeBank {
-		t.Fatal("expected fallback to previous checkpoint bank")
+	if reopened.activeBank != j.activeBank || reopened.checkpointTxID != j.checkpointTxID {
+		t.Fatal("remaining descriptor copy did not preserve current checkpoint")
 	}
 }
