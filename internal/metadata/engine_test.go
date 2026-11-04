@@ -48,7 +48,7 @@ func TestMappingAndRecovery(t *testing.T) {
 		t.Fatalf("lookup=%d err=%v", p, err)
 	}
 	_ = e.Close()
-	e2, err := Open(Config{VolumeID: "v1", NodeID: "n1", StatePath: s, WALPath: w, TotalBlocks: 64, Lease: lease, Fencer: fence.NoopFencer{}})
+	e2, err := OpenEngine(Config{VolumeID: "v1", NodeID: "n1", StatePath: s, WALPath: w, TotalBlocks: 64, Lease: lease, Fencer: fence.NoopFencer{}})
 	if err != nil {
 		t.Fatal(err)
 	}
