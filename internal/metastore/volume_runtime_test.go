@@ -24,6 +24,13 @@ func (d *runtimeTestDevice) Sync()error{return nil}
 func (d *runtimeTestDevice) Size()int64{return 1<<20}
 func (d *runtimeTestDevice) Close()error{return d.closer.Close()}
 
+type runtimeTestOwnerLease struct {
+	closer runtimeTestCloser
+	epoch uint64
+}
+func (l *runtimeTestOwnerLease) Close() error { return l.closer.Close() }
+func (l *runtimeTestOwnerLease) Epoch() uint64 { return l.epoch }
+
 type runtimeTestReader struct { events *[]string; mu *sync.Mutex }
 func (r *runtimeTestReader) CloseDrained(_ context.Context, drained bool) error {
 	if !drained { return ErrUnsafeReclaim }
@@ -56,12 +63,18 @@ func (b *runtimeTestBackend) add(v string) { b.mu.Lock(); defer b.mu.Unlock(); b
 func (b *runtimeTestBackend) snapshot() []string { b.mu.Lock(); defer b.mu.Unlock(); return append([]string(nil),b.events...) }
 func (b *runtimeTestBackend) closer(name string) io.Closer { return &runtimeTestCloser{events:&b.events,mu:&b.mu,name:name} }
 func (b *runtimeTestBackend) OpenDevice(context.Context,VolumeRuntimeSpec)(RuntimeMetadataDevice,error){b.add("device-open");return &runtimeTestDevice{closer:runtimeTestCloser{events:&b.events,mu:&b.mu,name:"device-close"}},nil}
-func (b *runtimeTestBackend) AcquireOwnerLease(context.Context,VolumeRuntimeSpec)(io.Closer,error){b.add("owner-acquire");return b.closer("owner-release"),nil}
+func (b *runtimeTestBackend) AcquireOwnerLease(context.Context,VolumeRuntimeSpec)(RuntimeOwnerLease,error){
+	b.add("owner-acquire")
+	return &runtimeTestOwnerLease{closer:runtimeTestCloser{events:&b.events,mu:&b.mu,name:"owner-release"},epoch:10},nil
+}
 func (b *runtimeTestBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,RuntimeMetadataDevice)error{b.add("wal-recover");return nil}
 func (b *runtimeTestBackend) OpenMetadata(_ context.Context,s VolumeRuntimeSpec,_ RuntimeMetadataDevice)(*VolumeRuntimeMetadata,error){
 	b.add("metadata-open")
 	store:=&Store{sb:Superblock{VolumeID:s.VolumeID,TotalPages:16,ArenaStart:2,ArenaPages:8,RootPage:NoPage}}
-	return &VolumeRuntimeMetadata{Store:store,ReaderTable:&ReaderTable{store:store},Arena:&PersistentArena{store:store}},nil
+	return &VolumeRuntimeMetadata{
+		Store:store,ReaderTable:&ReaderTable{store:store},Arena:&PersistentArena{store:store},
+		PublishOwnerEpoch:func(context.Context,uint64)error{b.add("owner-epoch-publish");return nil},
+	},nil
 }
 func (b *runtimeTestBackend) JoinReader(context.Context,VolumeRuntimeSpec,*VolumeRuntimeMetadata)(RuntimeReaderSession,error){b.add("reader-join");return &runtimeTestReader{events:&b.events,mu:&b.mu},nil}
 func (b *runtimeTestBackend) BuildReaderRecovery(s VolumeRuntimeSpec,_ *VolumeRuntimeMetadata)(ManagedReaderRecovery,error){
@@ -124,7 +137,7 @@ func TestVolumeRuntimeReadWriteRecoversWALAfterOwnerLease(t *testing.T) {
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
 	got:=b.snapshot()
-	assertRuntimeEventOrder(t,got,"device-open","owner-acquire","wal-recover","metadata-open","recovery-build","requests-enable","recovery-start","requests-stop","recovery-stop","io-drain","metadata-close","owner-release","device-close")
+	assertRuntimeEventOrder(t,got,"device-open","owner-acquire","wal-recover","metadata-open","owner-epoch-publish","recovery-build","requests-enable","recovery-start","requests-stop","recovery-stop","io-drain","metadata-close","owner-release","device-close")
 	for _,event:=range got {if event=="reader-join"{t.Fatal("RW owner must not join a RO reader session")}}
 }
 
