@@ -79,7 +79,7 @@ func (t *ReaderTable) fenceExpiredReader(ctx context.Context, slot uint32, nodeI
 	if releaseProbe==nil { return errors.New("reader lease probe returned a nil release function") }
 	defer func(){ retErr=errors.Join(retErr,releaseProbe()) }()
 
-	unlock,err:=t.lockReaderSet()
+	unlock,err:=acquireReaderSetContext(ctx,t.coordinator,t.store.Superblock().VolumeID)
 	if err!=nil { return err }
 	defer unlock()
 
