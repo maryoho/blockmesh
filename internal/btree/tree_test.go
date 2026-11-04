@@ -65,7 +65,6 @@ func TestPutGetReplaceDeleteAndReopen(t *testing.T) {
 		if i == 3 { continue }
 		got, err := reopened.Get(i*3)
 		want := i + 1000
-		if i == 3 { want = 0 }
 		if err != nil || got != want { t.Fatalf("reopened Get(%d) = %d, %v; want %d", i*3, got, err, want) }
 	}
 	if got := len(reopened.Snapshot()); got != 269 { t.Fatalf("snapshot has %d items, want 269", got) }
