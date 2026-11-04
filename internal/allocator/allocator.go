@@ -37,11 +37,9 @@ func New(store MetadataStore, locks lock.Locker) (*Allocator, error) {
 	return &Allocator{Store: store, Locks: locks}, nil
 }
 
-// AllocateOne allocates one 4MiB physical block from ag and atomically publishes
-// the supplied Mapping page. buildMapping receives the old page image and the
-// chosen global physical block, and must return a complete 4KiB new page image.
-// mappingOffset must point into the Mapping region. The caller's Volume Owner
-// lease is represented by the volume:<volumeID> lock resource.
+// AllocateOne is a legacy Bitmap+Mapping WAL helper. It does not publish a
+// Volume Descriptor. New callers requiring an atomically published Volume
+// root must use AllocateOneTxn.
 func (a *Allocator) AllocateOne(ctx context.Context, volumeLease lock.Lease, volumeID string, ag uint32, mappingOffset uint64, buildMapping func(oldPage []byte, physicalBlock uint64) ([]byte, error)) (uint64, error) {
 	sb := a.Store.Superblock()
 	if volumeID == "" {
