@@ -162,9 +162,8 @@ func (t *ReaderTable) Snapshot() ([]ReaderRecord,error) {
 	return out,nil
 }
 
-// SafeGeneration is the minimum root generation held by any non-fenced
-// reader. No readers yields MaxUint64. Leaving readers remain pinned until
-// their I/O is drained or the fencer confirms revocation.
+// SafeGeneration is the minimum root generation held by any Active or
+// Leaving reader. Gracefully Closed and SAN Fenced slots no longer pin pages.
 func (t *ReaderTable) SafeGeneration() (uint64,error) {
 	readers,err:=t.Snapshot();if err!=nil{return 0,err}
 	safe:=uint64(math.MaxUint64)
@@ -195,7 +194,7 @@ func decodeReaderRecord(slot uint32,b []byte) (ReaderRecord,error) {
 	state:=ReaderState(binary.LittleEndian.Uint32(b[12:16]))
 	nl,bl:=int(binary.LittleEndian.Uint16(b[40:42])),int(binary.LittleEndian.Uint16(b[42:44]))
 	if nl==0 || bl==0 || nl>readerIdentitySize || bl>readerIdentitySize ||
-		(state!=ReaderActive && state!=ReaderLeaving && state!=ReaderFenced) { return ReaderRecord{},ErrLifecycleCorrupt }
+		(state!=ReaderActive && state!=ReaderLeaving && state!=ReaderFenced && state!=ReaderClosed) { return ReaderRecord{},ErrLifecycleCorrupt }
 	for _,v:=range b[44:readerHeaderSize] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
 	for _,v:=range b[readerHeaderSize+nl:readerHeaderSize+readerIdentitySize] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
 	for _,v:=range b[readerHeaderSize+readerIdentitySize+bl:readerHeaderSize+2*readerIdentitySize] {if v!=0{return ReaderRecord{},ErrLifecycleCorrupt}}
