@@ -15,7 +15,7 @@ type memoryDevice struct {
 }
 
 func newMemoryDevice(pages int) *memoryDevice {
-	return &memoryDevice{b: make([]byte, pages*metastore.PageSize)}
+	return &memoryDevice{b: make([]byte, pages*int(metastore.PageSize))}
 }
 func (d *memoryDevice) ReadAt(p []byte, off int64) (int, error) {
 	d.mu.Lock()
