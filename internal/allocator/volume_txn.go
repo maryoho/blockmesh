@@ -76,6 +76,7 @@ func readVolumeDescriptorPair(store MetadataStore,pairOffset uint64,volumeID str
   if allZeroPage(b){continue}
   d,err:=DecodeVolumeDescriptor(b);if err!=nil{continue}
   if d.VolumeID!=volumeID{return VolumeDescriptor{},0,fmt.Errorf("Volume Descriptor belongs to %q, not %q",d.VolumeID,volumeID)}
+  if found&&d.Generation==best.Generation&&d!=best{return VolumeDescriptor{},0,fmt.Errorf("conflicting Volume Descriptor copies at generation %d",d.Generation)}
   if !found||d.Generation>best.Generation{best,bestSlot,found=d,slot,true}
  }
  if !found{return VolumeDescriptor{},0,fmt.Errorf("no valid Volume Descriptor copy")}
@@ -102,6 +103,7 @@ func (a *Allocator) AllocateOneTxn(ctx context.Context,lease lock.Lease,volumeID
  journal,err:=wal.New(a.Store.Device(),sb,ag);if err!=nil{return 0,err}
  vd,activeSlot,err:=readVolumeDescriptorPair(a.Store,pairOffset,volumeID);if err!=nil{return 0,err}
  if vd.OwnerEpoch!=ownerEpoch{return 0,errors.New("Volume Descriptor OwnerEpoch mismatch")}
+ if vd.AG>=sb.AGCount||vd.BitmapSequence==0{return 0,errors.New("Volume Descriptor AG/BitmapSequence is invalid")}
  if vd.MappingRootOffset%format.PageSize!=0||vd.MappingRootOffset<sb.MappingOffset||vd.MappingRootOffset>sb.CheckpointOffset||format.PageSize>sb.CheckpointOffset-vd.MappingRootOffset{return 0,errors.New("current Mapping root is outside Mapping region")}
  if mappingOffset==vd.MappingRootOffset{return 0,errors.New("new Mapping page must be a fresh COW page")}
  if vd.Generation==^uint64(0)||vd.VolumeSequence==^uint64(0){return 0,errors.New("Volume Descriptor sequence exhausted")}
