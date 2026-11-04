@@ -55,7 +55,7 @@ func FormatLifecycle(store *Store) error {
  existingQueue:=make([]byte,PageSize);if err=readFullAt(store.dev,existingQueue,int64(queueOff));err!=nil{return err}
  if !allZeroLifecycle(existingState)||!allZeroLifecycle(existingQueue){return ErrLifecycleAlreadyInitialized}
  state:=encodeLifecycleState(1,store.Superblock().MappingSequence)
- queue:=encodeRetireQueue(nil)
+ queue,err:=encodeRetireQueue(nil,1);if err!=nil{return err}
  if err=writeFullAt(store.dev,state,int64(stateOff));err!=nil{return err}
  if err=writeFullAt(store.dev,queue,int64(queueOff));err!=nil{return err}
  return store.Sync()
@@ -80,10 +80,11 @@ func decodeLifecycleState(b []byte)(uint64,uint64,error){
  return binary.LittleEndian.Uint64(b[16:24]),binary.LittleEndian.Uint64(b[24:32]),nil
 }
 
-func encodeRetireQueue(batches []RetireBatch)([]byte,error){
+func encodeRetireQueue(batches []RetireBatch,generation uint64)([]byte,error){
  count:=0
  for _,batch:=range batches { if len(batch.PageIDs)==0 {continue}; if len(batch.PageIDs)>MaxPersistentRetiredPages-count{return nil,ErrRetireQueueFull};count+=len(batch.PageIDs) }
  b:=make([]byte,PageSize);copy(b[:8],lifecycleQueueMagic);binary.LittleEndian.PutUint32(b[8:12],lifecycleVersion);binary.LittleEndian.PutUint32(b[12:16],uint32(count))
+ binary.LittleEndian.PutUint64(b[16:24],generation)
  off:=lifecycleHeaderSize
  for _,batch:=range batches { for _,id:=range batch.PageIDs {
   binary.LittleEndian.PutUint64(b[off:off+8],batch.RetireGeneration)
@@ -93,22 +94,23 @@ func encodeRetireQueue(batches []RetireBatch)([]byte,error){
  return b,nil
 }
 
-func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,error){
+func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
  if len(b)!=PageSize||string(b[:8])!=lifecycleQueueMagic||binary.LittleEndian.Uint32(b[8:12])!=lifecycleVersion||
-  crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) {return nil,ErrLifecycleCorrupt}
+  crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) {return nil,0,ErrLifecycleCorrupt}
  count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,ErrLifecycleCorrupt}
- for _,v:=range b[16:lifecycleHeaderSize]{if v!=0{return nil,ErrLifecycleCorrupt}}
+ for _,v:=range b[24:lifecycleHeaderSize]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
+ queueGeneration:=binary.LittleEndian.Uint64(b[16:24])
  batches:=make([]RetireBatch,0);index:=make(map[uint64]int);seen:=make(map[uint64]struct{},count)
  off:=lifecycleHeaderSize;sb:=store.Superblock()
  for i:=0;i<count;i++ {
   generation:=binary.LittleEndian.Uint64(b[off:off+8]);id:=binary.LittleEndian.Uint64(b[off+8:off+16]);off+=lifecycleRecordSize
   if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||generation>sb.MappingSequence {return nil,ErrLifecycleCorrupt}
-  if _,ok:=seen[id];ok{return nil,ErrLifecycleCorrupt};seen[id]=struct{}{}
+  if _,ok:=seen[id];ok{return nil,0,ErrLifecycleCorrupt};seen[id]=struct{}{}
   batchIndex,ok:=index[generation];if !ok {batchIndex=len(batches);index[generation]=batchIndex;batches=append(batches,RetireBatch{RetireGeneration:generation})}
   batches[batchIndex].PageIDs=append(batches[batchIndex].PageIDs,id)
  }
- for _,v:=range b[off:PageSize-4]{if v!=0{return nil,ErrLifecycleCorrupt}}
- return batches,nil
+ for _,v:=range b[off:PageSize-4]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
+ return batches,queueGeneration,nil
 }
 
 // NewPersistentArena restores live pages from the root graph and durable
@@ -120,8 +122,8 @@ func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*Pe
  stateImage:=make([]byte,PageSize);if err=readFullAt(store.dev,stateImage,int64(stateOff));err!=nil{return nil,err}
  queueImage:=make([]byte,PageSize);if err=readFullAt(store.dev,queueImage,int64(queueOff));err!=nil{return nil,err}
  generation,rootSequence,err:=decodeLifecycleState(stateImage);if err!=nil{return nil,err}
- batches,err:=decodeRetireQueue(queueImage,store);if err!=nil{return nil,err}
- if rootSequence!=store.Superblock().MappingSequence{return nil,ErrLifecycleCorrupt}
+ batches,queueGeneration,err:=decodeRetireQueue(queueImage,store);if err!=nil{return nil,err}
+ if rootSequence!=store.Superblock().MappingSequence||queueGeneration!=generation{return nil,ErrLifecycleCorrupt}
  live:=append([]uint64(nil),livePages...)
  for _,batch:=range batches {live=append(live,batch.PageIDs...)}
  arena,err:=NewArena(store,live);if err!=nil{return nil,err}
@@ -170,7 +172,7 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
  p.arena.mu.Unlock()
  nextBatches:=make([]RetireBatch,len(p.batches));for i,b:=range p.batches{nextBatches[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
  if len(retired)>0 {nextBatches=append(nextBatches,RetireBatch{RetireGeneration:retireGeneration,PageIDs:append([]uint64(nil),retired...)})}
- queueImage,err:=encodeRetireQueue(nextBatches);if err!=nil{return err}
+ queueImage,err:=encodeRetireQueue(nextBatches,p.stateGeneration+1);if err!=nil{return err}
  stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
  sb:=p.store.Superblock();stateOff,queueOff,err:=lifecycleOffsets(sb);if err!=nil{return err}
  extras:=[]PageImage{{Offset:stateOff,Data:stateImage},{Offset:queueOff,Data:queueImage}}
@@ -191,7 +193,7 @@ func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
  for _,b:=range p.batches {if proof.SafeGeneration>b.RetireGeneration {release=append(release,b.PageIDs...)}else{kept=append(kept,b)}}
  if len(release)==0{return 0,nil}
  if p.stateGeneration==math.MaxUint64{return 0,errors.New("lifecycle generation exhausted")}
- queueImage,err:=encodeRetireQueue(kept);if err!=nil{return 0,err}
+ queueImage,err:=encodeRetireQueue(kept,p.stateGeneration+1);if err!=nil{return 0,err}
  stateImage:=encodeLifecycleState(p.stateGeneration+1,p.rootSequence)
  stateOff,queueOff,err:=lifecycleOffsets(p.store.Superblock());if err!=nil{return 0,err}
  if err=p.committer.CommitImages([]PageImage{{Offset:stateOff,Data:stateImage},{Offset:queueOff,Data:queueImage}});err!=nil{return 0,err}
