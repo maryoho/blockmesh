@@ -19,6 +19,7 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 		return zero, errors.New("device, Volume ID and non-zero Owner Epoch are required")
 	}
 	if err := sb.Validate(); err != nil { return zero, fmt.Errorf("invalid Pool Superblock: %w", err) }
+	if dev.Size()<0 || uint64(dev.Size())<sb.MetadataSize { return zero,errors.New("metadata device is smaller than Pool geometry") }
 	if lifecyclePages == 0 { lifecyclePages = 32 }
 	if lifecyclePages < 2 || lifecyclePages > 32 { return zero, errors.New("lifecycle pages must be in [2,32]") }
 	pair, err := format.VolumeDescriptorPairOffset(sb,index)
@@ -59,6 +60,7 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 func ReadVolumeDescriptor(dev device.Device, sb format.Superblock, index uint32) (format.VolumeDescriptor,error) {
 	var zero format.VolumeDescriptor
 	if dev==nil{return zero,errors.New("nil metadata device")}
+	if dev.Size()<0 || uint64(dev.Size())<sb.MetadataSize { return zero,errors.New("metadata device is smaller than Pool geometry") }
 	pair,err:=format.VolumeDescriptorPairOffset(sb,index);if err!=nil{return zero,err}
 	var best format.VolumeDescriptor
 	found:=false
@@ -67,6 +69,7 @@ func ReadVolumeDescriptor(dev device.Device, sb format.Superblock, index uint32)
 		if err:=readAtFull(dev,b,int64(pair+slot*format.PageSize));err!=nil{return zero,err}
 		d,decodeErr:=format.DecodeVolumeDescriptor(b)
 		if decodeErr!=nil { continue }
+		if found && d.VolumeID!=best.VolumeID { return zero,errors.New("Volume Descriptor copies contain different Volume IDs") }
 		if found && d.Generation==best.Generation && d!=best { return zero,fmt.Errorf("conflicting Volume Descriptor copies at generation %d",d.Generation) }
 		if !found || d.Generation>best.Generation { best=d;found=true }
 	}
