@@ -45,7 +45,7 @@ func lifecycleOffsets(sb Superblock)(uint64,uint64,error){
  return sb.LifecycleStart*PageSize,(sb.LifecycleStart+1)*PageSize,nil
 }
 
-// FormatLifecycle initializes the two reserved lifecycle pages. It must be
+// FormatLifecycle initializes the lifecycle checkpoint and every reserved queue page. It must be
 // called only while the metadata device is exclusively owned and before
 // opening the persistent Arena.
 func FormatLifecycle(store *Store) error {
@@ -126,7 +126,7 @@ func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
 // reader generation, I/O drain and fencing conditions.
 func NewPersistentArena(store *Store,livePages []uint64,committer Committer)(*PersistentArena,error){
  if store==nil||committer==nil{return nil,errors.New("store and WAL committer are required")}
- stateOff,queueOff,err:=lifecycleOffsets(store.Superblock());if err!=nil{return nil,err}
+ stateOff,_,err:=lifecycleOffsets(store.Superblock());if err!=nil{return nil,err}
  stateImage:=make([]byte,PageSize);if err=readFullAt(store.dev,stateImage,int64(stateOff));err!=nil{return nil,err}
  generation,rootSequence,err:=decodeLifecycleState(stateImage);if err!=nil{return nil,err}
  batches,queueGeneration,err:=readRetireQueuePages(store);if err!=nil{return nil,err}
@@ -214,7 +214,7 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
 // slots are excluded only after graceful I/O drain or successful SAN fencing.
 func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained bool) (int,error) {
  if readers==nil { return 0,errors.New("durable reader table is required") }
- if readers.store==nil || readers.store.Superblock().VolumeID!=p.store.Superblock().VolumeID { return 0,ErrGeometry }
+ if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
  safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
  return p.Collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
 }
@@ -265,7 +265,7 @@ func encodeRetireQueuePages(batches []RetireBatch, generation, pageCount uint64)
   binary.LittleEndian.PutUint32(b[28:32],uint32(pageCount))
   pages[i]=b
  }
- pageIndex,used:=0,0
+ pageIndex:=0
  for _,batch:=range batches { for _,id:=range batch.PageIDs {
   if pageIndex>=len(pages) { return nil,ErrRetireQueueFull }
   b:=pages[pageIndex]
@@ -274,10 +274,8 @@ func encodeRetireQueuePages(batches []RetireBatch, generation, pageCount uint64)
   binary.LittleEndian.PutUint64(b[off:off+8],batch.RetireGeneration)
   binary.LittleEndian.PutUint64(b[off+8:off+16],id)
   binary.LittleEndian.PutUint32(b[12:16],count+1)
-  used++
   if int(count)+1==MaxPersistentRetiredPages { pageIndex++ }
  }}
- _=used
  for _,b:=range pages { binary.LittleEndian.PutUint32(b[PageSize-4:],crc32.Checksum(b[:PageSize-4],crcTable)) }
  return pages,nil
 }
