@@ -213,6 +213,7 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
 // Table. Non-fenced Active and Leaving slots pin their recorded generations;
 // slots are excluded only after graceful I/O drain or successful SAN fencing.
 func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained bool) (int,error) {
+ if p==nil { return 0,errors.New("nil persistent arena") }
  if readers==nil { return 0,errors.New("durable reader table is required") }
  if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
  safe,err:=readers.SafeGeneration();if err!=nil{return 0,err}
