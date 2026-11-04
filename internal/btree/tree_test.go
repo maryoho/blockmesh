@@ -288,3 +288,24 @@ func TestDeleteQueuesSupersededPagesWithoutReleasingThem(t *testing.T) {
 	if after := tree.ArenaStats(); after != before { t.Fatalf("arena changed without proof: before=%+v after=%+v", before, after) }
 }
 
+
+func TestDeleteRetiresSupersededRoot(t *testing.T) {
+	_, tree, _ := newTree(t, 128)
+	if err := tree.Put(1, 10); err != nil { t.Fatal(err) }
+	if err := tree.Put(2, 20); err != nil { t.Fatal(err) }
+	oldRoot := tree.RootPage()
+	before := len(tree.RetireQueue().Pending())
+	if err := tree.Delete(1); err != nil { t.Fatal(err) }
+	pending := tree.RetireQueue().Pending()
+	if len(pending) != before+1 {
+		t.Fatalf("retire batches=%d, want %d", len(pending), before+1)
+	}
+	last := pending[len(pending)-1]
+	if last.RetireGeneration != 2 || len(last.PageIDs) != 1 || last.PageIDs[0] != oldRoot {
+		t.Fatalf("unexpected delete retirement batch: %+v oldRoot=%d", last, oldRoot)
+	}
+	if got, err := tree.Get(2); err != nil || got != 20 {
+		t.Fatalf("surviving key lookup: got=%d err=%v", got, err)
+	}
+}
+
