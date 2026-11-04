@@ -102,7 +102,11 @@ func runtimeTestSpec(mode VolumeRuntimeMode) VolumeRuntimeSpec {
 func TestVolumeRuntimeReadOnlyLifecycleOrder(t *testing.T) {
 	b:=&runtimeTestBackend{}
 	m,err:=NewVolumeRuntimeManager(b);if err!=nil{t.Fatal(err)}
-	if err=m.Activate(context.Background(),runtimeTestSpec(VolumeRuntimeReadOnly));err!=nil{t.Fatal(err)}
+	spec:=runtimeTestSpec(VolumeRuntimeReadOnly)
+	if err=m.Activate(context.Background(),spec);err!=nil{t.Fatal(err)}
+	if err=m.Activate(context.Background(),spec);err!=nil{t.Fatalf("idempotent activation: %v",err)}
+	conflict:=spec;conflict.Mode=VolumeRuntimeReadWrite
+	if err=m.Activate(context.Background(),conflict);!errors.Is(err,ErrVolumeRuntimeConflict){t.Fatalf("conflicting activation: %v",err)}
 	waitRuntimeRecovery(t,b)
 	if got:=m.ActiveVolumes();!reflect.DeepEqual(got,[]string{"vol-runtime"}){t.Fatalf("active volumes=%v",got)}
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
