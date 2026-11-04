@@ -24,12 +24,12 @@ func TestCollectCapturesEveryPathAndOnlyUsesReadCommands(t *testing.T){
 		r.outputs["sg_persist --in --read-keys --device="+p]=[]byte("  key = 0x00000000000000aa\n  key = 0x00000000000000bb\n")
 		r.outputs["sg_persist --in --read-reservation --device="+p]=[]byte("  Reservation holder = 0x00000000000000aa\n")
 	}
+	r.outputs["multipath -ll /dev/mapper/mpatha"]=[]byte("mpatha (3600000000000001) dm-0\n|- 2:0:0:1 sda 8:0 active ready running\n`- 3:0:0:1 sdb 8:16 active ready running\n")
 	for _,cmd:=range []string{
-		"multipath -ll /dev/mapper/mpatha",
 		"dmsetup info -c --noheadings -o name,uuid,attr,open,segments,events /dev/mapper/mpatha",
 		"dmsetup status /dev/mapper/mpatha","sanlock client status","sanlock status",
 		"lsblk -J -O /dev/mapper/mpatha",
-	}{r.outputs[cmd]=[]byte("ok")}
+	}{if _,ok:=r.outputs[cmd];!ok{r.outputs[cmd]=[]byte("ok")}}
 	e,err:=testCollector(r).Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","vol-1","node-a","boot-a",[]string{"/dev/sda","/dev/sdb"})
 	if err!=nil{t.Fatal(err)}
 	if len(e.Paths)!=2{t.Fatalf("got %d paths",len(e.Paths))}
@@ -46,7 +46,7 @@ func TestCollectRejectsMissingOrDuplicatePaths(t *testing.T){
 	if _,err:=c.Collect(context.Background(),"/dev/mapper/mpatha","/dev/mapper/mpatha","","","",[]string{"/dev/sda","/dev/sda"});err==nil{t.Fatal("expected duplicate path error")}
 }
 func TestVerifyTargetKeyAbsentRequiresEveryPathReadable(t *testing.T){
-	e:=Evidence{Paths:[]PathEvidence{
+	e:=Evidence{PathCoverageVerified:true,Paths:[]PathEvidence{
 		{Device:"/dev/sda",ReadKeys:CommandResult{ExitCode:0},RegisteredKeys:[]string{"aa","bb"}},
 		{Device:"/dev/sdb",ReadKeys:CommandResult{ExitCode:0},RegisteredKeys:[]string{"aa"}},
 	}}
