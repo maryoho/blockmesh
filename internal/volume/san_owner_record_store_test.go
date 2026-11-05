@@ -80,3 +80,12 @@ func TestSANOwnerRecordStoreSyncFailureDoesNotCorruptPreviousCopy(t *testing.T) 
 	// complete record is valid; a torn/corrupt record is not.
 	if err!=nil||!exists||(got!=first && got!=second) { t.Fatalf("invalid record after ambiguous sync: %+v %v %v",got,exists,err) }
 }
+
+func TestSANOwnerRecordStoreRejectsNonMonotonicEpoch(t *testing.T) {
+	dev:=newOwnerRecordMemDevice()
+	store,_:=NewSANOwnerRecordStore(SANOwnerRecordStoreConfig{Device:dev,VolumeID:"vol-a",SlotAOffset:4096,SlotBOffset:8192})
+	first:=OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9}
+	if err:=store.CompareAndSwap(context.Background(),"vol-a",nil,first);err!=nil { t.Fatal(err) }
+	regression:=OwnerRecord{VolumeID:"vol-a",NodeID:"node-b",BootID:"boot-b",Epoch:8}
+	if err:=store.CompareAndSwap(context.Background(),"vol-a",&first,regression);err==nil { t.Fatal("non-monotonic OwnerEpoch accepted") }
+}
