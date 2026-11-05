@@ -107,7 +107,7 @@ func TestOwnerCoordinatorRejectsSameBootIdentityAndEpochOverflow(t *testing.T){
 
 func TestOwnerLeaseReportsSanlockLoss(t *testing.T){
 	underlying:=&ownerTestLease{valid:true}
-	lease:=newOwnerLease(underlying,3,time.Millisecond)
+	lease:=newOwnerLease(underlying,OwnerRecord{VolumeID:"vol",NodeID:"node",BootID:"boot",Epoch:3},time.Millisecond)
 	underlying.mu.Lock();underlying.valid=false;underlying.mu.Unlock()
 	select{
 	case err:=<-lease.Lost():
@@ -131,7 +131,7 @@ func TestOwnerCoordinatorRejectsMissingHistoryAfterFirstOwnerEpoch(t *testing.T)
 
 func TestOwnerLeaseCloseIsIdempotent(t *testing.T) {
 	underlying:=&ownerTestLease{valid:true}
-	lease:=newOwnerLease(underlying,2,time.Millisecond)
+	lease:=newOwnerLease(underlying,OwnerRecord{VolumeID:"vol",NodeID:"node",BootID:"boot",Epoch:2},time.Millisecond)
 	if err:=lease.Close();err!=nil{t.Fatal(err)}
 	if err:=lease.Close();err!=nil{t.Fatal(err)}
 	if !underlying.closed{t.Fatal("underlying lease was not closed")}
@@ -165,4 +165,14 @@ func TestOwnerCoordinatorPublishesIdentityBeforeReservationAndFailsClosed(t *tes
 	}
 	if reservation.prepareCalls!=1 || reservation.calls!=1 || !reservation.recordVisible { t.Fatalf("reservation was not attempted after durable OwnerRecord: %+v",reservation) }
 	if !lease.closed { t.Fatal("failed reservation leaked sanlock Owner lease") }
+}
+
+
+func TestOwnerLeaseCarriesReservationAndOwnerRecordProof(t *testing.T) {
+	underlying:=&ownerTestLease{valid:true}
+	record:=OwnerRecord{VolumeID:"vol",NodeID:"node-b",BootID:"boot-b",Epoch:7}
+	lease:=newOwnerLease(underlying,record,time.Millisecond)
+	if !lease.ReservationVerified() { t.Fatal("Owner lease lacks verified reservation proof") }
+	if got:=lease.OwnerRecord();got!=record { t.Fatalf("OwnerRecord=%+v want %+v",got,record) }
+	_ = lease.Close()
 }
