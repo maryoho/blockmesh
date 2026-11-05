@@ -172,7 +172,7 @@ func TestOwnerLeaseCarriesReservationAndOwnerRecordProof(t *testing.T) {
 	underlying:=&ownerTestLease{valid:true}
 	record:=OwnerRecord{VolumeID:"vol",NodeID:"node-b",BootID:"boot-b",Epoch:7}
 	lease:=newOwnerLease(underlying,record,time.Millisecond)
-	if !lease.ReservationVerified() { t.Fatal("Owner lease lacks verified reservation proof") }
+	if !lease.ReservationVerified() || !lease.PreviousOwnerFenced() || !lease.OldOwnerIODrained() { t.Fatal("Owner lease lacks complete takeover proof") }
 	if got:=lease.OwnerRecord();got!=record { t.Fatalf("OwnerRecord=%+v want %+v",got,record) }
 	_ = lease.Close()
 }
