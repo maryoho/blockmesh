@@ -79,6 +79,7 @@ func TestNewPoolVolumeRuntimeBackendRequiresSharedReaderLocker(t *testing.T) {
 }
 
 type poolOwnerTestReservation struct{}
+func (poolOwnerTestReservation) PrepareOwnerReservation(context.Context,string,string)error{return nil}
 func (poolOwnerTestReservation) EstablishOwnerReservation(context.Context,string,string)error{return nil}
 
 type poolOwnerTestRecords struct{}
