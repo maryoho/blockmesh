@@ -78,6 +78,15 @@ type RuntimeOwnerLease interface {
 // channel without an error is treated as lease loss by the manager.
 type RuntimeOwnerLeaseMonitor interface { Lost() <-chan error }
 
+// RuntimeOwnerLeaseHealth is a synchronous check, independent of the async loss watcher.
+type RuntimeOwnerLeaseHealth interface { Valid() bool }
+
+// RuntimeGuardedRequestAdmission performs the final lease check under the
+// platform's DM admission serialization lock immediately before queue enable.
+type RuntimeGuardedRequestAdmission interface {
+	EnableRequestsGuarded(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata, func() error) error
+}
+
 // RuntimeOwnerLeaseLossHandler must synchronously fail-stop the local data
 // path before returning. PoolVolumeRuntimeBackend implements this contract.
 type RuntimeOwnerLeaseLossHandler interface {
@@ -116,6 +125,7 @@ type volumeRuntime struct {
 	state ownerStateTracker
 	ownerFailureMu sync.Mutex
 	ownerFailure error
+	ownerLossOnce sync.Once
 }
 
 // VolumeRuntimeManager serializes per-volume activation/deactivation and owns
@@ -251,11 +261,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 					if !open || cause == nil { cause = errors.New("Owner Lease lost") }
 					rt.ownerLost.Store(true)
 					_ = rt.state.transition(OwnerStateLeaseLost)
-					if handleErr := handler.HandleOwnerLeaseLost(context.Background(), spec, cause); handleErr != nil {
-						rt.ownerFailureMu.Lock()
-						rt.ownerFailure = handleErr
-						rt.ownerFailureMu.Unlock()
-					}
+					rt.handleOwnerLeaseLoss(handler,spec,cause)
 				}
 			}()
 		} else if _, requiresMonitor := m.backend.(RuntimeOwnerLeaseLossHandler); requiresMonitor {
@@ -264,6 +270,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if err = m.backend.RecoverWAL(ctx, spec, rt.device); err != nil {
 			return fail(fmt.Errorf("recover fixed-LBA WAL: %w", err))
 		}
+		if err = m.checkOwnerLease(rt); err != nil { m.handleOwnerLeaseLoss(rt, spec, err); return fail(err) }
 		if err = rt.state.transition(OwnerStateWALRecovered); err != nil { return fail(err) }
 		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost during WAL recovery")) }
 	}
@@ -278,6 +285,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	if err = rt.state.transition(OwnerStateMetadataReady); err != nil { return fail(err) }
 
 	if spec.Mode == VolumeRuntimeReadWrite {
+		if err = m.checkOwnerLease(rt); err != nil { m.handleOwnerLeaseLoss(rt, spec, err); return fail(err) }
 		if rt.owner == nil || rt.owner.Epoch() == 0 {
 			return fail(errors.New("RW runtime requires a valid distributed owner lease epoch"))
 		}
@@ -287,6 +295,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if err = rt.metadata.PublishOwnerEpoch(ctx, rt.owner.Epoch()); err != nil {
 			return fail(fmt.Errorf("publish durable Volume owner epoch: %w", err))
 		}
+		if err = m.checkOwnerLease(rt); err != nil { m.handleOwnerLeaseLoss(rt, spec, err); return fail(err) }
 		if err = rt.state.transition(OwnerStateOwnerEpochPublished); err != nil { return fail(err) }
 		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost before request admission")) }
 	}
@@ -313,11 +322,27 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
 		return errors.Join(err, cleanupErr)
 	}
-	if rt.ownerLost.Load() {
-		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
-		return errors.Join(errors.New("Owner Lease lost before request admission"), cleanupErr)
+	if spec.Mode == VolumeRuntimeReadWrite {
+		if err = m.checkOwnerLease(rt); err != nil {
+			m.handleOwnerLeaseLoss(rt,spec,err)
+			cleanupErr:=m.deactivateLocked(ctx,spec.VolumeID,rt)
+			return errors.Join(err,cleanupErr)
+		}
 	}
-	if err = m.backend.EnableRequests(ctx, spec, rt.metadata); err != nil {
+	if guarded, ok := m.backend.(RuntimeGuardedRequestAdmission); ok && spec.Mode == VolumeRuntimeReadWrite {
+		err = guarded.EnableRequestsGuarded(ctx,spec,rt.metadata,func() error { return m.checkOwnerLease(rt) })
+	} else {
+		if spec.Mode == VolumeRuntimeReadWrite {
+			if err = m.checkOwnerLease(rt); err != nil {
+				m.handleOwnerLeaseLoss(rt,spec,err)
+				cleanupErr:=m.deactivateLocked(ctx,spec.VolumeID,rt)
+				return errors.Join(err,cleanupErr)
+			}
+		}
+		err = m.backend.EnableRequests(ctx,spec,rt.metadata)
+	}
+	if rt.ownerLost.Load() { m.handleOwnerLeaseLoss(rt,spec,errors.New("Owner Lease lost at DM request admission")) }
+	if err != nil {
 		// EnableRequests may have partially admitted I/O before returning an
 		// error. Reuse the full teardown path (including drain) rather than
 		// assuming the volume remained quiescent.
@@ -330,6 +355,29 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	}
 	rt.enabled = true
 	return nil
+}
+
+func (m *VolumeRuntimeManager) checkOwnerLease(rt *volumeRuntime) error {
+	if rt == nil || rt.owner == nil { return errors.New("Owner Lease is unavailable") }
+	if rt.ownerLost.Load() { return errors.New("Owner Lease loss was reported") }
+	health, ok := rt.owner.(RuntimeOwnerLeaseHealth)
+	if !ok { return nil } // Non-Pool test backends may not expose synchronous health.
+	if health.Valid() { return nil }
+	rt.ownerLost.Store(true)
+	_ = rt.state.transition(OwnerStateLeaseLost)
+	return errors.New("synchronous sanlock Owner Lease validation failed")
+}
+
+func (rt *volumeRuntime) handleOwnerLeaseLoss(handler RuntimeOwnerLeaseLossHandler, spec VolumeRuntimeSpec, cause error) {
+	if rt == nil || handler == nil { return }
+	rt.ownerLossOnce.Do(func() {
+		err := handler.HandleOwnerLeaseLost(context.Background(),spec,cause)
+		if err != nil {
+			rt.ownerFailureMu.Lock()
+			rt.ownerFailure = err
+			rt.ownerFailureMu.Unlock()
+		}
+	})
 }
 
 func validateRuntimeMetadata(spec VolumeRuntimeSpec, metadata *VolumeRuntimeMetadata) error {
