@@ -90,7 +90,7 @@ func TestTwoNodeOwnerTakeoverSerializesAndFencesPreviousOwner(t *testing.T){
 	if second.lease.Epoch()!=3||locker.maxActive.Load()!=1{t.Fatalf("second epoch=%d max concurrent Owners=%d",second.lease.Epoch(),locker.maxActive.Load())}
 	record,exists,err:=recordsA.Load(context.Background(),"vol-a")
 	if err!=nil||!exists||record.NodeID!=second.node||record.Epoch!=3{t.Fatalf("final SAN OwnerRecord=%+v exists=%v err=%v",record,exists,err)}
-	fencer,drain:=fenceA,drainA;if second.node=="node-a"{fencer,drain=fenceB,drainB}
+	fencer,drain:=fenceA,drainA;if second.node=="node-b"{fencer,drain=fenceB,drainB}
 	calls:=fencer.snapshot();if len(calls)!=1||calls[0].NodeID!=first.node{t.Fatalf("fencing calls=%+v",calls)}
 	drained:=drain.snapshot();if len(drained)!=1||drained[0].NodeID!=first.node{t.Fatalf("drain calls=%+v",drained)}
 }
