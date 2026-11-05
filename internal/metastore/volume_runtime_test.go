@@ -325,3 +325,23 @@ func TestVolumeRuntimeGuardRejectsLeaseLossAtFinalAdmissionGate(t *testing.T) {
 	for _,event:=range events{if event=="requests-enable"{t.Fatalf("unguarded request admission occurred: %v",events)}}
 	assertRuntimeEventOrder(t,events,"owner-acquire","wal-recover","owner-epoch-publish","requests-enable-guarded","owner-fail-stop","requests-stop","io-drain","owner-release")
 }
+
+
+func TestVolumeRuntimeChecksOwnerLeaseBeforeWALReplay(t *testing.T) {
+	base:=&runtimeTestBackend{}
+	lease:=&runtimeMonitoredOwnerLease{
+		runtimeTestOwnerLease:&runtimeTestOwnerLease{
+			closer:runtimeTestCloser{events:&base.events,mu:&base.mu,name:"owner-release"},epoch:10,
+		},
+		lost:make(chan error,1),
+	}
+	lease.valid.Store(false)
+	backend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{})}
+	m,err:=NewVolumeRuntimeManager(backend);if err!=nil{t.Fatal(err)}
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));err==nil{t.Fatal("activation proceeded with invalid Owner lease")}
+	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("invalid initial Owner lease did not trigger fail-stop")}
+	for _,event:=range base.snapshot(){
+		if event=="wal-recover"||event=="metadata-open"||event=="requests-enable"{t.Fatalf("unsafe operation ran with invalid Owner lease: %v",base.snapshot())}
+	}
+}
