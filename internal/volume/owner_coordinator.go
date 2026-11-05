@@ -72,15 +72,16 @@ func NewOwnerCoordinator(cfg OwnerCoordinatorConfig) (*OwnerCoordinator, error) 
 }
 
 // AcquireOwner performs the takeover closed loop while holding the exclusive
-// sanlock resource: read previous identity -> PR PREEMPT AND ABORT -> verify
-// all-path fencing in the Fencer -> drain old-owner metadata I/O -> compute a
-// strictly increasing epoch -> prepare new Owner path keys -> fence/drain previous Owner -> CAS-publish
-// the new identity -> establish and verify the new Owner reservation on every
-// SAN path. OwnerRecord is published
-// before RESERVE so an ambiguous reservation outcome always has a durable
-// identity for the next Owner to fence. Path registration happens earlier,
-// before PREEMPT, and by itself does not grant write access. WAL replay and BMDVOL02 OwnerEpoch
-// publication must still complete before data requests are enabled.
+// sanlock resource: load the previous identity -> prepare this initiator's
+// path-scoped PR keys -> PREEMPT AND ABORT and verify the previous Owner on all
+// paths -> drain old-owner metadata I/O -> compute the next epoch -> CAS-publish
+// the new identity -> issue PR OUT RESERVE and verify its holder/type on every
+// path. OwnerRecord is published before RESERVE so an ambiguous reservation
+// outcome always has a durable identity for the next Owner to fence. Key
+// registration happens before PREEMPT because the new initiator's key is
+// needed to issue it; registration alone does not grant write access. WAL
+// replay and BMDVOL02 OwnerEpoch publication must still complete before data
+// requests are enabled.
 func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, bootID string) (result *OwnerLease, retErr error) {
 	if c == nil || ctx == nil { return nil, errors.New("owner coordinator and context are required") }
 	if strings.TrimSpace(volumeID)=="" || strings.TrimSpace(nodeID)=="" || strings.TrimSpace(bootID)=="" {
