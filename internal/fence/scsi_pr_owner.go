@@ -97,7 +97,8 @@ func parseLiveReservation(output string) (uint64, uint8, bool) {
 		strings.Contains(lower, "reservation not held") { return 0, 0, false }
 
 	var key uint64
-	keyCount := 0
+	lowerOutput := strings.ToLower(output)
+	if strings.Count(lowerOutput, "key") != 1 { return 0, 0, false }
 	for _, line := range strings.Split(output, "\n") {
 		l := strings.ToLower(line)
 		idx := strings.Index(l, "key")
@@ -105,14 +106,14 @@ func parseLiveReservation(output string) (uint64, uint8, bool) {
 		rest := strings.TrimSpace(line[idx+len("key"):])
 		rest = strings.TrimLeft(rest, " :=\t")
 		fields := strings.Fields(rest)
-		if len(fields) == 0 { continue }
+		if len(fields) == 0 { return 0, 0, false }
 		value := strings.Trim(fields[0], ",;")
-		if !strings.HasPrefix(strings.ToLower(value), "0x") { continue }
+		if !strings.HasPrefix(strings.ToLower(value), "0x") { return 0, 0, false }
 		n, err := strconv.ParseUint(value[2:], 16, 64)
 		if err != nil { return 0, 0, false }
-		key, keyCount = n, keyCount+1
+		key = n
 	}
-	if keyCount != 1 || key == 0 { return 0, 0, false }
+	if key == 0 { return 0, 0, false }
 
 	var prType uint8
 	typeCount := 0
