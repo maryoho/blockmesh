@@ -74,8 +74,9 @@ func NewOwnerCoordinator(cfg OwnerCoordinatorConfig) (*OwnerCoordinator, error) 
 // AcquireOwner performs the takeover closed loop while holding the exclusive
 // sanlock resource: read previous identity -> PR PREEMPT AND ABORT -> verify
 // all-path fencing in the Fencer -> drain old-owner metadata I/O -> compute a
-// strictly increasing epoch -> CAS-publish the new identity -> establish and
-// verify the new Owner reservation on every SAN path. OwnerRecord is published
+// strictly increasing epoch -> prepare new Owner path keys -> fence/drain previous Owner -> CAS-publish
+// the new identity -> establish and verify the new Owner reservation on every
+// SAN path. OwnerRecord is published
 // before PR mutation so an ambiguous RESERVE outcome always has a durable
 // identity for the next Owner to fence. WAL replay and BMDVOL02 OwnerEpoch
 // publication must still complete before data requests are enabled.
@@ -111,6 +112,13 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 			// recovery path that proves the prior local data path is stopped.
 			return nil,ErrOwnerIdentityReuse
 		}
+	}
+	// The new initiator's path-scoped keys must be registered before it can
+	// issue PREEMPT AND ABORT using those keys against the previous Owner.
+	if err = c.cfg.Reservation.PrepareOwnerReservation(ctx, nodeID, bootID); err != nil {
+		return nil, fmt.Errorf("prepare new Owner SCSI PR registrations: %w", err)
+	}
+	if exists {
 		if err=c.cfg.Fencer.FenceNode(ctx,old.NodeID,old.BootID);err!=nil {
 			return nil,fmt.Errorf("PREEMPT AND ABORT previous Owner %s/%s on all SAN paths: %w",old.NodeID,old.BootID,err)
 		}
