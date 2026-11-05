@@ -120,6 +120,9 @@ func decodeSANOwnerRecord(b []byte, expectedVolume string, index int) (ownerReco
 	if record.VolumeID!=expectedVolume || record.Epoch==0 {
 		return out,ErrSANOwnerRecordCorrupt
 	}
+	for _,v:=range b[12:16] { if v!=0 { return out,ErrSANOwnerRecordCorrupt } }
+	for _,v:=range b[38:40] { if v!=0 { return out,ErrSANOwnerRecordCorrupt } }
+	for _,v:=range b[360:ownerRecordCRCOffset] { if v!=0 { return out,ErrSANOwnerRecordCorrupt } }
 	return ownerRecordSlot{record:record,generation:generation,index:index},nil
 }
 
@@ -186,6 +189,9 @@ func (s *SANOwnerRecordStore) CompareAndSwap(ctx context.Context, volumeID strin
 	generation:=uint64(1)
 	target:=0
 	if exists {
+		if next.Epoch<=current.record.Epoch {
+			return fmt.Errorf("OwnerRecord epoch %d must exceed durable epoch %d",next.Epoch,current.record.Epoch)
+		}
 		if current.generation==math.MaxUint64 { return errors.New("SAN OwnerRecord generation exhausted") }
 		generation=current.generation+1
 		target=1-current.index
