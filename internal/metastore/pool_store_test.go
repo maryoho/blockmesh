@@ -3,11 +3,13 @@ package metastore_test
 import (
 	"errors"
 	"os"
+	"context"
 	"testing"
 
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
+	"blockmesh/internal/volume"
 )
 
 type poolImageCommitter struct {
@@ -48,7 +50,7 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	pair, err := format.VolumeDescriptorPairOffset(pool, 3)
 	if err != nil { t.Fatal(err) }
 	slotBytes := (pool.MetadataSize-pool.ReservedOffset)/uint64(format.MaxVolumeDescriptors)/format.PageSize*format.PageSize
-	arenaStart := pool.ReservedOffset/format.PageSize + 3*(slotBytes/format.PageSize)
+	arenaStart := pool.ReservedOffset/format.PageSize + 3*(slotBytes/format.PageSize) + format.OwnerRecordPages
 	desc := format.VolumeDescriptor{
 		VolumeID: "pool-volume-3", AG: 0, Generation: 1, VolumeSequence: 1,
 		MappingRootOffset: pool.MappingOffset, BitmapSequence: 1, OwnerEpoch: 9,
@@ -69,6 +71,14 @@ func TestOpenPoolVolumeAndPublishRootThroughDescriptor(t *testing.T) {
 	// starts at the descriptor's ArenaStart, not at a private device LBA 2.
 	if err = metastore.FormatLifecycle(store); err != nil { t.Fatal(err) }
 	committer := &poolImageCommitter{dev: dev, fail: true}
+	ownerA, ownerB, err := store.OwnerRecordRange()
+	if err != nil { t.Fatal(err) }
+	ownerStore, err := volume.NewSANOwnerRecordStore(volume.SANOwnerRecordStoreConfig{Device:dev,VolumeID:"pool-volume-3",SlotAOffset:ownerA,SlotBOffset:ownerB})
+	if err != nil { t.Fatalf("construct SAN OwnerRecordStore from Pool range: %v",err) }
+	firstOwner:=volume.OwnerRecord{VolumeID:"pool-volume-3",NodeID:"node-a",BootID:"boot-a",Epoch:10}
+	if err=ownerStore.CompareAndSwap(context.Background(),"pool-volume-3",nil,firstOwner);err!=nil{t.Fatal(err)}
+	gotOwner,exists,err:=ownerStore.Load(context.Background(),"pool-volume-3")
+	if err!=nil||!exists||gotOwner!=firstOwner{t.Fatalf("SAN OwnerRecord roundtrip=%+v exists=%v err=%v",gotOwner,exists,err)}
 	readerStart, readerPages, err := store.ReaderTableRange()
 	if err != nil { t.Fatal(err) }
 	if readerPages != 128 { t.Fatalf("Reader Table pages=%d, want 128", readerPages) }
@@ -178,7 +188,7 @@ func TestPoolVolumeOwnerEpochIsWALPublishedAndMonotonic(t *testing.T) {
 	pair, err := format.VolumeDescriptorPairOffset(pool, index)
 	if err != nil { t.Fatal(err) }
 	slotBytes := (pool.MetadataSize-pool.ReservedOffset)/uint64(format.MaxVolumeDescriptors)/format.PageSize*format.PageSize
-	arenaStart := pool.ReservedOffset/format.PageSize + uint64(index)*(slotBytes/format.PageSize)
+	arenaStart := pool.ReservedOffset/format.PageSize + uint64(index)*(slotBytes/format.PageSize) + format.OwnerRecordPages
 	desc := format.VolumeDescriptor{
 		VolumeID:"owner-epoch-volume", AG:0, Generation:1, VolumeSequence:1,
 		MappingRootOffset:pool.MappingOffset, BitmapSequence:1, OwnerEpoch:7,
