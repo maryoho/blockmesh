@@ -16,8 +16,8 @@ import (
 	"blockmesh/internal/volume"
 )
 
-type poolRuntimeTestDMGate struct { events []string }
-func (g *poolRuntimeTestDMGate) FenceCurrent(_ context.Context,d string)error{g.events=append(g.events,"fence-current:"+d);return nil}
+type poolRuntimeTestDMGate struct { events []string; fenceCurrentErr error }
+func (g *poolRuntimeTestDMGate) FenceCurrent(_ context.Context,d string)error{g.events=append(g.events,"fence-current:"+d);return g.fenceCurrentErr}
 func (g *poolRuntimeTestDMGate) Prepare(_ context.Context,d string,e uint64)(uint64,error){g.events=append(g.events,fmt.Sprintf("prepare:%s:%d",d,e));return 0xab,nil}
 func (g *poolRuntimeTestDMGate) Enable(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("enable:%s:%d:%x",d,e,instance));return nil}
 func (g *poolRuntimeTestDMGate) Fence(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("fence:%s:%d:%x",d,e,instance));return nil}
@@ -222,4 +222,21 @@ func TestPoolRuntimeGuardedAdmissionEnablesOnlyAfterKernelPrepareAndLeaseGuard(t
 	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
 	want:=[]string{"fence-current:/dev/mapper/vol-a","prepare:/dev/mapper/vol-a:12","enable:/dev/mapper/vol-a:12:ab"}
 	if !reflect.DeepEqual(gate.events,want){t.Fatalf("kernel gate sequence=%v want=%v",gate.events,want)}
+}
+
+func TestPoolRuntimeRejectsOwnerWhenLocalDMTargetCannotBeFenced(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:15},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	cfg:=validPoolRuntimeConfig()
+	gate:=&poolRuntimeTestDMGate{fenceCurrentErr:errors.New("local DM target did not drain")}
+	cfg.DMGate=gate
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if got,err:=backend.AcquireOwnerLease(context.Background(),spec);err==nil||got!=nil{
+		t.Fatalf("Owner returned despite local DM fence failure: lease=%v err=%v",got,err)
+	}
+	if !lease.closed{t.Fatal("Owner Lease was not released after local DM fence failure")}
 }

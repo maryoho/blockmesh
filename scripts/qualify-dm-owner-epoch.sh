@@ -90,6 +90,8 @@ old_instance=$instance
 instance=$(target_instance)
 [[ -n "$instance" && "$instance" != "$old_instance" ]] || { echo "table reload did not rotate target instance ID" >&2; exit 1; }
 expect_message_rejected "owner_enable 42 $old_instance"
+expect_message_rejected "owner_fence 42 $old_instance"
+expect_message_rejected "owner_prepare 43 $old_instance"
 dmsetup message "$name" 0 "owner_prepare 43 $instance"
 dmsetup message "$name" 0 "owner_enable 43 $instance"
 
