@@ -40,7 +40,8 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 		spin_unlock_irqrestore(&bm->state_lock, flags);
 	}
 	bio_set_dev(bio, bm->dev->bdev);
-	bio->bi_iter.bi_sector = bio->bi_iter.bi_sector - ti->begin + bm->start;
+	if (bio_sectors(bio))
+		bio->bi_iter.bi_sector = bm->start + dm_target_offset(ti, bio->bi_iter.bi_sector);
 	return DM_MAPIO_REMAPPED;
 }
 static int bm_end_io(struct dm_target *ti, struct bio *bio, blk_status_t *error)
@@ -189,6 +190,8 @@ static int bm_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ti->per_io_data_size = sizeof(struct bm_bio_ctx);
 	ti->num_flush_bios = 1;
 	ti->num_discard_bios = 1;
+	ti->num_secure_erase_bios = 1;
+	ti->num_write_same_bios = 1;
 	ti->num_write_zeroes_bios = 1;
 	return 0;
 }
