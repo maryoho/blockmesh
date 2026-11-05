@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"blockmesh/internal/device"
@@ -254,7 +255,20 @@ func (b *PoolVolumeRuntimeBackend) EnableRequests(ctx context.Context, spec Volu
 }
 func (b *PoolVolumeRuntimeBackend) EnableRequestsGuarded(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata, guard func() error) error {
 	if guard == nil { return errors.New("Owner admission guard is required") }
-	return b.cfg.EnableRequestsGuarded(ctx, spec, meta, guard)
+	var called atomic.Bool
+	err := b.cfg.EnableRequestsGuarded(ctx, spec, meta, func() error {
+		called.Store(true)
+		return guard()
+	})
+	if !called.Load() {
+		// A platform hook that returns without consulting the lease guard has
+		// violated the admission contract. Close and drain defensively in case
+		// it partially enabled the DM queue.
+		stopErr := b.cfg.StopRequests(ctx,spec.VolumeID)
+		drainErr := b.cfg.DrainMetadataIO(ctx,spec.VolumeID)
+		return errors.Join(errors.New("DM admission hook returned without invoking Owner health guard"),err,stopErr,drainErr)
+	}
+	return err
 }
 func (b *PoolVolumeRuntimeBackend) StopRequests(ctx context.Context, volumeID string) error {
 	return b.cfg.StopRequests(ctx, volumeID)
