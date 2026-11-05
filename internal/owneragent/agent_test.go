@@ -3,6 +3,8 @@ package owneragent
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -76,4 +78,11 @@ func TestVerifyPairFailsClosedOnProbeError(t *testing.T) {
 	b.Probes[0].Result.ExitCode=1
 	r:=VerifyPair(a,b)
 	if r.Passed {t.Fatal("probe failure accepted")}
+}
+
+func TestTwoNodeCaptureScriptSyntax(t *testing.T) {
+	script:=filepath.Join("..","..","scripts","owner-san-two-node-capture.sh")
+	if out,err:=exec.Command("bash","-n",script).CombinedOutput();err!=nil {
+		t.Fatalf("bash -n %s: %v\\n%s",script,err,out)
+	}
 }
