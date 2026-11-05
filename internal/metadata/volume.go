@@ -28,10 +28,11 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 	// a bootstrap allocator; later Pool extent management may replace it.
 	reservedBytes:=sb.MetadataSize-sb.ReservedOffset
 	slotBytes:=(reservedBytes/uint64(format.MaxVolumeDescriptors))/format.PageSize*format.PageSize
-	if slotBytes/format.PageSize<=lifecyclePages+format.ReaderTablePages+1 { return zero,errors.New("reserved Pool metadata is too small for Arena, Lifecycle and Reader Table extents") }
+	if slotBytes/format.PageSize<=lifecyclePages+format.ReaderTablePages+format.OwnerRecordPages+1 { return zero,errors.New("reserved Pool metadata is too small for OwnerRecord, Arena, Lifecycle and Reader Table extents") }
 	start:=sb.ReservedOffset+uint64(index)*slotBytes
-	arenaPages:=slotBytes/format.PageSize-lifecyclePages-format.ReaderTablePages
-	arenaStart:=start/format.PageSize
+	ownerRecordStart:=start/format.PageSize
+	arenaPages:=slotBytes/format.PageSize-lifecyclePages-format.ReaderTablePages-format.OwnerRecordPages
+	arenaStart:=ownerRecordStart+format.OwnerRecordPages
 	lifecycleStart:=arenaStart+arenaPages
 	readerTableStart:=lifecycleStart+lifecyclePages
 	for slot:=uint64(0);slot<2;slot++ {
@@ -48,6 +49,9 @@ func InitVolume(dev device.Device, sb format.Superblock, index uint32, volumeID 
 	if err=d.ValidatePool(sb);err!=nil{return zero,fmt.Errorf("invalid Volume Descriptor geometry: %w",err)}
 	if err=validateVolumeDescriptorSlot(sb,index,d);err!=nil{return zero,fmt.Errorf("invalid Volume slot geometry: %w",err)}
 	image,err:=d.Encode();if err!=nil{return zero,err}
+	// Initialize both SAN OwnerRecord pages before making the Volume visible.
+	// A zero pair represents "no previous Owner" for a newly initialized Volume.
+	if err=zeroRegion(dev,ownerRecordStart*format.PageSize,format.OwnerRecordPages*format.PageSize);err!=nil{return zero,err}
 	// Initialize the lifecycle extent before making the descriptor visible.
 	if err=zeroRegion(dev,lifecycleStart*format.PageSize,lifecyclePages*format.PageSize);err!=nil{return zero,err}
 	// Reader slots are one durable page each and must start Empty even when
@@ -91,7 +95,9 @@ func validateVolumeDescriptorSlot(sb format.Superblock,index uint32,d format.Vol
 	slotPages:=slotBytes/format.PageSize
 	slotStart:=sb.ReservedOffset/format.PageSize+uint64(index)*slotPages
 	slotEnd:=slotStart+slotPages
-	if d.ArenaStart<slotStart||d.ArenaStart>slotEnd||d.ArenaPages>slotEnd-d.ArenaStart{return format.ErrVolumeDescriptor}
-	if d.LifecyclePages!=0&&(d.LifecycleStart<slotStart||d.LifecycleStart>slotEnd||d.LifecyclePages>slotEnd-d.LifecycleStart){return format.ErrVolumeDescriptor}
+	ownerEnd:=slotStart+format.OwnerRecordPages
+	readerStart:=slotEnd-format.ReaderTablePages
+	if ownerEnd>slotEnd || d.ArenaStart<ownerEnd || d.ArenaStart>readerStart || d.ArenaPages>readerStart-d.ArenaStart{return format.ErrVolumeDescriptor}
+	if d.LifecyclePages!=0&&(d.LifecycleStart<d.ArenaStart+d.ArenaPages||d.LifecycleStart>readerStart||d.LifecyclePages>readerStart-d.LifecycleStart){return format.ErrVolumeDescriptor}
 	return nil
 }
