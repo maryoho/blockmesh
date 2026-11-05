@@ -77,8 +77,9 @@ func NewOwnerCoordinator(cfg OwnerCoordinatorConfig) (*OwnerCoordinator, error) 
 // strictly increasing epoch -> prepare new Owner path keys -> fence/drain previous Owner -> CAS-publish
 // the new identity -> establish and verify the new Owner reservation on every
 // SAN path. OwnerRecord is published
-// before PR mutation so an ambiguous RESERVE outcome always has a durable
-// identity for the next Owner to fence. WAL replay and BMDVOL02 OwnerEpoch
+// before RESERVE so an ambiguous reservation outcome always has a durable
+// identity for the next Owner to fence. Path registration happens earlier,
+// before PREEMPT, and by itself does not grant write access. WAL replay and BMDVOL02 OwnerEpoch
 // publication must still complete before data requests are enabled.
 func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, bootID string) (result *OwnerLease, retErr error) {
 	if c == nil || ctx == nil { return nil, errors.New("owner coordinator and context are required") }
