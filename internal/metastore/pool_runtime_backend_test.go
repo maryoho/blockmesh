@@ -2,6 +2,7 @@ package metastore
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -124,7 +125,7 @@ func (o poolRuntimeProofOwner) AcquireFencedOwner(context.Context,VolumeRuntimeS
 
 func TestPoolRuntimeRequiresMatchingOwnerRecordAndPRProof(t *testing.T) {
 	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
-	for _,tc:=range []struct{name string;record volume.OwnerRecord;verified bool}{
+	for _,tc:=range []struct{name string;record volume.OwnerRecord;epoch uint64;verified bool}{
 		{name:"matching",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:true},
 		{name:"wrong node",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-b",BootID:"boot-a",Epoch:9},verified:true},
 		{name:"reservation unverified",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:false},
