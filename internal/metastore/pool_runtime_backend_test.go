@@ -78,6 +78,9 @@ func TestNewPoolVolumeRuntimeBackendRequiresSharedReaderLocker(t *testing.T) {
 	}
 }
 
+type poolOwnerTestReservation struct{}
+func (poolOwnerTestReservation) EstablishOwnerReservation(context.Context,string,string)error{return nil}
+
 type poolOwnerTestRecords struct{}
 func (poolOwnerTestRecords) Load(context.Context,string)(volume.OwnerRecord,bool,error){return volume.OwnerRecord{},false,nil}
 func (poolOwnerTestRecords) CompareAndSwap(context.Context,string,*volume.OwnerRecord,volume.OwnerRecord)error{return nil}
@@ -87,7 +90,7 @@ func TestNewPoolVolumeRuntimeBackendRequiresOwnerCoordinatorToShareSanlockLocker
 	other:=&lock.SanlockLocker{}
 	coordinator,err:=volume.NewOwnerCoordinator(volume.OwnerCoordinatorConfig{
 		Locker:other,ResourceFor:func(string)string{return "owner-resource"},
-		Records:poolOwnerTestRecords{},Fencer:poolRuntimeTestFencer{},
+		Records:poolOwnerTestRecords{},Fencer:poolRuntimeTestFencer{},Reservation:poolOwnerTestReservation{},
 		ReadEpoch:func(context.Context,string)(uint64,error){return 1,nil},
 		DrainOldOwner:func(context.Context,string,volume.OwnerRecord)error{return nil},
 	})
