@@ -133,6 +133,20 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 		if lease != nil { _ = lease.Close() }
 		return nil, errors.New("fenced owner provider returned an invalid lease epoch")
 	}
+	proof, ok := lease.(interface {
+		OwnerRecord() volume.OwnerRecord
+		ReservationVerified() bool
+	})
+	if !ok {
+		_ = lease.Close()
+		return nil, errors.New("Pool Owner provider must return a lease carrying durable OwnerRecord and all-path PR reservation proof")
+	}
+	record := proof.OwnerRecord()
+	if !proof.ReservationVerified() || record.VolumeID != spec.VolumeID ||
+		record.NodeID != spec.NodeID || record.BootID != spec.BootID || record.Epoch != lease.Epoch() {
+		_ = lease.Close()
+		return nil, errors.New("Pool Owner lease proof does not match requested Volume identity, epoch, or verified SCSI PR reservation")
+	}
 	if _, ok := lease.(RuntimeOwnerLeaseMonitor); !ok {
 		_ = lease.Close()
 		return nil, errors.New("Pool Owner provider must return a monitored sanlock Owner Lease")
