@@ -17,6 +17,8 @@ const (
 	// ReaderTablePages reserves one durable 4KiB slot per supported reader
 	// in every bootstrap Volume slot. Its location is derived from slot geometry.
 	ReaderTablePages = uint64(128)
+	// OwnerRecordPages reserves two redundant checksummed 4KiB pages per Volume.
+	OwnerRecordPages = uint64(2)
 	WALSegmentSize  = uint64(16) * 1024 * 1024
 	MappingSize     = uint64(5) * 1024 * 1024 * 1024
 	CheckpointSize  = uint64(64) * 1024 * 1024
