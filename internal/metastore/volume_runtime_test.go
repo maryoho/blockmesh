@@ -296,3 +296,32 @@ func TestVolumeRuntimeSynchronouslyRejectsLeaseLostDuringWAL(t *testing.T) {
 	for _,event:=range base.snapshot(){if event=="owner-release"{released=true}}
 	if !released{t.Fatal("Owner Lease was not released after safe rollback")}
 }
+
+
+type runtimeAdmissionRaceBackend struct { *runtimeOwnerLossBackend }
+func (b *runtimeAdmissionRaceBackend) EnableRequestsGuarded(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error {
+	b.add("requests-enable-guarded")
+	b.lease.valid.Store(false)
+	return guard()
+}
+
+func TestVolumeRuntimeGuardRejectsLeaseLossAtFinalAdmissionGate(t *testing.T) {
+	base:=&runtimeTestBackend{}
+	lease:=&runtimeMonitoredOwnerLease{
+		runtimeTestOwnerLease:&runtimeTestOwnerLease{
+			closer:runtimeTestCloser{events:&base.events,mu:&base.mu,name:"owner-release"},epoch:10,
+		},
+		lost:make(chan error,1),
+	}
+	lease.valid.Store(true)
+	lossBackend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{})}
+	backend:=&runtimeAdmissionRaceBackend{runtimeOwnerLossBackend:lossBackend}
+	m,err:=NewVolumeRuntimeManager(backend);if err!=nil{t.Fatal(err)}
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));err==nil{t.Fatal("RW admission succeeded after lease became invalid at final gate")}
+	select{case <-lossBackend.lossHandled:case <-ctx.Done():t.Fatal("lease loss fail-stop handler did not run")}
+	if got:=m.ActiveVolumes();len(got)!=0{t.Fatalf("invalid Owner lease admitted active runtime: %v",got)}
+	events:=base.snapshot()
+	for _,event:=range events{if event=="requests-enable"{t.Fatalf("unguarded request admission occurred: %v",events)}}
+	assertRuntimeEventOrder(t,events,"owner-acquire","wal-recover","owner-epoch-publish","requests-enable-guarded","owner-fail-stop","requests-stop","io-drain","owner-release")
+}
