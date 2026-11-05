@@ -44,6 +44,8 @@ type VolumeRuntimeSpec struct {
 // deployment configuration.
 type VolumeRuntimeMetadata struct {
 	Store       *Store
+	// OwnerEpoch is set only after PublishOwnerEpoch durably commits it.
+	OwnerEpoch uint64
 	ReaderTable *ReaderTable
 	Arena       *PersistentArena
 	// PublishOwnerEpoch must commit the newly acquired owner lease epoch to
@@ -299,6 +301,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if err = rt.metadata.PublishOwnerEpoch(ctx, rt.owner.Epoch()); err != nil {
 			return fail(fmt.Errorf("publish durable Volume owner epoch: %w", err))
 		}
+		rt.metadata.OwnerEpoch = rt.owner.Epoch()
 		if err = m.checkOwnerLease(rt); err != nil { m.handleOwnerLeaseLoss(rt, spec, err); return fail(err) }
 		if err = rt.state.transition(OwnerStateOwnerEpochPublished); err != nil { return fail(err) }
 		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost before request admission")) }

@@ -3,6 +3,8 @@ package metastore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,11 @@ import (
 	"blockmesh/internal/volume"
 )
 
+type poolRuntimeTestDMGate struct { events []string }
+func (g *poolRuntimeTestDMGate) Prepare(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("prepare:%s:%d",d,e));return nil}
+func (g *poolRuntimeTestDMGate) Enable(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("enable:%s:%d",d,e));return nil}
+func (g *poolRuntimeTestDMGate) Fence(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("fence:%s:%d",d,e));return nil}
+func (g *poolRuntimeTestDMGate) Drain(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("drain:%s:%d",d,e));return nil}
 type poolRuntimeTestOwner struct{}
 func (poolRuntimeTestOwner) AcquireFencedOwner(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease, error) {
 	return nil, nil
@@ -28,6 +35,8 @@ func (poolRuntimeTestRegistrar) UnregisterReader(context.Context, string, string
 func validPoolRuntimeConfig() PoolRuntimeConfig {
 	locker := &lock.SanlockLocker{}
 	return PoolRuntimeConfig{
+		DMGate: &poolRuntimeTestDMGate{},
+		DMDeviceFor: func(volumeID string) string { return "/dev/mapper/" + volumeID },
 		OpenDevice: func(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error) { return nil, nil },
 		Owner: poolRuntimeTestOwner{}, Locker: locker,
 		OpenPoolSuperblock: func(RuntimeMetadataDevice) (format.Superblock, error) { return format.Superblock{}, nil },
@@ -167,11 +176,14 @@ func TestPoolRuntimeGuardedAdmissionInvokesLeaseGuardAtGate(t *testing.T) {
 	}
 	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
 	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
-	err=backend.EnableRequestsGuarded(context.Background(),spec,nil,func()error{
+	err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:9},func()error{
 		if !lease.Valid(){return errors.New("sanlock Owner lease lost at admission gate")}
 		return nil
 	})
 	if err==nil||!guardCalled{t.Fatalf("guarded admission did not reject lost lease: called=%v err=%v",guardCalled,err)}
+	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
+	if len(gate.events)==0||gate.events[0]!="prepare:/dev/mapper/vol-a:9"{t.Fatalf("kernel prepare must precede lease guard: %v",gate.events)}
+	for _,event:=range gate.events{if strings.HasPrefix(event,"enable:"){t.Fatalf("kernel gate opened after failed guard: %v",gate.events)}}
 }
 
 
@@ -189,6 +201,23 @@ func TestPoolRuntimeRejectsAdmissionHookThatSkipsOwnerGuard(t *testing.T) {
 	cfg.DrainMetadataIO=func(context.Context,string)error{drained=true;return nil}
 	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
 	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
-	err=backend.EnableRequestsGuarded(context.Background(),spec,nil,func()error{return nil})
+	err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:9},func()error{return nil})
 	if err==nil||!stopped||!drained{t.Fatalf("unguarded hook was accepted or not stopped/drained: err=%v stopped=%v drained=%v",err,stopped,drained)}
+}
+
+func TestPoolRuntimeGuardedAdmissionEnablesOnlyAfterKernelPrepareAndLeaseGuard(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:12},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	cfg:=validPoolRuntimeConfig()
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	cfg.EnableRequestsGuarded=func(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error{return guard()}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
+	if err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:12},func()error{return nil});err!=nil{t.Fatal(err)}
+	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
+	want:=[]string{"prepare:/dev/mapper/vol-a:12","enable:/dev/mapper/vol-a:12"}
+	if !reflect.DeepEqual(gate.events,want){t.Fatalf("kernel gate sequence=%v want=%v",gate.events,want)}
 }

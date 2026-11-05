@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"blockmesh/internal/device"
+	"blockmesh/internal/dmowner"
 	"blockmesh/internal/fence"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
@@ -37,6 +40,8 @@ func (p PoolOwnerCoordinator) AcquireFencedOwner(ctx context.Context, spec Volum
 // services. All callbacks are mandatory: silently substituting local locks,
 // no-op fencing, or no-op I/O admission would make shared-SAN operation unsafe.
 type PoolRuntimeConfig struct {
+	DMGate dmowner.Gate
+	DMDeviceFor func(volumeID string) string
 	OpenDevice func(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error)
 	Owner PoolOwnerLeaseAcquirer
 	Locker *lock.SanlockLocker
@@ -74,17 +79,18 @@ type PoolRuntimeConfig struct {
 type PoolVolumeRuntimeBackend struct {
 	cfg PoolRuntimeConfig
 	coordinator *SanlockReaderCoordinator
+	ownerEpochs sync.Map
 }
 
 func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBackend, error) {
-	if cfg.OpenDevice == nil || cfg.Owner == nil || cfg.Locker == nil ||
+	if cfg.OpenDevice == nil || cfg.Owner == nil || cfg.Locker == nil || cfg.DMGate == nil || cfg.DMDeviceFor == nil ||
 		!cfg.Locker.Distributed() || cfg.OpenPoolSuperblock == nil || cfg.CommitterForAG == nil || cfg.RecoverAG == nil ||
 		cfg.ReaderSetResource == nil || cfg.ReaderSlotResource == nil ||
 		cfg.PRRegistrar == nil || cfg.ReaderRecoveryProbe == nil ||
 		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.OnReaderLeaseLost == nil || cfg.OnOwnerLeaseLost == nil ||
 		cfg.EnableRequests == nil || cfg.EnableRequestsGuarded == nil || cfg.StopRequests == nil ||
 		cfg.DrainMetadataIO == nil || cfg.CloseMetadata == nil {
-		return nil, errors.New("Pool runtime requires device, fenced owner, distributed sanlock/WAL, reader lease/fencing, live-page, recovery and I/O hooks")
+		return nil, errors.New("Pool runtime requires device, fenced owner, distributed sanlock/WAL, kernel DM OwnerEpoch gate, reader lease/fencing, live-page, recovery and I/O hooks")
 	}
 	switch cfg.ReaderFencer.(type) {
 	case fence.NoopFencer, *fence.NoopFencer:
@@ -116,6 +122,7 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 
 func (b *PoolVolumeRuntimeBackend) HandleOwnerLeaseLost(ctx context.Context, spec VolumeRuntimeSpec, cause error) error {
 	if cause == nil { cause = errors.New("Owner Lease lost") }
+	kernelFenceErr := b.fenceKernel(ctx, spec.VolumeID)
 	// This hook is the synchronous hardware/data-path fail-stop. The ordinary
 	// StopRequests and DrainMetadataIO hooks then establish software admission
 	// closure and an explicit completion barrier before cleanup can release
@@ -123,7 +130,7 @@ func (b *PoolVolumeRuntimeBackend) HandleOwnerLeaseLost(ctx context.Context, spe
 	failStopErr := b.cfg.OnOwnerLeaseLost(ctx, spec, cause)
 	stopErr := b.cfg.StopRequests(ctx, spec.VolumeID)
 	drainErr := b.cfg.DrainMetadataIO(ctx, spec.VolumeID)
-	return errors.Join(failStopErr, stopErr, drainErr)
+	return errors.Join(kernelFenceErr, failStopErr, stopErr, drainErr)
 }
 
 func (b *PoolVolumeRuntimeBackend) OpenDevice(ctx context.Context, spec VolumeRuntimeSpec) (RuntimeMetadataDevice, error) {
@@ -162,7 +169,20 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 		_ = lease.Close()
 		return nil, errors.New("Pool Owner provider must return a monitored sanlock Owner Lease")
 	}
+	b.ownerEpochs.Store(spec.VolumeID, lease.Epoch())
 	return lease, nil
+}
+
+func (b *PoolVolumeRuntimeBackend) kernelDevice(volumeID string) (string, error) {
+	device := b.cfg.DMDeviceFor(volumeID)
+	if strings.TrimSpace(device) == "" { return "", fmt.Errorf("DM device resolver returned an empty device for Volume %s", volumeID) }
+	return device, nil
+}
+func (b *PoolVolumeRuntimeBackend) fenceKernel(ctx context.Context, volumeID string) error {
+	value, ok := b.ownerEpochs.Load(volumeID)
+	if !ok { return nil }
+	device, err := b.kernelDevice(volumeID); if err != nil { return err }
+	return b.cfg.DMGate.Fence(ctx, device, value.(uint64))
 }
 
 func (b *PoolVolumeRuntimeBackend) openPoolVolume(dev RuntimeMetadataDevice, spec VolumeRuntimeSpec) (*Store, format.Superblock, format.VolumeDescriptor, error) {
@@ -253,30 +273,43 @@ func (b *PoolVolumeRuntimeBackend) BuildReaderRecovery(spec VolumeRuntimeSpec, m
 }
 
 func (b *PoolVolumeRuntimeBackend) EnableRequests(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
+	if spec.Mode == VolumeRuntimeReadWrite { return errors.New("RW requests require kernel OwnerEpoch guarded admission") }
 	return b.cfg.EnableRequests(ctx, spec, meta)
 }
 func (b *PoolVolumeRuntimeBackend) EnableRequestsGuarded(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata, guard func() error) error {
 	if guard == nil { return errors.New("Owner admission guard is required") }
+	if meta == nil || meta.OwnerEpoch == 0 { return errors.New("durably published nonzero OwnerEpoch is required for kernel DM admission") }
+	device, deviceErr := b.kernelDevice(spec.VolumeID); if deviceErr != nil { return deviceErr }
+	b.ownerEpochs.Store(spec.VolumeID, meta.OwnerEpoch)
+	if err := b.cfg.DMGate.Prepare(ctx, device, meta.OwnerEpoch); err != nil { return fmt.Errorf("prepare kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
 	var called atomic.Bool
 	err := b.cfg.EnableRequestsGuarded(ctx, spec, meta, func() error {
 		called.Store(true)
-		return guard()
+		if err := guard(); err != nil { return err }
+		if err := b.cfg.DMGate.Enable(ctx, device, meta.OwnerEpoch); err != nil { return fmt.Errorf("enable kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
+		return nil
 	})
 	if !called.Load() {
 		// A platform hook that returns without consulting the lease guard has
 		// violated the admission contract. Close and drain defensively in case
 		// it partially enabled the DM queue.
-		stopErr := b.cfg.StopRequests(ctx,spec.VolumeID)
-		drainErr := b.cfg.DrainMetadataIO(ctx,spec.VolumeID)
+		stopErr := b.StopRequests(ctx,spec.VolumeID)
+		drainErr := b.DrainMetadataIO(ctx,spec.VolumeID)
 		return errors.Join(errors.New("DM admission hook returned without invoking Owner health guard"),err,stopErr,drainErr)
 	}
-	return err
+	if err != nil { return errors.Join(err, b.StopRequests(ctx, spec.VolumeID), b.DrainMetadataIO(ctx, spec.VolumeID)) }
+	return nil
 }
 func (b *PoolVolumeRuntimeBackend) StopRequests(ctx context.Context, volumeID string) error {
-	return b.cfg.StopRequests(ctx, volumeID)
+	return errors.Join(b.fenceKernel(ctx, volumeID), b.cfg.StopRequests(ctx, volumeID))
 }
 func (b *PoolVolumeRuntimeBackend) DrainMetadataIO(ctx context.Context, volumeID string) error {
-	return b.cfg.DrainMetadataIO(ctx, volumeID)
+	var kernelErr error
+	if value, ok := b.ownerEpochs.Load(volumeID); ok {
+		device, err := b.kernelDevice(volumeID)
+		if err != nil { kernelErr = err } else { kernelErr = b.cfg.DMGate.Drain(ctx, device, value.(uint64)) }
+	}
+	return errors.Join(kernelErr, b.cfg.DrainMetadataIO(ctx, volumeID))
 }
 func (b *PoolVolumeRuntimeBackend) CloseMetadata(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
 	return b.cfg.CloseMetadata(ctx, spec, meta)
