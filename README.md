@@ -38,6 +38,7 @@ See [docs/p3-metadata-layout.md](docs/p3-metadata-layout.md), [docs/p3-arena.md]
 * `internal/lock`: local test locker and sanlock-backed distributed resource leases.
 * `cmd/bm-lock-helper`: parent-death-bound helper used by sanlock client command.
 * `internal/volume`: volume lease contract, test-only in-memory lease, process-lifetime sanlock reader leases, monitored Owner takeover coordinator, and dual-slot SAN-backed OwnerRecordStore.
+* `internal/dmowner`: `dmsetup` control adapter for the kernel OwnerEpoch gate; see [P3-3.12.3.11](docs/p3-3.12.3.11.md) and [P3-3.12.3.12](docs/p3-3.12.3.12.md) for kernel admission and takeover fault-injection qualification.
 
 ## Run
 
