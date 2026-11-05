@@ -50,6 +50,7 @@ type OwnerCoordinatorConfig struct {
 	ResourceFor     func(volumeID string) string
 	Records         OwnerRecordStore
 	Fencer          fence.Fencer
+	Reservation     fence.OwnerReservation
 	ReadEpoch       OwnerEpochReader
 	DrainOldOwner   OwnerIOBarrier
 	LeasePollPeriod time.Duration
@@ -59,8 +60,8 @@ type OwnerCoordinator struct { cfg OwnerCoordinatorConfig }
 
 func NewOwnerCoordinator(cfg OwnerCoordinatorConfig) (*OwnerCoordinator, error) {
 	if cfg.Locker == nil || !cfg.Locker.Distributed() || cfg.ResourceFor == nil ||
-		cfg.Records == nil || cfg.Fencer == nil || cfg.ReadEpoch == nil || cfg.DrainOldOwner == nil {
-		return nil, errors.New("owner coordinator requires distributed lock, authoritative record CAS, SAN fencer, epoch reader and old-owner I/O barrier")
+		cfg.Records == nil || cfg.Fencer == nil || cfg.Reservation == nil || cfg.ReadEpoch == nil || cfg.DrainOldOwner == nil {
+		return nil, errors.New("owner coordinator requires distributed lock, authoritative record CAS, SAN fencer, Owner reservation manager, epoch reader and old-owner I/O barrier")
 	}
 	switch cfg.Fencer.(type) {
 	case fence.NoopFencer, *fence.NoopFencer:
@@ -73,9 +74,11 @@ func NewOwnerCoordinator(cfg OwnerCoordinatorConfig) (*OwnerCoordinator, error) 
 // AcquireOwner performs the takeover closed loop while holding the exclusive
 // sanlock resource: read previous identity -> PR PREEMPT AND ABORT -> verify
 // all-path fencing in the Fencer -> drain old-owner metadata I/O -> compute a
-// strictly increasing epoch -> CAS-publish the new authoritative identity.
-// The caller must still replay WAL and publish that epoch in BMDVOL02 before
-// enabling data requests.
+// strictly increasing epoch -> CAS-publish the new identity -> establish and
+// verify the new Owner reservation on every SAN path. OwnerRecord is published
+// before PR mutation so an ambiguous RESERVE outcome always has a durable
+// identity for the next Owner to fence. WAL replay and BMDVOL02 OwnerEpoch
+// publication must still complete before data requests are enabled.
 func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, bootID string) (result *OwnerLease, retErr error) {
 	if c == nil || ctx == nil { return nil, errors.New("owner coordinator and context are required") }
 	if strings.TrimSpace(volumeID)=="" || strings.TrimSpace(nodeID)=="" || strings.TrimSpace(bootID)=="" {
@@ -140,6 +143,14 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 		// Record is intentionally left as a tombstone-like last owner identity;
 		// the next acquirer must fence it before publishing another epoch.
 		return nil,errors.New("Owner sanlock lease lost after publishing takeover record")
+	}
+	if err = c.cfg.Reservation.EstablishOwnerReservation(ctx, nodeID, bootID); err != nil {
+		// Keep the OwnerRecord: PR REGISTER/RESERVE may have committed despite
+		// an ambiguous command result. The next Owner must fence this identity.
+		return nil, fmt.Errorf("establish and verify new Owner SCSI PR reservation: %w", err)
+	}
+	if !lease.Valid() {
+		return nil, errors.New("Owner sanlock lease lost while establishing SCSI PR reservation")
 	}
 	out:=newOwnerLease(lease,next.Epoch,c.cfg.LeasePollPeriod)
 	releaseOnError=false
