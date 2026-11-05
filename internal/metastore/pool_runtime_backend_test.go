@@ -105,12 +105,13 @@ func TestNewPoolVolumeRuntimeBackendRequiresOwnerCoordinatorToShareSanlockLocker
 
 type poolRuntimeProofLease struct {
 	record volume.OwnerRecord
+	epoch uint64
 	verified bool
 	lost chan error
 	closed bool
 }
 func (l *poolRuntimeProofLease) Close()error{l.closed=true;return nil}
-func (l *poolRuntimeProofLease) Epoch()uint64{return l.record.Epoch}
+func (l *poolRuntimeProofLease) Epoch()uint64{if l.epoch!=0{return l.epoch};return l.record.Epoch}
 func (l *poolRuntimeProofLease) Lost()<-chan error{return l.lost}
 func (l *poolRuntimeProofLease) OwnerRecord()volume.OwnerRecord{return l.record}
 func (l *poolRuntimeProofLease) ReservationVerified()bool{return l.verified}
@@ -124,10 +125,10 @@ func TestPoolRuntimeRequiresMatchingOwnerRecordAndPRProof(t *testing.T) {
 		{name:"matching",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:true},
 		{name:"wrong node",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-b",BootID:"boot-a",Epoch:9},verified:true},
 		{name:"reservation unverified",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:false},
-		{name:"wrong epoch",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:8},verified:true},
+		{name:"wrong epoch",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:8},epoch:9,verified:true},
 	} {
 		t.Run(tc.name,func(t *testing.T){
-			lease:=&poolRuntimeProofLease{record:tc.record,verified:tc.verified,lost:make(chan error)}
+			lease:=&poolRuntimeProofLease{record:tc.record,epoch:tc.epoch,verified:tc.verified,lost:make(chan error)}
 			cfg:=validPoolRuntimeConfig()
 			cfg.Owner=poolRuntimeProofOwner{lease:lease}
 			backend,err:=NewPoolVolumeRuntimeBackend(cfg)
