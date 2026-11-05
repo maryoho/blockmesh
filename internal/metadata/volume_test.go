@@ -28,6 +28,9 @@ func TestInitAndReadPoolVolumeDescriptor(t *testing.T) {
 	cleared:=make([]byte,format.PageSize)
 	if err=readAtFull(d,cleared,int64(readerStart*format.PageSize));err!=nil{t.Fatal(err)}
 	for _,b:=range cleared { if b!=0 { t.Fatal("Reader Table page was not cleared during Volume initialization") } }
+	ownerBytes:=make([]byte,format.OwnerRecordPages*format.PageSize)
+	if err=readAtFull(d,ownerBytes,int64(ownerStart*format.PageSize));err!=nil{t.Fatal(err)}
+	for _,b:=range ownerBytes{if b!=0{t.Fatal("OwnerRecord pages were not cleared during Volume initialization")}}
 	if got.VolumeID!="volume-seven"||got.OwnerEpoch!=3||got.Generation!=1||got.ArenaPages==0||got.LifecyclePages!=8||got.ArenaStart!=ownerStart+format.OwnerRecordPages {t.Fatalf("unexpected descriptor: %+v",got)}
 	read,err:=ReadVolumeDescriptor(d,sb,7);if err!=nil{t.Fatal(err)}
 	if read!=got {t.Fatalf("read descriptor %+v != written %+v",read,got)}
