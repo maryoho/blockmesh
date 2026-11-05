@@ -113,6 +113,7 @@ type volumeRuntime struct {
 	ownerWatchCancel context.CancelFunc
 	ownerWatchDone chan struct{}
 	ownerLost atomic.Bool
+	state ownerStateTracker
 	ownerFailureMu sync.Mutex
 	ownerFailure error
 }
@@ -199,6 +200,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 
 	rt := &volumeRuntime{spec: spec}
 	fail := func(cause error) error {
+		_ = rt.state.transition(OwnerStateFailed)
 		cleanupErr := m.rollbackActivation(ctx, rt)
 		if cleanupErr != nil {
 			// Preserve partially acquired resources so Deactivate can retry
@@ -221,6 +223,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		return errors.New("runtime backend returned nil metadata device")
 	}
 	rt.device = dev
+	if err = rt.state.transition(OwnerStateDeviceReady); err != nil { return fail(err) }
 
 	if spec.Mode == VolumeRuntimeReadWrite {
 		rt.owner, err = m.backend.AcquireOwnerLease(ctx, spec)
@@ -230,6 +233,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if rt.owner == nil {
 			return fail(errors.New("runtime backend returned nil owner lease"))
 		}
+		if err = rt.state.transition(OwnerStateOwnerLeaseReady); err != nil { return fail(err) }
 		if monitor, ok := rt.owner.(RuntimeOwnerLeaseMonitor); ok {
 			handler, handlerOK := m.backend.(RuntimeOwnerLeaseLossHandler)
 			if !handlerOK || monitor.Lost() == nil {
@@ -246,6 +250,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 				case cause, open := <-monitor.Lost():
 					if !open || cause == nil { cause = errors.New("Owner Lease lost") }
 					rt.ownerLost.Store(true)
+					_ = rt.state.transition(OwnerStateLeaseLost)
 					if handleErr := handler.HandleOwnerLeaseLost(context.Background(), spec, cause); handleErr != nil {
 						rt.ownerFailureMu.Lock()
 						rt.ownerFailure = handleErr
@@ -259,6 +264,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if err = m.backend.RecoverWAL(ctx, spec, rt.device); err != nil {
 			return fail(fmt.Errorf("recover fixed-LBA WAL: %w", err))
 		}
+		if err = rt.state.transition(OwnerStateWALRecovered); err != nil { return fail(err) }
 		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost during WAL recovery")) }
 	}
 
@@ -269,6 +275,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 	if err = validateRuntimeMetadata(spec, rt.metadata); err != nil {
 		return fail(err)
 	}
+	if err = rt.state.transition(OwnerStateMetadataReady); err != nil { return fail(err) }
 
 	if spec.Mode == VolumeRuntimeReadWrite {
 		if rt.owner == nil || rt.owner.Epoch() == 0 {
@@ -280,6 +287,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if err = rt.metadata.PublishOwnerEpoch(ctx, rt.owner.Epoch()); err != nil {
 			return fail(fmt.Errorf("publish durable Volume owner epoch: %w", err))
 		}
+		if err = rt.state.transition(OwnerStateOwnerEpochPublished); err != nil { return fail(err) }
 		if rt.ownerLost.Load() { return fail(errors.New("Owner Lease lost before request admission")) }
 	}
 
@@ -291,6 +299,7 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		if rt.reader == nil {
 			return fail(errors.New("runtime backend returned nil reader session"))
 		}
+		if err = rt.state.transition(OwnerStateReaderJoined); err != nil { return fail(err) }
 	}
 
 	// The factory resolves this runtime from the map during Activate.
@@ -300,6 +309,10 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		return fail(fmt.Errorf("start reader recovery supervisor: %w", err))
 	}
 	rt.recoveryStarted = true
+	if err = rt.state.transition(OwnerStateRecoveryReady); err != nil {
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(err, cleanupErr)
+	}
 	if rt.ownerLost.Load() {
 		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
 		return errors.Join(errors.New("Owner Lease lost before request admission"), cleanupErr)
@@ -310,6 +323,10 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		// assuming the volume remained quiescent.
 		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
 		return errors.Join(fmt.Errorf("enable volume requests: %w", err), cleanupErr)
+	}
+	if err = rt.state.transition(OwnerStateRequestsAdmitted); err != nil {
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(err, cleanupErr)
 	}
 	rt.enabled = true
 	return nil
@@ -333,6 +350,9 @@ func validateRuntimeMetadata(spec VolumeRuntimeSpec, metadata *VolumeRuntimeMeta
 // No requests have been admitted, so a joined reader can be closed as drained.
 func (m *VolumeRuntimeManager) rollbackActivation(ctx context.Context, rt *volumeRuntime) error {
 	var failures []error
+	if rt.state.current() != OwnerStateStopping && rt.state.current() != OwnerStateStopped {
+		if err := rt.state.transition(OwnerStateStopping); err != nil { return err }
+	}
 	if rt.recoveryStarted {
 		if err := m.supervisor.Deactivate(ctx, rt.spec.VolumeID); err != nil {
 			return fmt.Errorf("stop recovery during activation rollback: %w", err)
@@ -367,6 +387,7 @@ func (m *VolumeRuntimeManager) rollbackActivation(ctx context.Context, rt *volum
 		}
 		rt.device = nil
 	}
+	if err := rt.state.transition(OwnerStateStopped); err != nil { return err }
 	return errors.Join(failures...)
 }
 
@@ -395,6 +416,7 @@ func (m *VolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID st
 		if err := m.backend.StopRequests(ctx, volumeID); err != nil {
 			return fmt.Errorf("stop new volume requests: %w", err)
 		}
+		if err := rt.state.transition(OwnerStateStopping); err != nil { return err }
 		rt.enabled = false
 		rt.stopping = true
 	}
@@ -439,6 +461,7 @@ func (m *VolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID st
 		}
 		rt.device = nil
 	}
+	if err := rt.state.transition(OwnerStateStopped); err != nil { return err }
 	delete(m.runtimes, volumeID)
 	return nil
 }
@@ -473,6 +496,16 @@ func (m *VolumeRuntimeManager) Shutdown(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
+// RuntimeState returns the last monotonic activation state for a Volume.
+// Unknown or fully deactivated Volumes are reported as Created.
+func (m *VolumeRuntimeManager) RuntimeState(volumeID string) OwnerRuntimeState {
+	if m == nil { return OwnerStateCreated }
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt:=m.runtimes[volumeID]; rt!=nil { return rt.state.current() }
+	return OwnerStateCreated
+}
+
 func (m *VolumeRuntimeManager) ActiveVolumes() []string {
 	if m == nil {
 		return nil
@@ -481,7 +514,7 @@ func (m *VolumeRuntimeManager) ActiveVolumes() []string {
 	defer m.mu.Unlock()
 	ids := make([]string, 0, len(m.runtimes))
 	for id, rt := range m.runtimes {
-		if rt.enabled && !rt.ownerLost.Load() {
+		if rt.enabled && !rt.ownerLost.Load() && rt.state.current() == OwnerStateRequestsAdmitted {
 			ids = append(ids, id)
 		}
 	}
