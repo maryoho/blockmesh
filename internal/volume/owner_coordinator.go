@@ -175,6 +175,8 @@ type OwnerLease struct {
 	epoch uint64
 	record OwnerRecord
 	reservationVerified bool
+	previousOwnerFenced bool
+	oldOwnerIODrained bool
 	lost chan error
 	stop chan struct{}
 	done chan struct{}
@@ -185,7 +187,7 @@ type OwnerLease struct {
 }
 
 func newOwnerLease(lease lock.Lease, record OwnerRecord, poll time.Duration) *OwnerLease {
-	l:=&OwnerLease{lease:lease,epoch:record.Epoch,record:record,reservationVerified:true,lost:make(chan error,1),stop:make(chan struct{}),done:make(chan struct{})}
+	l:=&OwnerLease{lease:lease,epoch:record.Epoch,record:record,reservationVerified:true,previousOwnerFenced:true,oldOwnerIODrained:true,lost:make(chan error,1),stop:make(chan struct{}),done:make(chan struct{})}
 	go func(){
 		defer close(l.done)
 		t:=time.NewTicker(poll);defer t.Stop()
@@ -210,6 +212,10 @@ func (l *OwnerLease) Valid() bool { return l!=nil && l.lease!=nil && l.lease.Val
 func (l *OwnerLease) OwnerRecord() OwnerRecord { if l==nil{return OwnerRecord{}};return l.record }
 // ReservationVerified is true only after holder/type were verified on every configured SAN path.
 func (l *OwnerLease) ReservationVerified() bool { return l!=nil && l.reservationVerified }
+// PreviousOwnerFenced is true after the prior identity was fenced on all paths, or no prior Owner existed.
+func (l *OwnerLease) PreviousOwnerFenced() bool { return l!=nil && l.previousOwnerFenced }
+// OldOwnerIODrained is true after the old Owner I/O barrier completed, or no prior Owner existed.
+func (l *OwnerLease) OldOwnerIODrained() bool { return l!=nil && l.oldOwnerIODrained }
 func (l *OwnerLease) Lost() <-chan error { if l==nil{return nil};return l.lost }
 func (l *OwnerLease) Err() error { if l==nil{return errors.New("nil Owner lease")};l.mu.Lock();defer l.mu.Unlock();return l.err }
 func (l *OwnerLease) Close() error {
