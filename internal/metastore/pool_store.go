@@ -58,18 +58,19 @@ func validatePoolStoreGeometry(sb Superblock, pool format.Superblock, index uint
 	}
 	reservedBytes := pool.MetadataSize - pool.ReservedOffset
 	slotBytes := (reservedBytes / uint64(format.MaxVolumeDescriptors)) / PageSize * PageSize
-	if slotBytes < 3*PageSize { return ErrGeometry }
+	if slotBytes < (format.OwnerRecordPages+format.ReaderTablePages+3)*PageSize { return ErrGeometry }
 	slotStart := pool.ReservedOffset/PageSize + uint64(index)*(slotBytes/PageSize)
 	slotPages := slotBytes/PageSize
+	ownerEnd:=slotStart+format.OwnerRecordPages
+	readerStart:=slotStart+slotPages-format.ReaderTablePages
 	if slotStart > sb.TotalPages || slotPages > sb.TotalPages-slotStart ||
-		sb.ArenaStart < slotStart || sb.ArenaStart+sb.ArenaPages > slotStart+slotPages {
+		ownerEnd > readerStart || sb.ArenaStart < ownerEnd || sb.ArenaStart+sb.ArenaPages > readerStart {
 		return ErrGeometry
 	}
 	if sb.LifecyclePages != 0 {
 		if sb.LifecycleStart < sb.ArenaStart+sb.ArenaPages ||
-			sb.LifecycleStart > sb.TotalPages ||
-			sb.LifecyclePages > sb.TotalPages-sb.LifecycleStart ||
-			sb.LifecycleStart < slotStart || sb.LifecycleStart+sb.LifecyclePages > slotStart+slotPages {
+			sb.LifecycleStart > readerStart ||
+			sb.LifecyclePages > readerStart-sb.LifecycleStart {
 			return ErrGeometry
 		}
 	}
@@ -80,7 +81,22 @@ func validatePoolStoreGeometry(sb Superblock, pool format.Superblock, index uint
 	return nil
 }
 
-// ReaderTableRange returns the fixed per-Volume Reader Table extent. The
+// OwnerRecordRange returns the two reserved SAN OwnerRecord pages as byte offsets.
+	// The caller can pass these offsets directly to volume.NewSANOwnerRecordStore.
+	// The returned pages are private to this Volume and excluded from Arena,
+	// Lifecycle and Reader Table geometry.
+	func (s *Store) OwnerRecordRange() (uint64, uint64, error) {
+		if s == nil || !s.poolBacked { return 0, 0, ErrGeometry }
+		reservedBytes := s.poolSB.MetadataSize - s.poolSB.ReservedOffset
+		slotBytes := (reservedBytes / uint64(format.MaxVolumeDescriptors)) / PageSize * PageSize
+		slotPages := slotBytes / PageSize
+		slotStart := s.poolSB.ReservedOffset/PageSize + uint64(s.volumeIndex)*slotPages
+		if slotPages < format.OwnerRecordPages+format.ReaderTablePages+1 { return 0, 0, ErrGeometry }
+		start := slotStart * PageSize
+		return start, start + PageSize, nil
+	}
+
+	// ReaderTableRange returns the fixed per-Volume Reader Table extent. The
 // range is the final ReaderTablePages of this Volume's bootstrap slot; old
 // descriptors that consumed the entire slot do not have this facility.
 func (s *Store) ReaderTableRange() (uint64, uint32, error) {
