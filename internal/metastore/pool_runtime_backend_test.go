@@ -119,6 +119,8 @@ func (l *poolRuntimeProofLease) Lost()<-chan error{return l.lost}
 func (l *poolRuntimeProofLease) Valid()bool{return l.valid}
 func (l *poolRuntimeProofLease) OwnerRecord()volume.OwnerRecord{return l.record}
 func (l *poolRuntimeProofLease) ReservationVerified()bool{return l.verified}
+func (l *poolRuntimeProofLease) PreviousOwnerFenced()bool{return true}
+func (l *poolRuntimeProofLease) OldOwnerIODrained()bool{return true}
 
 type poolRuntimeProofOwner struct{lease RuntimeOwnerLease}
 func (o poolRuntimeProofOwner) AcquireFencedOwner(context.Context,VolumeRuntimeSpec)(RuntimeOwnerLease,error){return o.lease,nil}
