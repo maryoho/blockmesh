@@ -137,6 +137,7 @@ static void bm_status(struct dm_target *ti, status_type_t type,
 	u64 epoch;
 	bool open, fenced;
 	int inflight;
+	unsigned int sz = 0;
 	(void)status_flags;
 	if (type == STATUSTYPE_TABLE) {
 		DMEMIT("%s %llu", bm->dev->name, (unsigned long long)bm->start);
