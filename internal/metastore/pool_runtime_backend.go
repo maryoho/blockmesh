@@ -61,6 +61,10 @@ type PoolRuntimeConfig struct {
 	BuildRecovery func(VolumeRuntimeSpec, *VolumeRuntimeMetadata) (ManagedReaderRecovery, error)
 
 	EnableRequests func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
+	// EnableRequestsGuarded must call guard while holding the DM admission
+	// serialization lock immediately before making the queue live. If guard
+	// fails, it must leave admission closed.
+	EnableRequestsGuarded func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata, func() error) error
 	StopRequests func(context.Context, string) error
 	DrainMetadataIO func(context.Context, string) error
 	CloseMetadata func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
@@ -77,7 +81,7 @@ func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBacke
 		cfg.ReaderSetResource == nil || cfg.ReaderSlotResource == nil ||
 		cfg.PRRegistrar == nil || cfg.ReaderRecoveryProbe == nil ||
 		cfg.ReaderFencer == nil || cfg.LivePages == nil || cfg.OnReaderLeaseLost == nil || cfg.OnOwnerLeaseLost == nil ||
-		cfg.EnableRequests == nil || cfg.StopRequests == nil ||
+		cfg.EnableRequests == nil || cfg.EnableRequestsGuarded == nil || cfg.StopRequests == nil ||
 		cfg.DrainMetadataIO == nil || cfg.CloseMetadata == nil {
 		return nil, errors.New("Pool runtime requires device, fenced owner, distributed sanlock/WAL, reader lease/fencing, live-page, recovery and I/O hooks")
 	}
@@ -146,6 +150,10 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 		record.NodeID != spec.NodeID || record.BootID != spec.BootID || record.Epoch != lease.Epoch() {
 		_ = lease.Close()
 		return nil, errors.New("Pool Owner lease proof does not match requested Volume identity, epoch, or verified SCSI PR reservation")
+	}
+	if health, ok := lease.(interface{ Valid() bool }); !ok || !health.Valid() {
+		_ = lease.Close()
+		return nil, errors.New("Pool Owner provider must expose a synchronously valid sanlock lease")
 	}
 	if _, ok := lease.(RuntimeOwnerLeaseMonitor); !ok {
 		_ = lease.Close()
@@ -243,6 +251,10 @@ func (b *PoolVolumeRuntimeBackend) BuildReaderRecovery(spec VolumeRuntimeSpec, m
 
 func (b *PoolVolumeRuntimeBackend) EnableRequests(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
 	return b.cfg.EnableRequests(ctx, spec, meta)
+}
+func (b *PoolVolumeRuntimeBackend) EnableRequestsGuarded(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata, guard func() error) error {
+	if guard == nil { return errors.New("Owner admission guard is required") }
+	return b.cfg.EnableRequestsGuarded(ctx, spec, meta, guard)
 }
 func (b *PoolVolumeRuntimeBackend) StopRequests(ctx context.Context, volumeID string) error {
 	return b.cfg.StopRequests(ctx, volumeID)
