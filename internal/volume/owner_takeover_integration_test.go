@@ -83,6 +83,13 @@ func (f *integrationPathFencer) FenceNode(_ context.Context,node,boot string)err
 }
 func (f *integrationPathFencer) snapshot()[]OwnerRecord{f.mu.Lock();defer f.mu.Unlock();return append([]OwnerRecord(nil),f.calls...)}
 
+
+type integrationReservation struct { calls []OwnerRecord; err error }
+func (r *integrationReservation) EstablishOwnerReservation(_ context.Context,node,boot string)error {
+	r.calls=append(r.calls,OwnerRecord{NodeID:node,BootID:boot})
+	return r.err
+}
+
 type integrationDrain struct {
 	mu sync.Mutex
 	calls []OwnerRecord
@@ -98,7 +105,7 @@ func newIntegrationCoordinator(t *testing.T,locker *integrationSanlockLocker,rec
 	t.Helper()
 	c,err:=NewOwnerCoordinator(OwnerCoordinatorConfig{
 		Locker:locker,ResourceFor:func(string)string{return "pool:vol-owner:vol-a"},
-		Records:records,Fencer:fencer,ReadEpoch:func(context.Context,string)(uint64,error){return epoch,nil},
+		Records:records,Fencer:fencer,Reservation:&integrationReservation{},ReadEpoch:func(context.Context,string)(uint64,error){return epoch,nil},
 		DrainOldOwner:drain.Drain,LeasePollPeriod:time.Millisecond,
 	})
 	if err!=nil{t.Fatalf("NewOwnerCoordinator(%s/%s): %v",node,boot,err)}
