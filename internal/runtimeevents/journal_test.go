@@ -31,7 +31,7 @@ func TestJournalRejectsCorruptionAndIncompleteTail(t *testing.T) {
 	if err=j.Record(testEvent());err!=nil{t.Fatal(err)}
 	_ = j.Close()
 	b,err:=os.ReadFile(path);if err!=nil{t.Fatal(err)}
-	b=strings.Replace(string(b),"\"result\":\"success\"","\"result\":\"failure\"",1)
+	b=[]byte(strings.Replace(string(b),"\"result\":\"success\"","\"result\":\"failure\"",1))
 	if err=os.WriteFile(path,[]byte(b),0600);err!=nil{t.Fatal(err)}
 	if _,err=Read(path);err==nil{t.Fatal("tampered event accepted")}
 	if err=os.WriteFile(path,[]byte("{"),0600);err!=nil{t.Fatal(err)}
