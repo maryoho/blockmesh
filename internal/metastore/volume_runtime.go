@@ -368,6 +368,12 @@ func (m *VolumeRuntimeManager) checkOwnerLease(rt *volumeRuntime) error {
 	return errors.New("synchronous sanlock Owner Lease validation failed")
 }
 
+func (m *VolumeRuntimeManager) handleOwnerLeaseLoss(rt *volumeRuntime, spec VolumeRuntimeSpec, cause error) {
+	handler, ok := m.backend.(RuntimeOwnerLeaseLossHandler)
+	if !ok { return }
+	rt.handleOwnerLeaseLoss(handler,spec,cause)
+}
+
 func (rt *volumeRuntime) handleOwnerLeaseLoss(handler RuntimeOwnerLeaseLossHandler, spec VolumeRuntimeSpec, cause error) {
 	if rt == nil || handler == nil { return }
 	rt.ownerLossOnce.Do(func() {
