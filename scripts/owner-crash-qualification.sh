@@ -33,6 +33,7 @@ capture)
   [[ -x "$meta_bin" && -x "$san_bin" ]] || { echo "qualification binaries must be executable" >&2; exit 2; }
   [[ -b "$device" ]] || { echo "metadata device must be a block device: $device" >&2; exit 2; }
   [[ -n "$paths" && -n "$volume" && -n "$node" && -n "$boot" ]] || usage
+  mkdir -p "$(dirname "$prefix")"
   [[ ! -e "$prefix.owner.json" && ! -e "$prefix.san.json" && ! -e "$prefix.sha256" ]] || { echo "refusing to overwrite existing evidence" >&2; exit 1; }
   "$meta_bin" snapshot --device "$device" --index "$index" --volume-id "$volume" --output "$prefix.owner.json"
   "$san_bin" collect --device "$device" --paths "$paths" --volume-id "$volume" --node-id "$node" --boot-id "$boot" --output "$prefix.san.json"

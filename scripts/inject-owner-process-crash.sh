@@ -14,6 +14,8 @@ confirm=$3
   exit 2
 }
 command -v systemctl >/dev/null
+restart=$(systemctl show "$unit" --property=Restart --value)
+[[ "$restart" == "no" ]] || { echo "refusing: test unit must have Restart=no to prevent automatic restart during evidence capture" >&2; exit 1; }
 exec_start=$(systemctl show "$unit" --property=ExecStart --value)
 pid=$(systemctl show "$unit" --property=MainPID --value)
 [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || { echo "unit has no valid MainPID: $pid" >&2; exit 1; }
