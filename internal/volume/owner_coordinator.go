@@ -204,6 +204,8 @@ func newOwnerLease(lease lock.Lease, record OwnerRecord, poll time.Duration) *Ow
 	return l
 }
 func (l *OwnerLease) Epoch() uint64 { if l==nil{return 0};return l.epoch }
+// Valid reports the current sanlock helper lease state synchronously.
+func (l *OwnerLease) Valid() bool { return l!=nil && l.lease!=nil && l.lease.Valid() }
 // OwnerRecord returns the durable identity published before PR RESERVE.
 func (l *OwnerLease) OwnerRecord() OwnerRecord { if l==nil{return OwnerRecord{}};return l.record }
 // ReservationVerified is true only after holder/type were verified on every configured SAN path.
