@@ -95,15 +95,18 @@ func parseLiveReservation(output string) (uint64, uint8, bool) {
 	lower := strings.ToLower(output)
 	if strings.Contains(lower, "no reservation held") || strings.Contains(lower, "no reservation") ||
 		strings.Contains(lower, "reservation not held") { return 0, 0, false }
+
 	var key uint64
 	keyCount := 0
 	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.Contains(strings.ToLower(line), "key") { continue }
-		idx := strings.Index(line, "=")
-		if idx < 0 { idx = strings.Index(line, ":") }
+		l := strings.ToLower(line)
+		idx := strings.Index(l, "key")
 		if idx < 0 { continue }
-		value := strings.TrimSpace(line[idx+1:])
+		rest := strings.TrimSpace(line[idx+len("key"):])
+		rest = strings.TrimLeft(rest, " :=\t")
+		fields := strings.Fields(rest)
+		if len(fields) == 0 { continue }
+		value := strings.Trim(fields[0], ",;")
 		if !strings.HasPrefix(strings.ToLower(value), "0x") { continue }
 		n, err := strconv.ParseUint(value[2:], 16, 64)
 		if err != nil { return 0, 0, false }
@@ -114,25 +117,28 @@ func parseLiveReservation(output string) (uint64, uint8, bool) {
 	var prType uint8
 	typeCount := 0
 	for _, line := range strings.Split(output, "\n") {
-		l := strings.ToLower(strings.TrimSpace(line))
-		if !strings.Contains(l, "type") { continue }
-		idx := strings.Index(l, ":")
-		if idx < 0 { idx = strings.Index(l, "=") }
+		l := strings.ToLower(line)
+		idx := strings.Index(l, "type")
 		if idx < 0 { continue }
-		value := strings.TrimSpace(l[idx+1:])
-		value = strings.Trim(value, ",")
-		switch value {
+		value := strings.TrimSpace(line[idx+len("type"):])
+		value = strings.TrimLeft(value, " :=\t")
+		value = strings.TrimSpace(strings.TrimRight(value, ",;"))
+		switch strings.ToLower(value) {
 		case "write exclusive": prType = 1
 		case "exclusive access": prType = 3
 		case "write exclusive, registrants only": prType = 5
 		case "exclusive access, registrants only": prType = 6
 		default:
-			if strings.HasPrefix(value, "0x") {
-				n, err := strconv.ParseUint(value[2:], 16, 8)
-				if err == nil { prType = uint8(n) }
-			} else {
-				n, err := strconv.ParseUint(value, 10, 8)
-				if err == nil { prType = uint8(n) }
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				numeric := strings.Trim(fields[0], ",;")
+				if strings.HasPrefix(strings.ToLower(numeric), "0x") {
+					n, err := strconv.ParseUint(numeric[2:], 16, 8)
+					if err == nil { prType = uint8(n) }
+				} else {
+					n, err := strconv.ParseUint(numeric, 10, 8)
+					if err == nil { prType = uint8(n) }
+				}
 			}
 		}
 		if prType != 0 { typeCount++ }
