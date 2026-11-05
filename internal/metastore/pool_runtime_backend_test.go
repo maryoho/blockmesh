@@ -171,3 +171,22 @@ func TestPoolRuntimeGuardedAdmissionInvokesLeaseGuardAtGate(t *testing.T) {
 	})
 	if err==nil||!guardCalled{t.Fatalf("guarded admission did not reject lost lease: called=%v err=%v",guardCalled,err)}
 }
+
+
+func TestPoolRuntimeRejectsAdmissionHookThatSkipsOwnerGuard(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	stopped,drained:=false,false
+	cfg:=validPoolRuntimeConfig()
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	cfg.EnableRequestsGuarded=func(context.Context,VolumeRuntimeSpec,*VolumeRuntimeMetadata,func()error)error{return nil}
+	cfg.StopRequests=func(context.Context,string)error{stopped=true;return nil}
+	cfg.DrainMetadataIO=func(context.Context,string)error{drained=true;return nil}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
+	err=backend.EnableRequestsGuarded(context.Background(),spec,nil,func()error{return nil})
+	if err==nil||!stopped||!drained{t.Fatalf("unguarded hook was accepted or not stopped/drained: err=%v stopped=%v drained=%v",err,stopped,drained)}
+}
