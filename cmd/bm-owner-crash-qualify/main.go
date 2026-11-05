@@ -80,7 +80,7 @@ func runSnapshot(args []string) error {
 	out:=fs.String("output","","new JSON evidence file; existing files are never overwritten")
 	if err:=fs.Parse(args);err!=nil{return err}
 	if fs.NArg()!=0 || *path=="" || *volumeID=="" { return errors.New("--device and --volume-id are required; no positional arguments are accepted") }
-	if *index>=format.MaxVolumeDescriptors { return errors.New("Volume index exceeds Node Table capacity") }
+	if uint64(*index)>=format.MaxVolumeDescriptors { return errors.New("Volume index exceeds Node Table capacity") }
 
 	dev,err:=device.OpenBlockDevice(*path,false,false)
 	if err!=nil{return err}
@@ -239,4 +239,3 @@ func verifySnapshots(before,after snapshot,node,boot string)(verification,error)
 func allZero(b []byte)bool{for _,v:=range b{if v!=0{return false}};return true}
 func sha256Hex(b []byte)string{sum:=sha256.Sum256(b);return hex.EncodeToString(sum[:])}
 
-var _ = runtime.GOOS
