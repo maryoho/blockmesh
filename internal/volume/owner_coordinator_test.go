@@ -5,6 +5,9 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"path/filepath"
+
+	"blockmesh/internal/runtimeevents"
 	"time"
 
 	"blockmesh/internal/fence"
@@ -175,4 +178,28 @@ func TestOwnerLeaseCarriesReservationAndOwnerRecordProof(t *testing.T) {
 	if !lease.ReservationVerified() || !lease.PreviousOwnerFenced() || !lease.OldOwnerIODrained() { t.Fatal("Owner lease lacks complete takeover proof") }
 	if got:=lease.OwnerRecord();got!=record { t.Fatalf("OwnerRecord=%+v want %+v",got,record) }
 	_ = lease.Close()
+}
+
+func TestOwnerCoordinatorWritesDurableRuntimeEvents(t *testing.T) {
+	path:=filepath.Join(t.TempDir(),"owner-events.jsonl")
+	journal,err:=runtimeevents.Open(path,"op-owner-1")
+	if err!=nil{t.Fatal(err)}
+	defer journal.Close()
+	lease:=&ownerTestLease{valid:true}
+	records:=&ownerTestRecords{}
+	coordinator,err:=NewOwnerCoordinator(OwnerCoordinatorConfig{
+		Locker:&ownerTestLocker{lease:lease},ResourceFor:func(string)string{return "owner"},
+		Records:records,Fencer:&ownerTestFencer{},Reservation:&ownerTestReservation{records:records},
+		ReadEpoch:func(context.Context,string)(uint64,error){return 1,nil},
+		DrainOldOwner:(&ownerTestBarrier{}).DrainOldOwner,Events:journal,
+	})
+	if err!=nil{t.Fatal(err)}
+	got,err:=coordinator.AcquireOwner(context.Background(),"vol","node-b","boot-b")
+	if err!=nil{t.Fatal(err)}
+	if err=got.Close();err!=nil{t.Fatal(err)}
+	recordsOut,err:=runtimeevents.Read(path)
+	if err!=nil{t.Fatal(err)}
+	want:=[]string{"sanlock.owner_lease_acquired","scsi_pr.registration_prepared","owner_record.durable","scsi_pr.owner_reservation_verified"}
+	if len(recordsOut)!=len(want){t.Fatalf("events=%d want=%d",len(recordsOut),len(want))}
+	for i,name:=range want{if recordsOut[i].Event.EventType!=name{t.Fatalf("event[%d]=%s want %s",i,recordsOut[i].Event.EventType,name)}}
 }

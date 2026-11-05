@@ -15,6 +15,7 @@ import (
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
 	"blockmesh/internal/volume"
+	"blockmesh/internal/runtimeevents"
 )
 
 // PoolOwnerLeaseAcquirer must acquire the exclusive distributed Owner
@@ -74,6 +75,7 @@ type PoolRuntimeConfig struct {
 	StopRequests func(context.Context, string) error
 	DrainMetadataIO func(context.Context, string) error
 	CloseMetadata func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
+	Events runtimeevents.Sink
 }
 
 type kernelOwnerSession struct { epoch uint64; instance uint64 }
@@ -175,8 +177,10 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 	if deviceErr != nil { _ = lease.Close(); return nil, deviceErr }
 	if err := b.cfg.DMGate.FenceCurrent(ctx, device); err != nil {
 		_ = lease.Close()
+		_ = b.recordEvent(spec,lease.Epoch(),"dm.owner_gate.fenced","fence_stale_local_gate","failure","dm-gate-error",err.Error())
 		return nil, fmt.Errorf("fence current local DM target after SAN takeover: %w", err)
 	}
+	if err:=b.recordEvent(spec,lease.Epoch(),"dm.owner_gate.fenced","fence_stale_local_gate","success","dm-gate-returned","local stale DM Owner gate fenced after SAN takeover");err!=nil{_ = lease.Close();return nil,err}
 	b.ownerSessions.Delete(spec.VolumeID)
 	return lease, nil
 }
@@ -215,7 +219,11 @@ func (b *PoolVolumeRuntimeBackend) RecoverWAL(ctx context.Context, spec VolumeRu
 	if safe, ok := committer.(ClusterSafeCommitter); !ok || !safe.ClusterSafe() {
 		return ErrClusterSafeCommitterRequired
 	}
-	return b.cfg.RecoverAG(ctx, committer)
+	if err=b.cfg.RecoverAG(ctx, committer);err!=nil{
+		_ = b.recordEvent(spec,0,"wal.recovery.completed","recover_wal","failure","ag-recovery-error",err.Error())
+		return err
+	}
+	return b.recordEvent(spec,0,"wal.recovery.completed","recover_wal","success","recover-ag-callback-returned","configured AG recovery callback returned success")
 }
 
 func (b *PoolVolumeRuntimeBackend) OpenMetadata(_ context.Context, spec VolumeRuntimeSpec, dev RuntimeMetadataDevice) (*VolumeRuntimeMetadata, error) {
@@ -238,7 +246,11 @@ func (b *PoolVolumeRuntimeBackend) OpenMetadata(_ context.Context, spec VolumeRu
 	return &VolumeRuntimeMetadata{
 		Store: store, ReaderTable: readers, Arena: arena,
 		PublishOwnerEpoch: func(_ context.Context, epoch uint64) error {
-			return store.AdvanceOwnerEpoch(epoch, committer)
+			if err:=store.AdvanceOwnerEpoch(epoch, committer);err!=nil{
+				_ = b.recordEvent(spec,epoch,"descriptor.owner_epoch.durable","publish_owner_epoch","failure","descriptor-commit-error",err.Error())
+				return err
+			}
+			return b.recordEvent(spec,epoch,"descriptor.owner_epoch.durable","publish_owner_epoch","success","advance-owner-epoch-returned","Store.AdvanceOwnerEpoch returned success through cluster-safe committer")
 		},
 	}, nil
 }
@@ -292,13 +304,17 @@ func (b *PoolVolumeRuntimeBackend) EnableRequestsGuarded(ctx context.Context, sp
 	instance, err := b.cfg.DMGate.Prepare(ctx, device, meta.OwnerEpoch)
 	if err != nil { return fmt.Errorf("prepare kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
 	if instance == 0 { return errors.New("kernel DM target returned a zero table instance ID") }
+	if err=b.recordEvent(spec,meta.OwnerEpoch,"dm.owner_gate.prepared","prepare_dm_owner_gate","success","dm-gate-prepare-returned",fmt.Sprintf("DM table instance %x prepared",instance));err!=nil{return err}
 	session := kernelOwnerSession{epoch: meta.OwnerEpoch, instance: instance}
 	b.ownerSessions.Store(spec.VolumeID, session)
 	var called atomic.Bool
 	err = b.cfg.EnableRequestsGuarded(ctx, spec, meta, func() error {
 		called.Store(true)
 		if err := guard(); err != nil { return err }
-		if err := b.cfg.DMGate.Enable(ctx, device, meta.OwnerEpoch, instance); err != nil { return fmt.Errorf("enable kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
+		if err := b.cfg.DMGate.Enable(ctx, device, meta.OwnerEpoch, instance); err != nil {
+			_ = b.recordEvent(spec,meta.OwnerEpoch,"dm.owner_gate.enabled","enable_dm_owner_gate","failure","dm-gate-enable-error",err.Error())
+			return fmt.Errorf("enable kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err)
+		}
 		return nil
 	})
 	if !called.Load() {
@@ -310,6 +326,9 @@ func (b *PoolVolumeRuntimeBackend) EnableRequestsGuarded(ctx context.Context, sp
 		return errors.Join(errors.New("DM admission hook returned without invoking Owner health guard"),err,stopErr,drainErr)
 	}
 	if err != nil { return errors.Join(err, b.StopRequests(ctx, spec.VolumeID), b.DrainMetadataIO(ctx, spec.VolumeID)) }
+	if err=b.recordEvent(spec,meta.OwnerEpoch,"dm.owner_gate.enabled","enable_dm_owner_gate","success","guarded-admission-hook-returned",fmt.Sprintf("DM Owner gate enabled for table instance %x",instance));err!=nil{
+		return errors.Join(err,b.StopRequests(ctx,spec.VolumeID),b.DrainMetadataIO(ctx,spec.VolumeID))
+	}
 	return nil
 }
 func (b *PoolVolumeRuntimeBackend) StopRequests(ctx context.Context, volumeID string) error {
@@ -328,6 +347,11 @@ func (b *PoolVolumeRuntimeBackend) DrainMetadataIO(ctx context.Context, volumeID
 }
 func (b *PoolVolumeRuntimeBackend) CloseMetadata(ctx context.Context, spec VolumeRuntimeSpec, meta *VolumeRuntimeMetadata) error {
 	return b.cfg.CloseMetadata(ctx, spec, meta)
+}
+
+func (b *PoolVolumeRuntimeBackend) recordEvent(spec VolumeRuntimeSpec,epoch uint64,eventType,phase,result,proof,detail string) error {
+	if b.cfg.Events==nil{return nil}
+	return b.cfg.Events.Record(runtimeevents.Event{VolumeID:spec.VolumeID,NodeID:spec.NodeID,BootID:spec.BootID,OwnerEpoch:epoch,EventType:eventType,Phase:phase,Result:result,Proof:proof,Detail:detail})
 }
 
 var _ VolumeRuntimeBackend = (*PoolVolumeRuntimeBackend)(nil)

@@ -11,6 +11,7 @@ import (
 
 	"blockmesh/internal/fence"
 	"blockmesh/internal/lock"
+	"blockmesh/internal/runtimeevents"
 )
 
 var (
@@ -54,6 +55,7 @@ type OwnerCoordinatorConfig struct {
 	ReadEpoch       OwnerEpochReader
 	DrainOldOwner   OwnerIOBarrier
 	LeasePollPeriod time.Duration
+	Events runtimeevents.Sink
 }
 
 type OwnerCoordinator struct { cfg OwnerCoordinatorConfig }
@@ -92,6 +94,7 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	lease,err:=c.cfg.Locker.Acquire(ctx,resource)
 	if err!=nil { return nil,fmt.Errorf("acquire exclusive Owner sanlock resource: %w",err) }
 	if lease==nil { return nil,errors.New("distributed locker returned a nil Owner lease") }
+	if err=c.recordEvent(volumeID,nodeID,bootID,0,"sanlock.owner_lease_acquired","acquire","success","sanlock-helper-ready","exclusive sanlock Owner resource acquired");err!=nil{_ = lease.Close();return nil,err}
 	releaseOnError:=true
 	defer func(){
 		if releaseOnError {
@@ -118,15 +121,21 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	// The new initiator's path-scoped keys must be registered before it can
 	// issue PREEMPT AND ABORT using those keys against the previous Owner.
 	if err = c.cfg.Reservation.PrepareOwnerReservation(ctx, nodeID, bootID); err != nil {
+		_ = c.recordEvent(volumeID,nodeID,bootID,0,"scsi_pr.registration_prepared","prepare","failure","reservation-manager-error",err.Error())
 		return nil, fmt.Errorf("prepare new Owner SCSI PR registrations: %w", err)
 	}
+	if err=c.recordEvent(volumeID,nodeID,bootID,0,"scsi_pr.registration_prepared","prepare","success","reservation-manager-returned","new initiator path registrations prepared");err!=nil{return nil,err}
 	if exists {
 		if err=c.cfg.Fencer.FenceNode(ctx,old.NodeID,old.BootID);err!=nil {
+			_ = c.recordEvent(volumeID,nodeID,bootID,old.Epoch,"scsi_pr.preempt_and_abort","fence_old_owner","failure","fencer-error",err.Error())
 			return nil,fmt.Errorf("PREEMPT AND ABORT previous Owner %s/%s on all SAN paths: %w",old.NodeID,old.BootID,err)
 		}
+		if err=c.recordEvent(volumeID,nodeID,bootID,old.Epoch,"scsi_pr.preempt_and_abort","fence_old_owner","success","fencer-contract-completed","Fencer returned success for previous Owner identity");err!=nil{return nil,err}
 		if err=c.cfg.DrainOldOwner(ctx,volumeID,old);err!=nil {
+			_ = c.recordEvent(volumeID,nodeID,bootID,old.Epoch,"old_owner.metadata_io_drain","drain_old_owner","failure","io-barrier-error",err.Error())
 			return nil,fmt.Errorf("old Owner metadata I/O is not drained: %w",err)
 		}
+		if err=c.recordEvent(volumeID,nodeID,bootID,old.Epoch,"old_owner.metadata_io_drain","drain_old_owner","success","io-barrier-returned","old Owner metadata I/O barrier returned success");err!=nil{return nil,err}
 	}
 	if !lease.Valid() { return nil,errors.New("Owner sanlock lease lost during fencing") }
 	descriptorEpoch,err:=c.cfg.ReadEpoch(ctx,volumeID)
@@ -146,25 +155,34 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	next:=OwnerRecord{VolumeID:volumeID,NodeID:nodeID,BootID:bootID,Epoch:base+1}
 	if !lease.Valid() { return nil,errors.New("Owner sanlock lease lost before publishing takeover record") }
 	if err=c.cfg.Records.CompareAndSwap(ctx,volumeID,expected,next);err!=nil {
+		_ = c.recordEvent(volumeID,nodeID,bootID,next.Epoch,"owner_record.publish","publish_owner_record","failure","store-cas-error",err.Error())
 		if errors.Is(err,ErrOwnerRecordConflict) { return nil,err }
 		return nil,fmt.Errorf("durably publish new authoritative Owner identity: %w",err)
 	}
+	if err=c.recordEvent(volumeID,nodeID,bootID,next.Epoch,"owner_record.durable","publish_owner_record","success","store-cas-returned","OwnerRecord CompareAndSwap returned after its durability contract");err!=nil{return nil,err}
 	if !lease.Valid() {
 		// Record is intentionally left as a tombstone-like last owner identity;
 		// the next acquirer must fence it before publishing another epoch.
 		return nil,errors.New("Owner sanlock lease lost after publishing takeover record")
 	}
 	if err = c.cfg.Reservation.EstablishOwnerReservation(ctx, nodeID, bootID); err != nil {
+		_ = c.recordEvent(volumeID,nodeID,bootID,next.Epoch,"scsi_pr.owner_reservation_verified","reserve_owner","failure","reservation-manager-error",err.Error())
 		// Keep the OwnerRecord: PR REGISTER/RESERVE may have committed despite
 		// an ambiguous command result. The next Owner must fence this identity.
 		return nil, fmt.Errorf("establish and verify new Owner SCSI PR reservation: %w", err)
 	}
+	if err=c.recordEvent(volumeID,nodeID,bootID,next.Epoch,"scsi_pr.owner_reservation_verified","reserve_owner","success","reservation-manager-verification-returned","Owner reservation manager returned after its all-path verification contract");err!=nil{return nil,err}
 	if !lease.Valid() {
 		return nil, errors.New("Owner sanlock lease lost while establishing SCSI PR reservation")
 	}
 	out:=newOwnerLease(lease,next,c.cfg.LeasePollPeriod)
 	releaseOnError=false
 	return out,nil
+}
+
+func (c *OwnerCoordinator) recordEvent(volumeID,nodeID,bootID string,epoch uint64,eventType,phase,result,proof,detail string) error {
+	if c.cfg.Events==nil{return nil}
+	return c.cfg.Events.Record(runtimeevents.Event{VolumeID:volumeID,NodeID:nodeID,BootID:bootID,OwnerEpoch:epoch,EventType:eventType,Phase:phase,Result:result,Proof:proof,Detail:detail})
 }
 
 // OwnerLease monitors the sanlock helper process. A helper exit means the
