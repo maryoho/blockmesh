@@ -414,11 +414,30 @@ func (m *VolumeRuntimeManager) rollbackActivation(ctx context.Context, rt *volum
 	if rt.state.current() != OwnerStateStopping && rt.state.current() != OwnerStateStopped {
 		if err := rt.state.transition(OwnerStateStopping); err != nil { return err }
 	}
+	if rt.owner != nil {
+		// Even before the runtime is published as active, an older local DM
+		// table may still exist. Close its kernel gate before releasing this
+		// newly acquired Owner lease.
+		if err := m.backend.StopRequests(ctx, rt.spec.VolumeID); err != nil {
+			return fmt.Errorf("fence DM requests during activation rollback: %w", err)
+		}
+	}
 	if rt.recoveryStarted {
 		if err := m.supervisor.Deactivate(ctx, rt.spec.VolumeID); err != nil {
 			return fmt.Errorf("stop recovery during activation rollback: %w", err)
 		}
 		rt.recoveryStarted = false
+	}
+	if rt.owner != nil {
+		if err := m.backend.DrainMetadataIO(ctx, rt.spec.VolumeID); err != nil {
+			return fmt.Errorf("drain DM/metadata I/O during activation rollback: %w", err)
+		}
+		rt.ownerFailureMu.Lock()
+		ownerFailure := rt.ownerFailure
+		rt.ownerFailureMu.Unlock()
+		if ownerFailure != nil {
+			return fmt.Errorf("Owner Lease fail-stop did not complete during activation rollback; retaining resources: %w", ownerFailure)
+		}
 	}
 	if rt.reader != nil {
 		if err := rt.reader.CloseDrained(ctx, true); err != nil {

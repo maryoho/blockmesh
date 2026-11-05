@@ -165,7 +165,7 @@ func TestVolumeRuntimeActivationFailureRollsBack(t *testing.T) {
 	failing:=&runtimeFailingWALBackend{runtimeTestBackend:b,err:errors.New("bad WAL")}
 	m,err:=NewVolumeRuntimeManager(failing);if err!=nil{t.Fatal(err)}
 	if err=m.Activate(context.Background(),runtimeTestSpec(VolumeRuntimeReadWrite));err==nil{t.Fatal("expected WAL recovery error")}
-	want:=[]string{"device-open","owner-acquire","wal-recover","owner-release","device-close"}
+	want:=[]string{"device-open","owner-acquire","wal-recover","requests-stop","io-drain","owner-release","device-close"}
 	if got:=b.snapshot();!reflect.DeepEqual(got,want){t.Fatalf("rollback order got %v want %v",got,want)}
 	if len(m.ActiveVolumes())!=0{t.Fatal("failed activation was published")}
 }
@@ -344,4 +344,17 @@ func TestVolumeRuntimeChecksOwnerLeaseBeforeWALReplay(t *testing.T) {
 	for _,event:=range base.snapshot(){
 		if event=="wal-recover"||event=="metadata-open"||event=="requests-enable"{t.Fatalf("unsafe operation ran with invalid Owner lease: %v",base.snapshot())}
 	}
+}
+
+func TestVolumeRuntimeRollbackDrainFailureRetainsOwnerAndDevice(t *testing.T) {
+	b:=&runtimeTestBackend{drainErr:errors.New("kernel DM writes not drained")}
+	failing:=&runtimeFailingWALBackend{runtimeTestBackend:b,err:errors.New("WAL replay failed")}
+	m,err:=NewVolumeRuntimeManager(failing);if err!=nil{t.Fatal(err)}
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));err==nil{t.Fatal("expected activation failure")}
+	if got:=m.RuntimeState("vol-runtime");got!=OwnerStateStopping{t.Fatalf("runtime state=%s",got)}
+	for _,event:=range b.snapshot(){if event=="owner-release"||event=="device-close"{t.Fatalf("owner/device released before DM drain: %v",b.snapshot())}}
+	b.mu.Lock();b.drainErr=nil;b.mu.Unlock()
+	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
+	if got:=b.snapshot();got[len(got)-2]!="owner-release"||got[len(got)-1]!="device-close"{t.Fatalf("retry cleanup order=%v",got)}
 }

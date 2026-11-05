@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /* BlockMesh linear DM target with kernel-enforced RW OwnerEpoch admission. */
 #include <linux/bio.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/blkdev.h>
 #include <linux/device-mapper.h>
 #include <linux/module.h>
@@ -182,7 +184,8 @@ static int bm_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	bm->owner_epoch = 0; bm->gate_open = false; bm->fenced = true;
 	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &bm->dev);
 	if (ret) { ti->error = "cannot open underlying device"; kfree(bm); return ret; }
-	if (bm->start + ti->len > bdev_nr_sectors(bm->dev->bdev)) {
+	if (bm->start > bdev_nr_sectors(bm->dev->bdev) ||
+	    ti->len > bdev_nr_sectors(bm->dev->bdev) - bm->start) {
 		ti->error = "target range exceeds underlying device";
 		dm_put_device(ti, bm->dev); kfree(bm); return -EINVAL;
 	}
