@@ -78,8 +78,17 @@ static int bm_owner_prepare(struct bm_target *bm, const char *arg)
 	unsigned long flags;
 	int ret = kstrtou64(arg, 10, &epoch);
 	if (ret || !epoch) return -EINVAL;
-	bm_close_gate(bm, true);
+	/* Reject stale prepare before closing a newer Owner's open gate. */
+	spin_lock_irqsave(&bm->state_lock, flags);
+	if (epoch <= bm->owner_epoch) {
+		spin_unlock_irqrestore(&bm->state_lock, flags);
+		return -ESTALE;
+	}
+	bm->gate_open = false;
+	bm->fenced = true;
+	spin_unlock_irqrestore(&bm->state_lock, flags);
 	bm_wait_for_drain(bm);
+	/* bm_message serializes all control transitions with control_lock. */
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch <= bm->owner_epoch) ret = -ESTALE;
 	else { bm->owner_epoch = epoch; bm->fenced = false; ret = 0; }

@@ -117,7 +117,8 @@ func TestTwoNodeTakeoverDoesNotEnableNewDMGateWhenAnyPRPathFails(t *testing.T){
 	if err=gateA.Enable(context.Background(),"dm-old",leaseA.Epoch());err!=nil{t.Fatal(err)}
 	if err=leaseA.Close();err!=nil{t.Fatal(err)}
 	fencerB:=&takeoverDMPathFencer{paths:[]string{"mpatha","mpathb"},failPath:"mpathb",oldGate:gateA,oldEpoch:leaseA.Epoch()}
-	nodeB:=newTakeoverCoordinator(t,locker,recordsB,"node-b","boot-b",fencerB,&integrationDrain{})
+	failedDrain:=&integrationDrain{}
+	nodeB:=newTakeoverCoordinator(t,locker,recordsB,"node-b","boot-b",fencerB,failedDrain.Drain)
 	leaseB,err:=nodeB.AcquireOwner(context.Background(),"vol-a","node-b","boot-b")
 	if err==nil{_ = leaseB.Close();t.Fatal("new Owner acquired despite failed PR verification on one path")}
 	if gateB.AdmitWrite(){t.Fatal("new node admitted writes after incomplete PR fencing")}

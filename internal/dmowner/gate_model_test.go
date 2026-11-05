@@ -12,6 +12,7 @@ import (
 // kernelGateModel mirrors the DM target's spinlock-protected admission state.
 // It is a deterministic software model, not a substitute for kernel testing.
 type kernelGateModel struct {
+	control sync.Mutex
 	mu sync.Mutex
 	cond *sync.Cond
 	epoch uint64
@@ -26,14 +27,17 @@ func newKernelGateModel()*kernelGateModel{
 }
 func(g *kernelGateModel)Prepare(_ context.Context,_ string,epoch uint64)error{
 	if epoch==0{return errors.New("zero epoch")}
-	g.mu.Lock();defer g.mu.Unlock()
+	g.control.Lock();defer g.control.Unlock()
+	g.mu.Lock()
+	if epoch<=g.epoch{g.mu.Unlock();return errors.New("stale epoch")}
 	g.open=false;g.fenced=true
 	for g.inflight!=0{g.cond.Wait()}
-	if epoch<=g.epoch{return errors.New("stale epoch")}
 	g.epoch=epoch;g.fenced=false
+	g.mu.Unlock()
 	return nil
 }
 func(g *kernelGateModel)Enable(_ context.Context,_ string,epoch uint64)error{
+	g.control.Lock();defer g.control.Unlock()
 	g.mu.Lock();defer g.mu.Unlock()
 	if epoch==0||epoch!=g.epoch{return errors.New("epoch mismatch")}
 	if g.fenced||g.open||g.inflight!=0{return errors.New("gate is fenced, open, or not drained")}
@@ -41,6 +45,7 @@ func(g *kernelGateModel)Enable(_ context.Context,_ string,epoch uint64)error{
 	return nil
 }
 func(g *kernelGateModel)Fence(_ context.Context,_ string,epoch uint64)error{
+	g.control.Lock();defer g.control.Unlock()
 	g.mu.Lock();defer g.mu.Unlock()
 	if epoch==0||epoch<g.epoch{return errors.New("stale fence")}
 	g.open=false;g.fenced=true
