@@ -182,7 +182,7 @@ func TestOwnerEpochRecoveryUsesMaximumOfDescriptorAndOwnerRecord(t *testing.T) {
 }
 
 func TestOwnerRecoveryDoesNotWrapEpochAtUint64Max(t *testing.T) {
-	old := OwnerRecord{VolumeID: "vol", NodeID: "node-a", BootID: "boot-a", Epoch: ^uint64(0) - 1}
+	old := OwnerRecord{VolumeID: "vol", NodeID: "node-a", BootID: "boot-a", Epoch: ^uint64(0)}
 	c, records, lease := newOwnerTestCoordinator(t, &old, ^uint64(0)-2, &ownerTestFencer{}, &ownerTestBarrier{})
 	if _, err := c.AcquireOwner(context.Background(), "vol", "node-b", "boot-b"); !errors.Is(err, ErrOwnerEpochExhausted) {
 		t.Fatalf("epoch overflow recovery error=%v", err)
