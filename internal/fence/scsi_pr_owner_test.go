@@ -61,6 +61,7 @@ func (r *ownerReservationRunner) Run(_ context.Context, _ string, args ...string
 func TestSCSIPROwnerReservationRegistersReservesAndVerifiesEveryPath(t *testing.T) {
 	runner:=&ownerReservationRunner{keys:map[string]map[uint64]bool{}}
 	manager:=&SCSIPROwnerReservation{Paths:[]PRPath{{Device:"/dev/a",LocalKey:0xa1},{Device:"/dev/b",LocalKey:0xb2}},Runner:runner,ReservationType:6}
+	if err:=manager.PrepareOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
 	if err:=manager.EstablishOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
 	if !runner.keys["/dev/a"][0xa1] || !runner.keys["/dev/b"][0xb2] { t.Fatal("not all path-scoped keys registered") }
 	if runner.holder!=0xa1 || runner.prType!=6 { t.Fatalf("reservation holder=%x type=%d",runner.holder,runner.prType) }
@@ -69,6 +70,7 @@ func TestSCSIPROwnerReservationRegistersReservesAndVerifiesEveryPath(t *testing.
 func TestSCSIPROwnerReservationAcceptsAmbiguousReserveWhenAllPathsVerify(t *testing.T) {
 	runner:=&ownerReservationRunner{keys:map[string]map[uint64]bool{},reserveErr:true}
 	manager:=&SCSIPROwnerReservation{Paths:[]PRPath{{Device:"/dev/a",LocalKey:0xa1},{Device:"/dev/b",LocalKey:0xb2}},Runner:runner,ReservationType:6}
+	if err:=manager.PrepareOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
 	if err:=manager.EstablishOwnerReservation(context.Background(),"node-a","boot-a");err!=nil {
 		t.Fatalf("durably committed reservation was not recognized after lost response: %v",err)
 	}
@@ -77,6 +79,7 @@ func TestSCSIPROwnerReservationAcceptsAmbiguousReserveWhenAllPathsVerify(t *test
 func TestSCSIPROwnerReservationFailsClosedOnAnyPathReadFailure(t *testing.T) {
 	runner:=&ownerReservationRunner{keys:map[string]map[uint64]bool{},failReadReservation:"/dev/b"}
 	manager:=&SCSIPROwnerReservation{Paths:[]PRPath{{Device:"/dev/a",LocalKey:0xa1},{Device:"/dev/b",LocalKey:0xb2}},Runner:runner,ReservationType:6}
+	if err:=manager.PrepareOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
 	if err:=manager.EstablishOwnerReservation(context.Background(),"node-a","boot-a");err==nil { t.Fatal("reservation accepted with unreadable component path") }
 	// Do not unregister after an uncertain reservation: the next Owner must
 	// fence this identity using its durable OwnerRecord.
