@@ -29,6 +29,21 @@ type SCSIPROwnerReservation struct {
 	Runner CommandRunner
 }
 
+// PrepareOwnerReservation registers the new Owner's path-scoped keys before
+// the previous Owner is fenced. PREEMPT AND ABORT must use a key already
+// registered by the new initiator on each component path.
+func (r *SCSIPROwnerReservation) PrepareOwnerReservation(ctx context.Context, nodeID, bootID string) error {
+	if r == nil { return errors.New("SCSI PR Owner reservation manager is required") }
+	if ctx == nil { return errors.New("context is required") }
+	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(bootID) == "" { return errors.New("Owner node and boot identities are required") }
+	if err := validatePRPaths(r.Paths); err != nil { return err }
+	binary := r.Binary; if binary == "" { binary = "sg_persist" }
+	runner := r.Runner; if runner == nil { runner = execRunner{} }
+	timeout := r.Timeout; if timeout <= 0 { timeout = 30 * time.Second }
+	registrar := &SCSIPRRegistrar{Binary: binary, Paths: r.Paths, Timeout: timeout, Runner: runner}
+	if err := registrar.RegisterReader(ctx, nodeID, bootID); err != nil { return fmt.Errorf("register new Owner PR keys on all paths: %w", err) }
+	return nil
+}
 func (r *SCSIPROwnerReservation) EstablishOwnerReservation(ctx context.Context, nodeID, bootID string) error {
 	if r == nil { return errors.New("SCSI PR Owner reservation manager is required") }
 	if ctx == nil { return errors.New("context is required") }
@@ -52,11 +67,12 @@ func (r *SCSIPROwnerReservation) EstablishOwnerReservation(ctx context.Context, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	registrar := &SCSIPRRegistrar{Binary: binary, Paths: r.Paths, Timeout: timeout, Runner: runner}
-	if err := registrar.RegisterReader(ctx, nodeID, bootID); err != nil {
-		return fmt.Errorf("register new Owner PR keys on all paths: %w", err)
-	}
 	holder := r.Paths[0].LocalKey
+	for _, path := range r.Paths {
+		present, err := (&SCSIPRFencer{}).keyPresent(ctx, runner, binary, path.Device, path.LocalKey)
+		if err != nil { return fmt.Errorf("preflight prepared Owner PR key on %s: %w", path.Device, err) }
+		if !present { return fmt.Errorf("Owner PR key %x was not prepared on %s before RESERVE", path.LocalKey, path.Device) }
+	}
 	output, reserveErr := runner.Run(ctx, binary, "--out", "--reserve",
 		fmt.Sprintf("--param-rk=%x", holder), fmt.Sprintf("--prout-type=%d", prType),
 		"--device="+r.Paths[0].Device)
