@@ -42,6 +42,7 @@ func validPoolRuntimeConfig() PoolRuntimeConfig {
 		OnReaderLeaseLost: func(context.Context, VolumeRuntimeSpec, error) {},
 		OnOwnerLeaseLost: func(context.Context, VolumeRuntimeSpec, error) error { return nil },
 		EnableRequests: func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error { return nil },
+		EnableRequestsGuarded: func(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error{return guard()},
 		StopRequests: func(context.Context, string) error { return nil },
 		DrainMetadataIO: func(context.Context, string) error { return nil },
 		CloseMetadata: func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error { return nil },
@@ -113,6 +114,7 @@ type poolRuntimeProofLease struct {
 func (l *poolRuntimeProofLease) Close()error{l.closed=true;return nil}
 func (l *poolRuntimeProofLease) Epoch()uint64{if l.epoch!=0{return l.epoch};return l.record.Epoch}
 func (l *poolRuntimeProofLease) Lost()<-chan error{return l.lost}
+func (l *poolRuntimeProofLease) Valid()bool{return true}
 func (l *poolRuntimeProofLease) OwnerRecord()volume.OwnerRecord{return l.record}
 func (l *poolRuntimeProofLease) ReservationVerified()bool{return l.verified}
 
