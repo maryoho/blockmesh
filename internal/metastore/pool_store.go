@@ -82,10 +82,10 @@ func validatePoolStoreGeometry(sb Superblock, pool format.Superblock, index uint
 }
 
 // OwnerRecordRange returns the two reserved SAN OwnerRecord pages as byte offsets.
-	// The caller can pass these offsets directly to volume.NewSANOwnerRecordStore.
+	// Pass Store.Device() and these offsets to volume.NewSANOwnerRecordStore.
 	// The returned pages are private to this Volume and excluded from Arena,
 	// Lifecycle and Reader Table geometry.
-	func (s *Store) OwnerRecordRange() (uint64, uint64, error) {
+func (s *Store) OwnerRecordRange() (uint64, uint64, error) {
 		if s == nil || !s.poolBacked { return 0, 0, ErrGeometry }
 		reservedBytes := s.poolSB.MetadataSize - s.poolSB.ReservedOffset
 		slotBytes := (reservedBytes / uint64(format.MaxVolumeDescriptors)) / PageSize * PageSize
