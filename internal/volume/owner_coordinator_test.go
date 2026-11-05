@@ -21,6 +21,14 @@ func (l *ownerTestLocker) Acquire(context.Context,string)(lock.Lease,error){retu
 func (l *ownerTestLocker) Lock(context.Context,string)(func()error,error){return nil,errors.New("unused")}
 type ownerTestFencer struct{ calls []OwnerRecord; err error }
 func (f *ownerTestFencer) FenceNode(_ context.Context,node,boot string)error{f.calls=append(f.calls,OwnerRecord{NodeID:node,BootID:boot});return f.err}
+
+type ownerTestReservation struct { calls int; node string; boot string; err error; recordVisible bool; records *ownerTestRecords }
+func (r *ownerTestReservation) EstablishOwnerReservation(_ context.Context,node,boot string) error {
+	r.calls++; r.node=node; r.boot=boot
+	if r.records != nil { r.recordVisible = r.records.exists && r.records.record.NodeID == node && r.records.record.BootID == boot }
+	return r.err
+}
+
 type ownerTestRecords struct{ record OwnerRecord; exists bool; writes int; err error }
 func (s *ownerTestRecords) Load(context.Context,string)(OwnerRecord,bool,error){return s.record,s.exists,nil}
 func (s *ownerTestRecords) CompareAndSwap(_ context.Context,_ string,expected *OwnerRecord,next OwnerRecord)error{
@@ -38,7 +46,7 @@ func newOwnerTestCoordinator(t *testing.T, record *OwnerRecord, descriptorEpoch 
 	if record!=nil{records.record=*record;records.exists=true}
 	c,err:=NewOwnerCoordinator(OwnerCoordinatorConfig{
 		Locker:&ownerTestLocker{lease:lease},ResourceFor:func(string)string{return "pool:vol-owner:/dev/test:0"},
-		Records:records,Fencer:fencer,ReadEpoch:func(context.Context,string)(uint64,error){return descriptorEpoch,nil},
+		Records:records,Fencer:fencer,Reservation:&ownerTestReservation{records:records},ReadEpoch:func(context.Context,string)(uint64,error){return descriptorEpoch,nil},
 		DrainOldOwner:barrier.DrainOldOwner,LeasePollPeriod:time.Millisecond,
 	})
 	if err!=nil{t.Fatal(err)}
@@ -126,4 +134,34 @@ func TestOwnerLeaseCloseIsIdempotent(t *testing.T) {
 	if err:=lease.Close();err!=nil{t.Fatal(err)}
 	if err:=lease.Close();err!=nil{t.Fatal(err)}
 	if !underlying.closed{t.Fatal("underlying lease was not closed")}
+}
+
+
+func TestOwnerCoordinatorRequiresReservationManager(t *testing.T) {
+	lease:=&ownerTestLease{valid:true}
+	_,err:=NewOwnerCoordinator(OwnerCoordinatorConfig{
+		Locker:&ownerTestLocker{lease:lease},ResourceFor:func(string)string{return "owner"},
+		Records:&ownerTestRecords{},Fencer:&ownerTestFencer{},ReadEpoch:func(context.Context,string)(uint64,error){return 1,nil},
+		DrainOldOwner:(&ownerTestBarrier{}).DrainOldOwner,
+	})
+	if err==nil { t.Fatal("coordinator accepted missing Owner reservation manager") }
+}
+
+func TestOwnerCoordinatorPublishesIdentityBeforeReservationAndFailsClosed(t *testing.T) {
+	lease:=&ownerTestLease{valid:true}
+	records:=&ownerTestRecords{}
+	reservation:=&ownerTestReservation{records:records,err:errors.New("reservation verification mismatch")}
+	coordinator,err:=NewOwnerCoordinator(OwnerCoordinatorConfig{
+		Locker:&ownerTestLocker{lease:lease},ResourceFor:func(string)string{return "owner"},
+		Records:records,Fencer:&ownerTestFencer{},Reservation:reservation,
+		ReadEpoch:func(context.Context,string)(uint64,error){return 1,nil},
+		DrainOldOwner:(&ownerTestBarrier{}).DrainOldOwner,LeasePollPeriod:time.Millisecond,
+	})
+	if err!=nil { t.Fatal(err) }
+	if _,err=coordinator.AcquireOwner(context.Background(),"vol","node-b","boot-b");err==nil { t.Fatal("Owner acquisition succeeded without verified reservation") }
+	if records.writes!=1 || records.record.NodeID!="node-b" || records.record.BootID!="boot-b" {
+		t.Fatalf("durable recovery identity was not retained: %+v writes=%d",records.record,records.writes)
+	}
+	if reservation.calls!=1 || !reservation.recordVisible { t.Fatalf("reservation was not attempted after durable OwnerRecord: %+v",reservation) }
+	if !lease.closed { t.Fatal("failed reservation leaked sanlock Owner lease") }
 }
