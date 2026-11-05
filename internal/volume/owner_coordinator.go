@@ -162,7 +162,7 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	if !lease.Valid() {
 		return nil, errors.New("Owner sanlock lease lost while establishing SCSI PR reservation")
 	}
-	out:=newOwnerLease(lease,next.Epoch,c.cfg.LeasePollPeriod)
+	out:=newOwnerLease(lease,next,c.cfg.LeasePollPeriod)
 	releaseOnError=false
 	return out,nil
 }
@@ -173,6 +173,8 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 type OwnerLease struct {
 	lease lock.Lease
 	epoch uint64
+	record OwnerRecord
+	reservationVerified bool
 	lost chan error
 	stop chan struct{}
 	done chan struct{}
@@ -182,8 +184,8 @@ type OwnerLease struct {
 	err error
 }
 
-func newOwnerLease(lease lock.Lease, epoch uint64, poll time.Duration) *OwnerLease {
-	l:=&OwnerLease{lease:lease,epoch:epoch,lost:make(chan error,1),stop:make(chan struct{}),done:make(chan struct{})}
+func newOwnerLease(lease lock.Lease, record OwnerRecord, poll time.Duration) *OwnerLease {
+	l:=&OwnerLease{lease:lease,epoch:record.Epoch,record:record,reservationVerified:true,lost:make(chan error,1),stop:make(chan struct{}),done:make(chan struct{})}
 	go func(){
 		defer close(l.done)
 		t:=time.NewTicker(poll);defer t.Stop()
@@ -202,6 +204,10 @@ func newOwnerLease(lease lock.Lease, epoch uint64, poll time.Duration) *OwnerLea
 	return l
 }
 func (l *OwnerLease) Epoch() uint64 { if l==nil{return 0};return l.epoch }
+// OwnerRecord returns the durable identity published before PR RESERVE.
+func (l *OwnerLease) OwnerRecord() OwnerRecord { if l==nil{return OwnerRecord{}};return l.record }
+// ReservationVerified is true only after holder/type were verified on every configured SAN path.
+func (l *OwnerLease) ReservationVerified() bool { return l!=nil && l.reservationVerified }
 func (l *OwnerLease) Lost() <-chan error { if l==nil{return nil};return l.lost }
 func (l *OwnerLease) Err() error { if l==nil{return errors.New("nil Owner lease")};l.mu.Lock();defer l.mu.Unlock();return l.err }
 func (l *OwnerLease) Close() error {
