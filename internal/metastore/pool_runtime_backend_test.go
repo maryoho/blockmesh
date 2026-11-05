@@ -108,13 +108,14 @@ type poolRuntimeProofLease struct {
 	record volume.OwnerRecord
 	epoch uint64
 	verified bool
+	valid bool
 	lost chan error
 	closed bool
 }
 func (l *poolRuntimeProofLease) Close()error{l.closed=true;return nil}
 func (l *poolRuntimeProofLease) Epoch()uint64{if l.epoch!=0{return l.epoch};return l.record.Epoch}
 func (l *poolRuntimeProofLease) Lost()<-chan error{return l.lost}
-func (l *poolRuntimeProofLease) Valid()bool{return true}
+func (l *poolRuntimeProofLease) Valid()bool{return l.valid}
 func (l *poolRuntimeProofLease) OwnerRecord()volume.OwnerRecord{return l.record}
 func (l *poolRuntimeProofLease) ReservationVerified()bool{return l.verified}
 
@@ -130,7 +131,7 @@ func TestPoolRuntimeRequiresMatchingOwnerRecordAndPRProof(t *testing.T) {
 		{name:"wrong epoch",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:8},epoch:9,verified:true},
 	} {
 		t.Run(tc.name,func(t *testing.T){
-			lease:=&poolRuntimeProofLease{record:tc.record,epoch:tc.epoch,verified:tc.verified,lost:make(chan error)}
+			lease:=&poolRuntimeProofLease{record:tc.record,epoch:tc.epoch,verified:tc.verified,valid:true,lost:make(chan error)}
 			cfg:=validPoolRuntimeConfig()
 			cfg.Owner=poolRuntimeProofOwner{lease:lease}
 			backend,err:=NewPoolVolumeRuntimeBackend(cfg)
@@ -144,4 +145,28 @@ func TestPoolRuntimeRequiresMatchingOwnerRecordAndPRProof(t *testing.T) {
 			}
 		})
 	}
+}
+
+
+func TestPoolRuntimeGuardedAdmissionInvokesLeaseGuardAtGate(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	guardCalled:=false
+	cfg:=validPoolRuntimeConfig()
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	cfg.EnableRequestsGuarded=func(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error{
+		guardCalled=true
+		lease.valid=false // Model sanlock lease loss immediately before DM queue enable.
+		return guard()
+	}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
+	err=backend.EnableRequestsGuarded(context.Background(),spec,nil,func()error{
+		if !lease.Valid(){return errors.New("sanlock Owner lease lost at admission gate")}
+		return nil
+	})
+	if err==nil||!guardCalled{t.Fatalf("guarded admission did not reject lost lease: called=%v err=%v",guardCalled,err)}
 }
