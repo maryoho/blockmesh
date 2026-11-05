@@ -14,6 +14,9 @@ var ErrOwnerReservationMismatch = errors.New("SCSI PR Owner reservation does not
 // OwnerReservation establishes the new Owner's reservation and verifies it
 // through every configured multipath component path before RW admission.
 type OwnerReservation interface {
+	// Prepare registers local path-scoped keys before previous-owner fencing.
+	PrepareOwnerReservation(context.Context, string, string) error
+	// Establish issues RESERVE and verifies holder/type on every component path.
 	EstablishOwnerReservation(context.Context, string, string) error
 }
 
