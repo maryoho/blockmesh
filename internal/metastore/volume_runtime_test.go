@@ -122,6 +122,7 @@ func TestVolumeRuntimeReadOnlyLifecycleOrder(t *testing.T) {
 	if err=m.Activate(context.Background(),conflict);!errors.Is(err,ErrVolumeRuntimeConflict){t.Fatalf("conflicting activation: %v",err)}
 	waitRuntimeRecovery(t,b)
 	if got:=m.ActiveVolumes();!reflect.DeepEqual(got,[]string{"vol-runtime"}){t.Fatalf("active volumes=%v",got)}
+	if got:=m.RuntimeState("vol-runtime");got!=OwnerStateRequestsAdmitted{t.Fatalf("RO runtime state=%s",got)}
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
 	got:=b.snapshot()
@@ -133,6 +134,7 @@ func TestVolumeRuntimeReadWriteRecoversWALAfterOwnerLease(t *testing.T) {
 	b:=&runtimeTestBackend{}
 	m,err:=NewVolumeRuntimeManager(b);if err!=nil{t.Fatal(err)}
 	if err=m.Activate(context.Background(),runtimeTestSpec(VolumeRuntimeReadWrite));err!=nil{t.Fatal(err)}
+	if got:=m.RuntimeState("vol-runtime");got!=OwnerStateRequestsAdmitted{t.Fatalf("RW runtime state=%s",got)}
 	waitRuntimeRecovery(t,b)
 	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
 	if err=m.Deactivate(ctx,"vol-runtime");err!=nil{t.Fatal(err)}
@@ -212,6 +214,7 @@ func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
 	lease.lost<-errors.New("sanlock helper exited")
 	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("owner lease loss handler was not called")}
 	if got:=m.ActiveVolumes();len(got)!=0{t.Fatalf("lease-lost Owner still reported active: %v",got)}
+	if got:=m.RuntimeState("vol-runtime");got!=OwnerStateLeaseLost{t.Fatalf("lease loss state=%s want owner-lease-lost",got)}
 	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));!errors.Is(err,ErrVolumeRuntimeStopping){
 		t.Fatalf("activation after Owner Lease loss=%v, want stopping",err)
 	}
