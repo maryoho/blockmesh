@@ -141,16 +141,18 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 	proof, ok := lease.(interface {
 		OwnerRecord() volume.OwnerRecord
 		ReservationVerified() bool
+		PreviousOwnerFenced() bool
+		OldOwnerIODrained() bool
 	})
 	if !ok {
 		_ = lease.Close()
-		return nil, errors.New("Pool Owner provider must return a lease carrying durable OwnerRecord and all-path PR reservation proof")
+		return nil, errors.New("Pool Owner provider must return a lease carrying durable OwnerRecord, old-owner fencing/drain and all-path PR reservation proof")
 	}
 	record := proof.OwnerRecord()
-	if !proof.ReservationVerified() || record.VolumeID != spec.VolumeID ||
+	if !proof.ReservationVerified() || !proof.PreviousOwnerFenced() || !proof.OldOwnerIODrained() || record.VolumeID != spec.VolumeID ||
 		record.NodeID != spec.NodeID || record.BootID != spec.BootID || record.Epoch != lease.Epoch() {
 		_ = lease.Close()
-		return nil, errors.New("Pool Owner lease proof does not match requested Volume identity, epoch, or verified SCSI PR reservation")
+		return nil, errors.New("Pool Owner lease proof does not match requested Volume identity, epoch, old-owner fencing/drain, or verified SCSI PR reservation")
 	}
 	if health, ok := lease.(interface{ Valid() bool }); !ok || !health.Valid() {
 		_ = lease.Close()
