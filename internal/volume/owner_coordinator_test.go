@@ -22,7 +22,8 @@ func (l *ownerTestLocker) Lock(context.Context,string)(func()error,error){return
 type ownerTestFencer struct{ calls []OwnerRecord; err error }
 func (f *ownerTestFencer) FenceNode(_ context.Context,node,boot string)error{f.calls=append(f.calls,OwnerRecord{NodeID:node,BootID:boot});return f.err}
 
-type ownerTestReservation struct { calls int; node string; boot string; err error; recordVisible bool; records *ownerTestRecords }
+type ownerTestReservation struct { prepareCalls int; calls int; node string; boot string; err error; recordVisible bool; records *ownerTestRecords }
+func (r *ownerTestReservation) PrepareOwnerReservation(context.Context,string,string) error { r.prepareCalls++; return nil }
 func (r *ownerTestReservation) EstablishOwnerReservation(_ context.Context,node,boot string) error {
 	r.calls++; r.node=node; r.boot=boot
 	if r.records != nil { r.recordVisible = r.records.exists && r.records.record.NodeID == node && r.records.record.BootID == boot }
@@ -162,6 +163,6 @@ func TestOwnerCoordinatorPublishesIdentityBeforeReservationAndFailsClosed(t *tes
 	if records.writes!=1 || records.record.NodeID!="node-b" || records.record.BootID!="boot-b" {
 		t.Fatalf("durable recovery identity was not retained: %+v writes=%d",records.record,records.writes)
 	}
-	if reservation.calls!=1 || !reservation.recordVisible { t.Fatalf("reservation was not attempted after durable OwnerRecord: %+v",reservation) }
+	if reservation.prepareCalls!=1 || reservation.calls!=1 || !reservation.recordVisible { t.Fatalf("reservation was not attempted after durable OwnerRecord: %+v",reservation) }
 	if !lease.closed { t.Fatal("failed reservation leaked sanlock Owner lease") }
 }
