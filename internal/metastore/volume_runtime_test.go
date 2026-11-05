@@ -174,19 +174,28 @@ func (b *runtimeFailingWALBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,
 type runtimeMonitoredOwnerLease struct {
 	*runtimeTestOwnerLease
 	lost chan error
+	valid atomic.Bool
 }
 func (l *runtimeMonitoredOwnerLease) Lost() <-chan error { return l.lost }
+func (l *runtimeMonitoredOwnerLease) Valid() bool { return l.valid.Load() }
 
 type runtimeOwnerLossBackend struct {
 	*runtimeTestBackend
 	lease *runtimeMonitoredOwnerLease
 	lossHandled chan struct{}
 	lossErr error
+	loseDuringWAL bool
 }
 func (b *runtimeOwnerLossBackend) AcquireOwnerLease(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease,error) {
 	b.add("owner-acquire")
 	return b.lease,nil
 }
+func (b *runtimeOwnerLossBackend) RecoverWAL(context.Context,VolumeRuntimeSpec,RuntimeMetadataDevice)error {
+	b.add("wal-recover")
+	if b.loseDuringWAL { b.lease.valid.Store(false) }
+	return nil
+}
+
 func (b *runtimeOwnerLossBackend) HandleOwnerLeaseLost(ctx context.Context, spec VolumeRuntimeSpec, cause error) error {
 	b.add("owner-fail-stop")
 	stopErr:=b.StopRequests(ctx,spec.VolumeID)
@@ -204,6 +213,7 @@ func TestVolumeRuntimeOwnerLeaseLossFailStopsDataPath(t *testing.T) {
 		},
 		lost:make(chan error,1),
 	}
+	lease.valid.Store(true)
 	backend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{})}
 	m,err:=NewVolumeRuntimeManager(backend)
 	if err!=nil{t.Fatal(err)}
@@ -231,6 +241,7 @@ func TestVolumeRuntimeRetainsResourcesWhenOwnerFailStopFails(t *testing.T) {
 		},
 		lost:make(chan error,1),
 	}
+	lease.valid.Store(true)
 	backend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{}),lossErr:errors.New("DM suspend failed")}
 	m,err:=NewVolumeRuntimeManager(backend)
 	if err!=nil{t.Fatal(err)}
@@ -258,4 +269,29 @@ func TestVolumeRuntimeRetainsResourcesWhenOwnerFailStopFails(t *testing.T) {
 			t.Fatalf("runtime resources released after failed fail-stop: %v",events)
 		}
 	}
+}
+
+
+func TestVolumeRuntimeSynchronouslyRejectsLeaseLostDuringWAL(t *testing.T) {
+	base:=&runtimeTestBackend{}
+	lease:=&runtimeMonitoredOwnerLease{
+		runtimeTestOwnerLease:&runtimeTestOwnerLease{
+			closer:runtimeTestCloser{events:&base.events,mu:&base.mu,name:"owner-release"},epoch:10,
+		},
+		lost:make(chan error,1),
+	}
+	lease.valid.Store(true)
+	backend:=&runtimeOwnerLossBackend{runtimeTestBackend:base,lease:lease,lossHandled:make(chan struct{}),loseDuringWAL:true}
+	m,err:=NewVolumeRuntimeManager(backend);if err!=nil{t.Fatal(err)}
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second);defer cancel()
+	if err=m.Activate(ctx,runtimeTestSpec(VolumeRuntimeReadWrite));err==nil{t.Fatal("activation continued after synchronous sanlock lease loss")}
+	select{case <-backend.lossHandled:case <-ctx.Done():t.Fatal("synchronous lease loss did not invoke fail-stop handler")}
+	for _,event:=range base.snapshot(){
+		if event=="metadata-open"||event=="owner-epoch-publish"||event=="requests-enable"{
+			t.Fatalf("activation crossed safety gate after lease loss: %v",base.snapshot())
+		}
+	}
+	released:=false
+	for _,event:=range base.snapshot(){if event=="owner-release"{released=true}}
+	if !released{t.Fatal("Owner Lease was not released after safe rollback")}
 }
