@@ -40,7 +40,7 @@ func TestDMSetupGateFenceCurrentClosesCurrentTargetAndLeavesFreshTargetClosed(t 
 	if got:=r.calls[1].args[3];got!="owner_fence 17 99"{t.Fatalf("message=%q",got)}
 	r.calls=nil;r.status="0 100 blockmesh instance=100 epoch=0 gate=0 fenced=1 inflight=0"
 	if err:=g.FenceCurrent(context.Background(),"/dev/mapper/bm-vol");err!=nil{t.Fatal(err)}
-	if len(r.calls)!=2{t.Fatalf("fresh target should not need a fence message: %+v",r.calls)}
+	if len(r.calls)!=1{t.Fatalf("fresh target should only need one status read: %+v",r.calls)}
 }
 func TestDMSetupGateRejectsMissingOrInvalidInstance(t *testing.T){
 	for _,status:=range []string{"0 100 blockmesh epoch=0 gate=0","0 100 blockmesh instance=0 epoch=0","0 100 blockmesh instance=xyz epoch=0"}{

@@ -184,7 +184,7 @@ func TestPoolRuntimeGuardedAdmissionInvokesLeaseGuardAtGate(t *testing.T) {
 	})
 	if err==nil||!guardCalled{t.Fatalf("guarded admission did not reject lost lease: called=%v err=%v",guardCalled,err)}
 	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
-	if len(gate.events)==0||gate.events[0]!="prepare:/dev/mapper/vol-a:9"{t.Fatalf("kernel prepare must precede lease guard: %v",gate.events)}
+	if len(gate.events)<2||gate.events[0]!="fence-current:/dev/mapper/vol-a"||gate.events[1]!="prepare:/dev/mapper/vol-a:9"{t.Fatalf("local stale gate must be fenced before epoch prepare: %v",gate.events)}
 	for _,event:=range gate.events{if strings.HasPrefix(event,"enable:"){t.Fatalf("kernel gate opened after failed guard: %v",gate.events)}}
 }
 
