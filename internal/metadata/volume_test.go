@@ -19,14 +19,16 @@ func TestInitAndReadPoolVolumeDescriptor(t *testing.T) {
 	if err=d.Sync();err!=nil{t.Fatal(err)}
 	slotBytes:=(sb.MetadataSize-sb.ReservedOffset)/uint64(format.MaxVolumeDescriptors)/format.PageSize*format.PageSize
 	slotPages:=slotBytes/format.PageSize
-	readerStart:=sb.ReservedOffset/format.PageSize+7*slotPages+slotPages-format.ReaderTablePages
+	slotStart:=sb.ReservedOffset/format.PageSize+7*slotPages
+	ownerStart:=slotStart
+	readerStart:=slotStart+slotPages-format.ReaderTablePages
 	stale:=make([]byte,format.PageSize);stale[0]=0xa5
 	if err=writeAtFull(d,stale,int64(readerStart*format.PageSize));err!=nil{t.Fatal(err)}
 	got,err:=InitVolume(d,sb,7,"volume-seven",3,8);if err!=nil{t.Fatal(err)}
 	cleared:=make([]byte,format.PageSize)
 	if err=readAtFull(d,cleared,int64(readerStart*format.PageSize));err!=nil{t.Fatal(err)}
 	for _,b:=range cleared { if b!=0 { t.Fatal("Reader Table page was not cleared during Volume initialization") } }
-	if got.VolumeID!="volume-seven"||got.OwnerEpoch!=3||got.Generation!=1||got.ArenaPages==0||got.LifecyclePages!=8 {t.Fatalf("unexpected descriptor: %+v",got)}
+	if got.VolumeID!="volume-seven"||got.OwnerEpoch!=3||got.Generation!=1||got.ArenaPages==0||got.LifecyclePages!=8||got.ArenaStart!=ownerStart+format.OwnerRecordPages {t.Fatalf("unexpected descriptor: %+v",got)}
 	read,err:=ReadVolumeDescriptor(d,sb,7);if err!=nil{t.Fatal(err)}
 	if read!=got {t.Fatalf("read descriptor %+v != written %+v",read,got)}
 	if _,err=InitVolume(d,sb,7,"volume-seven",3,8);!errors.Is(err,ErrVolumeSlotOccupied){t.Fatalf("expected occupied slot, got %v",err)}
