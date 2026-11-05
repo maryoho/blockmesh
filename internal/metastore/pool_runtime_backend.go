@@ -76,10 +76,12 @@ type PoolRuntimeConfig struct {
 	CloseMetadata func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error
 }
 
+type kernelOwnerSession struct { epoch uint64; instance uint64 }
+
 type PoolVolumeRuntimeBackend struct {
 	cfg PoolRuntimeConfig
 	coordinator *SanlockReaderCoordinator
-	ownerEpochs sync.Map
+	ownerSessions sync.Map
 }
 
 func NewPoolVolumeRuntimeBackend(cfg PoolRuntimeConfig) (*PoolVolumeRuntimeBackend, error) {
@@ -169,7 +171,13 @@ func (b *PoolVolumeRuntimeBackend) AcquireOwnerLease(ctx context.Context, spec V
 		_ = lease.Close()
 		return nil, errors.New("Pool Owner provider must return a monitored sanlock Owner Lease")
 	}
-	b.ownerEpochs.Store(spec.VolumeID, lease.Epoch())
+	device, deviceErr := b.kernelDevice(spec.VolumeID)
+	if deviceErr != nil { _ = lease.Close(); return nil, deviceErr }
+	if err := b.cfg.DMGate.FenceCurrent(ctx, device); err != nil {
+		_ = lease.Close()
+		return nil, fmt.Errorf("fence current local DM target after SAN takeover: %w", err)
+	}
+	b.ownerSessions.Delete(spec.VolumeID)
 	return lease, nil
 }
 
@@ -179,10 +187,11 @@ func (b *PoolVolumeRuntimeBackend) kernelDevice(volumeID string) (string, error)
 	return device, nil
 }
 func (b *PoolVolumeRuntimeBackend) fenceKernel(ctx context.Context, volumeID string) error {
-	value, ok := b.ownerEpochs.Load(volumeID)
-	if !ok { return nil }
+	value, ok := b.ownerSessions.Load(volumeID)
 	device, err := b.kernelDevice(volumeID); if err != nil { return err }
-	return b.cfg.DMGate.Fence(ctx, device, value.(uint64))
+	if !ok { return b.cfg.DMGate.FenceCurrent(ctx, device) }
+	session := value.(kernelOwnerSession)
+	return b.cfg.DMGate.Fence(ctx, device, session.epoch, session.instance)
 }
 
 func (b *PoolVolumeRuntimeBackend) openPoolVolume(dev RuntimeMetadataDevice, spec VolumeRuntimeSpec) (*Store, format.Superblock, format.VolumeDescriptor, error) {
@@ -280,13 +289,16 @@ func (b *PoolVolumeRuntimeBackend) EnableRequestsGuarded(ctx context.Context, sp
 	if guard == nil { return errors.New("Owner admission guard is required") }
 	if meta == nil || meta.OwnerEpoch == 0 { return errors.New("durably published nonzero OwnerEpoch is required for kernel DM admission") }
 	device, deviceErr := b.kernelDevice(spec.VolumeID); if deviceErr != nil { return deviceErr }
-	b.ownerEpochs.Store(spec.VolumeID, meta.OwnerEpoch)
-	if err := b.cfg.DMGate.Prepare(ctx, device, meta.OwnerEpoch); err != nil { return fmt.Errorf("prepare kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
+	instance, err := b.cfg.DMGate.Prepare(ctx, device, meta.OwnerEpoch)
+	if err != nil { return fmt.Errorf("prepare kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
+	if instance == 0 { return errors.New("kernel DM target returned a zero table instance ID") }
+	session := kernelOwnerSession{epoch: meta.OwnerEpoch, instance: instance}
+	b.ownerSessions.Store(spec.VolumeID, session)
 	var called atomic.Bool
-	err := b.cfg.EnableRequestsGuarded(ctx, spec, meta, func() error {
+	err = b.cfg.EnableRequestsGuarded(ctx, spec, meta, func() error {
 		called.Store(true)
 		if err := guard(); err != nil { return err }
-		if err := b.cfg.DMGate.Enable(ctx, device, meta.OwnerEpoch); err != nil { return fmt.Errorf("enable kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
+		if err := b.cfg.DMGate.Enable(ctx, device, meta.OwnerEpoch, instance); err != nil { return fmt.Errorf("enable kernel DM OwnerEpoch %d: %w", meta.OwnerEpoch, err) }
 		return nil
 	})
 	if !called.Load() {
@@ -305,9 +317,12 @@ func (b *PoolVolumeRuntimeBackend) StopRequests(ctx context.Context, volumeID st
 }
 func (b *PoolVolumeRuntimeBackend) DrainMetadataIO(ctx context.Context, volumeID string) error {
 	var kernelErr error
-	if value, ok := b.ownerEpochs.Load(volumeID); ok {
+	if value, ok := b.ownerSessions.Load(volumeID); ok {
 		device, err := b.kernelDevice(volumeID)
-		if err != nil { kernelErr = err } else { kernelErr = b.cfg.DMGate.Drain(ctx, device, value.(uint64)) }
+		if err != nil { kernelErr = err } else { session := value.(kernelOwnerSession); kernelErr = b.cfg.DMGate.Drain(ctx, device, session.epoch, session.instance) }
+	} else {
+		device, err := b.kernelDevice(volumeID)
+		if err != nil { kernelErr = err } else { kernelErr = b.cfg.DMGate.FenceCurrent(ctx, device) }
 	}
 	return errors.Join(kernelErr, b.cfg.DrainMetadataIO(ctx, volumeID))
 }

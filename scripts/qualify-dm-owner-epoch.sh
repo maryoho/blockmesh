@@ -41,6 +41,11 @@ expect_write_rejected() {
     exit 1
   fi
 }
+target_instance() {
+  local status
+  status=$(dmsetup status "$name")
+  awk '{for (i=1;i<=NF;i++) if ($i ~ /^instance=/) {sub(/^instance=/,"",$i); print $i; exit}}' <<<"$status"
+}
 expect_message_rejected() {
   local message=$1
   if dmsetup message "$name" 0 "$message" >/dev/null 2>&1; then
@@ -54,21 +59,23 @@ expect_write_rejected
 dd if="$dev" of=/dev/null bs=4096 count=1 status=none
 
 echo "[2/7] prepare/enable current epoch"
-dmsetup message "$name" 0 "owner_prepare 41"
-dmsetup message "$name" 0 "owner_enable 41"
+instance=$(target_instance)
+[[ -n "$instance" ]] || { echo "missing target instance ID" >&2; exit 1; }
+dmsetup message "$name" 0 "owner_prepare 41 $instance"
+dmsetup message "$name" 0 "owner_enable 41 $instance"
 dd if=/dev/zero of="$dev" bs=4096 count=1 conv=notrunc status=none
 
 echo "[3/7] fence drains and closes current epoch"
-dmsetup message "$name" 0 "owner_fence 41"
+dmsetup message "$name" 0 "owner_fence 41 $instance"
 expect_write_rejected
-expect_message_rejected "owner_enable 41"
+expect_message_rejected "owner_enable 41 $instance"
 
 echo "[4/7] stale prepare/fence/enable cannot alter newer epoch"
-dmsetup message "$name" 0 "owner_prepare 42"
-dmsetup message "$name" 0 "owner_enable 42"
-expect_message_rejected "owner_fence 41"
-expect_message_rejected "owner_enable 41"
-expect_message_rejected "owner_prepare 41"
+dmsetup message "$name" 0 "owner_prepare 42 $instance"
+dmsetup message "$name" 0 "owner_enable 42 $instance"
+expect_message_rejected "owner_fence 41 $instance"
+expect_message_rejected "owner_enable 41 $instance"
+expect_message_rejected "owner_prepare 41 $instance"
 dd if=/dev/zero of="$dev" bs=4096 count=1 conv=notrunc status=none
 status=$(dmsetup status "$name")
 echo "$status" | grep -q 'epoch=42 gate=1 fenced=0 inflight=0'
@@ -78,9 +85,13 @@ dmsetup suspend "$name"
 dmsetup reload "$name" --table "0 131072 blockmesh $loop 0"
 dmsetup resume "$name"
 expect_write_rejected
-expect_message_rejected "owner_enable 42"
-dmsetup message "$name" 0 "owner_prepare 43"
-dmsetup message "$name" 0 "owner_enable 43"
+expect_message_rejected "owner_enable 42 $instance"
+old_instance=$instance
+instance=$(target_instance)
+[[ -n "$instance" && "$instance" != "$old_instance" ]] || { echo "table reload did not rotate target instance ID" >&2; exit 1; }
+expect_message_rejected "owner_enable 42 $old_instance"
+dmsetup message "$name" 0 "owner_prepare 43 $instance"
+dmsetup message "$name" 0 "owner_enable 43 $instance"
 
 echo "[6/7] fence while writes are being submitted"
 if command -v fio >/dev/null; then
@@ -89,7 +100,7 @@ if command -v fio >/dev/null; then
     >/tmp/bm-fence-race-$$.log 2>&1 &
   fio_pid=$!
   sleep 0.2
-  dmsetup message "$name" 0 "owner_fence 43"
+  dmsetup message "$name" 0 "owner_fence 43 $instance"
   wait "$fio_pid" || true
   rm -f /tmp/bm-fence-race-$$.log
 else
@@ -101,9 +112,9 @@ echo "$status" | grep -q 'gate=0 fenced=1 inflight=0'
 
 echo "[7/7] a strictly newer epoch is required to reopen"
 expect_write_rejected
-expect_message_rejected "owner_enable 43"
-dmsetup message "$name" 0 "owner_prepare 44"
-dmsetup message "$name" 0 "owner_enable 44"
+expect_message_rejected "owner_enable 43 $instance"
+dmsetup message "$name" 0 "owner_prepare 44 $instance"
+dmsetup message "$name" 0 "owner_enable 44 $instance"
 dd if=/dev/zero of="$dev" bs=4096 count=1 conv=notrunc status=none
 status=$(dmsetup status "$name")
 echo "$status" | grep -q 'epoch=44 gate=1 fenced=0 inflight=0'

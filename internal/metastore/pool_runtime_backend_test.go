@@ -17,10 +17,11 @@ import (
 )
 
 type poolRuntimeTestDMGate struct { events []string }
-func (g *poolRuntimeTestDMGate) Prepare(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("prepare:%s:%d",d,e));return nil}
-func (g *poolRuntimeTestDMGate) Enable(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("enable:%s:%d",d,e));return nil}
-func (g *poolRuntimeTestDMGate) Fence(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("fence:%s:%d",d,e));return nil}
-func (g *poolRuntimeTestDMGate) Drain(_ context.Context,d string,e uint64)error{g.events=append(g.events,fmt.Sprintf("drain:%s:%d",d,e));return nil}
+func (g *poolRuntimeTestDMGate) FenceCurrent(_ context.Context,d string)error{g.events=append(g.events,"fence-current:"+d);return nil}
+func (g *poolRuntimeTestDMGate) Prepare(_ context.Context,d string,e uint64)(uint64,error){g.events=append(g.events,fmt.Sprintf("prepare:%s:%d",d,e));return 0xab,nil}
+func (g *poolRuntimeTestDMGate) Enable(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("enable:%s:%d:%x",d,e,instance));return nil}
+func (g *poolRuntimeTestDMGate) Fence(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("fence:%s:%d:%x",d,e,instance));return nil}
+func (g *poolRuntimeTestDMGate) Drain(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("drain:%s:%d:%x",d,e,instance));return nil}
 type poolRuntimeTestOwner struct{}
 func (poolRuntimeTestOwner) AcquireFencedOwner(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease, error) {
 	return nil, nil
@@ -219,6 +220,6 @@ func TestPoolRuntimeGuardedAdmissionEnablesOnlyAfterKernelPrepareAndLeaseGuard(t
 	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
 	if err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:12},func()error{return nil});err!=nil{t.Fatal(err)}
 	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
-	want:=[]string{"prepare:/dev/mapper/vol-a:12","enable:/dev/mapper/vol-a:12"}
+	want:=[]string{"fence-current:/dev/mapper/vol-a","prepare:/dev/mapper/vol-a:12","enable:/dev/mapper/vol-a:12:ab"}
 	if !reflect.DeepEqual(gate.events,want){t.Fatalf("kernel gate sequence=%v want=%v",gate.events,want)}
 }

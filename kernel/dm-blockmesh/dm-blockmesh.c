@@ -6,6 +6,7 @@
 #include <linux/blkdev.h>
 #include <linux/device-mapper.h>
 #include <linux/module.h>
+#include <linux/random.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -19,6 +20,7 @@ struct bm_target {
 	wait_queue_head_t drain_wait;
 	atomic_t inflight_writes;
 	u64 owner_epoch;
+	u64 instance_id;
 	bool gate_open;
 	bool fenced;
 };
@@ -72,12 +74,15 @@ static void bm_wait_for_drain(struct bm_target *bm)
 	wait_event(bm->drain_wait, atomic_read(&bm->inflight_writes) == 0);
 }
 /* owner_prepare E: close+drain, then install strictly newer E while closed. */
-static int bm_owner_prepare(struct bm_target *bm, const char *arg)
+static int bm_owner_prepare(struct bm_target *bm, const char *arg, const char *instance_arg)
 {
-	u64 epoch;
+	u64 epoch, instance;
 	unsigned long flags;
 	int ret = kstrtou64(arg, 10, &epoch);
 	if (ret || !epoch) return -EINVAL;
+	ret = kstrtou64(instance_arg, 16, &instance);
+	if (ret || !instance) return -EINVAL;
+	if (instance != bm->instance_id) return -ESTALE;
 	/* Reject stale prepare before closing a newer Owner's open gate. */
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch <= bm->owner_epoch) {
@@ -96,12 +101,15 @@ static int bm_owner_prepare(struct bm_target *bm, const char *arg)
 	return ret;
 }
 /* owner_enable E: exact epoch only; no epoch mutation and no fenced reopen. */
-static int bm_owner_enable(struct bm_target *bm, const char *arg)
+static int bm_owner_enable(struct bm_target *bm, const char *arg, const char *instance_arg)
 {
-	u64 epoch;
+	u64 epoch, instance;
 	unsigned long flags;
 	int ret = kstrtou64(arg, 10, &epoch);
 	if (ret || !epoch) return -EINVAL;
+	ret = kstrtou64(instance_arg, 16, &instance);
+	if (ret || !instance) return -EINVAL;
+	if (instance != bm->instance_id) return -ESTALE;
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch != bm->owner_epoch) ret = -ESTALE;
 	else if (bm->fenced || bm->gate_open || atomic_read(&bm->inflight_writes)) ret = -EPERM;
@@ -110,12 +118,15 @@ static int bm_owner_enable(struct bm_target *bm, const char *arg)
 	return ret;
 }
 /* owner_fence E: close+drain; older delayed fences cannot affect newer Owner. */
-static int bm_owner_fence(struct bm_target *bm, const char *arg)
+static int bm_owner_fence(struct bm_target *bm, const char *arg, const char *instance_arg)
 {
-	u64 epoch;
+	u64 epoch, instance;
 	unsigned long flags;
 	int ret = kstrtou64(arg, 10, &epoch);
 	if (ret || !epoch) return -EINVAL;
+	ret = kstrtou64(instance_arg, 16, &instance);
+	if (ret || !instance) return -EINVAL;
+	if (instance != bm->instance_id) return -ESTALE;
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch < bm->owner_epoch) ret = -ESTALE;
 	else {
@@ -135,9 +146,9 @@ static int bm_message(struct dm_target *ti, unsigned int argc, char **argv,
 	int ret = -EINVAL;
 	(void)result; (void)maxlen;
 	mutex_lock(&bm->control_lock);
-	if (argc == 2 && !strcmp(argv[0], "owner_prepare")) ret = bm_owner_prepare(bm, argv[1]);
-	else if (argc == 2 && !strcmp(argv[0], "owner_enable")) ret = bm_owner_enable(bm, argv[1]);
-	else if (argc == 2 && !strcmp(argv[0], "owner_fence")) ret = bm_owner_fence(bm, argv[1]);
+	if (argc == 3 && !strcmp(argv[0], "owner_prepare")) ret = bm_owner_prepare(bm, argv[1], argv[2]);
+	else if (argc == 3 && !strcmp(argv[0], "owner_enable")) ret = bm_owner_enable(bm, argv[1], argv[2]);
+	else if (argc == 3 && !strcmp(argv[0], "owner_fence")) ret = bm_owner_fence(bm, argv[1], argv[2]);
 	mutex_unlock(&bm->control_lock);
 	return ret;
 }
@@ -159,8 +170,9 @@ static void bm_status(struct dm_target *ti, status_type_t type,
 	epoch = bm->owner_epoch; open = bm->gate_open; fenced = bm->fenced;
 	inflight = atomic_read(&bm->inflight_writes);
 	spin_unlock_irqrestore(&bm->state_lock, flags);
-	DMEMIT("epoch=%llu gate=%u fenced=%u inflight=%d",
-	       (unsigned long long)epoch, open ? 1 : 0, fenced ? 1 : 0, inflight);
+	DMEMIT("instance=%016llx epoch=%llu gate=%u fenced=%u inflight=%d",
+	       (unsigned long long)bm->instance_id, (unsigned long long)epoch,
+	       open ? 1 : 0, fenced ? 1 : 0, inflight);
 }
 static int bm_iterate_devices(struct dm_target *ti, iterate_devices_callout_fn fn, void *data)
 {
@@ -191,6 +203,7 @@ static int bm_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	init_waitqueue_head(&bm->drain_wait);
 	atomic_set(&bm->inflight_writes, 0);
 	bm->owner_epoch = 0; bm->gate_open = false; bm->fenced = true;
+	do { bm->instance_id = get_random_u64(); } while (!bm->instance_id);
 	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &bm->dev);
 	if (ret) { ti->error = "cannot open underlying device"; kfree(bm); return ret; }
 	if (bm->start > bdev_nr_sectors(bm->dev->bdev) ||
