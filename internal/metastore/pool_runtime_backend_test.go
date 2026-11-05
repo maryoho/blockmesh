@@ -101,3 +101,44 @@ func TestNewPoolVolumeRuntimeBackendRequiresOwnerCoordinatorToShareSanlockLocker
 		t.Fatal("OwnerCoordinator using a different sanlock locker was accepted")
 	}
 }
+
+
+type poolRuntimeProofLease struct {
+	record volume.OwnerRecord
+	verified bool
+	lost chan error
+	closed bool
+}
+func (l *poolRuntimeProofLease) Close()error{l.closed=true;return nil}
+func (l *poolRuntimeProofLease) Epoch()uint64{return l.record.Epoch}
+func (l *poolRuntimeProofLease) Lost()<-chan error{return l.lost}
+func (l *poolRuntimeProofLease) OwnerRecord()volume.OwnerRecord{return l.record}
+func (l *poolRuntimeProofLease) ReservationVerified()bool{return l.verified}
+
+type poolRuntimeProofOwner struct{lease RuntimeOwnerLease}
+func (o poolRuntimeProofOwner) AcquireFencedOwner(context.Context,VolumeRuntimeSpec)(RuntimeOwnerLease,error){return o.lease,nil}
+
+func TestPoolRuntimeRequiresMatchingOwnerRecordAndPRProof(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	for _,tc:=range []struct{name string;record volume.OwnerRecord;verified bool}{
+		{name:"matching",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:true},
+		{name:"wrong node",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-b",BootID:"boot-a",Epoch:9},verified:true},
+		{name:"reservation unverified",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:false},
+		{name:"wrong epoch",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:8},verified:true},
+	} {
+		t.Run(tc.name,func(t *testing.T){
+			lease:=&poolRuntimeProofLease{record:tc.record,verified:tc.verified,lost:make(chan error)}
+			cfg:=validPoolRuntimeConfig()
+			cfg.Owner=poolRuntimeProofOwner{lease:lease}
+			backend,err:=NewPoolVolumeRuntimeBackend(cfg)
+			if err!=nil{t.Fatal(err)}
+			got,err:=backend.AcquireOwnerLease(context.Background(),spec)
+			if tc.name=="matching" {
+				if err!=nil||got!=lease{t.Fatalf("matching proof rejected: lease=%v err=%v",got,err)}
+			} else {
+				if err==nil||got!=nil{t.Fatalf("invalid proof accepted: lease=%v err=%v",got,err)}
+				if !lease.closed{t.Fatal("invalid proof lease was not closed")}
+			}
+		})
+	}
+}
