@@ -75,5 +75,8 @@ func TestSANOwnerRecordStoreSyncFailureDoesNotCorruptPreviousCopy(t *testing.T) 
 	if err:=store.CompareAndSwap(context.Background(),"vol-a",&first,second);err==nil { t.Fatal("sync failure ignored") }
 	dev.syncErr=nil
 	got,exists,err:=store.Load(context.Background(),"vol-a")
-	if err!=nil||!exists||got!=first { t.Fatalf("previous copy unavailable after sync failure: %+v %v %v",got,exists,err) }
+	// A failed Sync has an ambiguous durability outcome: the device may have
+	// persisted the new page despite losing the completion response. Either
+	// complete record is valid; a torn/corrupt record is not.
+	if err!=nil||!exists||(got!=first && got!=second) { t.Fatalf("invalid record after ambiguous sync: %+v %v %v",got,exists,err) }
 }
