@@ -12,6 +12,7 @@ import (
 	"blockmesh/internal/device"
 	"blockmesh/internal/fence"
 	"blockmesh/internal/metadata"
+	"blockmesh/internal/metastore"
 	"blockmesh/internal/format"
 	"blockmesh/internal/volume"
 )
@@ -68,7 +69,8 @@ initializes Pool-level AG metadata. It does not initialize Volume Descriptors.
 inspect is read-only and does not acquire a cluster lease.
 volume-init is destructive to one empty Node Table slot and requires external
 Pool quiesce/fencing; local O_EXCL is not a distributed lock.
-volume-inspect is read-only.
+volume-inspect is read-only and reports the reserved SAN OwnerRecord byte offsets.
+The OwnerRecord offsets are also available from Pool-backed Store.OwnerRecordRange().
 
 The demo command uses JSON state files, MemoryLease and NoopFencer. It is
 not production-safe.`)
@@ -105,6 +107,8 @@ type volumeDeviceReport struct {
 	DevicePath string `json:"device_path"`
 	VolumeIndex uint32 `json:"volume_index"`
 	Descriptor format.VolumeDescriptor `json:"volume_descriptor"`
+	OwnerRecordSlotAOffset uint64 `json:"owner_record_slot_a_offset_bytes"`
+	OwnerRecordSlotBOffset uint64 `json:"owner_record_slot_b_offset_bytes"`
 }
 
 func runVolumeInit(args []string) error {
@@ -127,7 +131,11 @@ func runVolumeInit(args []string) error {
 	if err != nil { return fmt.Errorf("open Pool metadata: %w", err) }
 	desc, err := metadata.InitVolume(dev, pool.SB, uint32(*index), *volumeID, *ownerEpoch, *lifecyclePages)
 	if err != nil { return fmt.Errorf("initialize Volume Descriptor: %w", err) }
-	return json.NewEncoder(os.Stdout).Encode(volumeDeviceReport{DevicePath: dev.Path(), VolumeIndex: uint32(*index), Descriptor: desc})
+	store, err := metastore.OpenPoolVolume(dev, pool.SB, uint32(*index), *volumeID)
+	if err != nil { return fmt.Errorf("open initialized Pool Volume: %w", err) }
+	ownerA, ownerB, err := store.OwnerRecordRange()
+	if err != nil { return err }
+	return json.NewEncoder(os.Stdout).Encode(volumeDeviceReport{DevicePath: dev.Path(), VolumeIndex: uint32(*index), Descriptor: desc, OwnerRecordSlotAOffset: ownerA, OwnerRecordSlotBOffset: ownerB})
 }
 
 func runVolumeInspect(args []string) error {
@@ -145,7 +153,11 @@ func runVolumeInspect(args []string) error {
 	if err != nil { return fmt.Errorf("open Pool metadata: %w", err) }
 	desc, err := metadata.ReadVolumeDescriptor(dev, pool.SB, uint32(*index))
 	if err != nil { return err }
-	return json.NewEncoder(os.Stdout).Encode(volumeDeviceReport{DevicePath: dev.Path(), VolumeIndex: uint32(*index), Descriptor: desc})
+	store, err := metastore.OpenPoolVolume(dev, pool.SB, uint32(*index), desc.VolumeID)
+	if err != nil { return err }
+	ownerA, ownerB, err := store.OwnerRecordRange()
+	if err != nil { return err }
+	return json.NewEncoder(os.Stdout).Encode(volumeDeviceReport{DevicePath: dev.Path(), VolumeIndex: uint32(*index), Descriptor: desc, OwnerRecordSlotAOffset: ownerA, OwnerRecordSlotBOffset: ownerB})
 }
 
 func writeReport(dev *device.BlockDevice,store *metadata.Store,readOnly bool) error {
