@@ -84,7 +84,8 @@ func (f *integrationPathFencer) FenceNode(_ context.Context,node,boot string)err
 func (f *integrationPathFencer) snapshot()[]OwnerRecord{f.mu.Lock();defer f.mu.Unlock();return append([]OwnerRecord(nil),f.calls...)}
 
 
-type integrationReservation struct { calls []OwnerRecord; err error }
+type integrationReservation struct { prepares []OwnerRecord; calls []OwnerRecord; err error }
+func (r *integrationReservation) PrepareOwnerReservation(_ context.Context,node,boot string)error { r.prepares=append(r.prepares,OwnerRecord{NodeID:node,BootID:boot}); return nil }
 func (r *integrationReservation) EstablishOwnerReservation(_ context.Context,node,boot string)error {
 	r.calls=append(r.calls,OwnerRecord{NodeID:node,BootID:boot})
 	return r.err
