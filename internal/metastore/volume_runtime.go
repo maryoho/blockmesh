@@ -267,6 +267,10 @@ func (m *VolumeRuntimeManager) Activate(ctx context.Context, spec VolumeRuntimeS
 		} else if _, requiresMonitor := m.backend.(RuntimeOwnerLeaseLossHandler); requiresMonitor {
 			return fail(errors.New("Pool RW runtime requires a monitored Owner Lease"))
 		}
+		if err = m.checkOwnerLease(rt); err != nil {
+			m.handleOwnerLeaseLoss(rt,spec,err)
+			return fail(err)
+		}
 		if err = m.backend.RecoverWAL(ctx, spec, rt.device); err != nil {
 			return fail(fmt.Errorf("recover fixed-LBA WAL: %w", err))
 		}
