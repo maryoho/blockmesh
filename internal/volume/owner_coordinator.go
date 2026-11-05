@@ -19,9 +19,8 @@ var (
 	ErrOwnerEpochExhausted = errors.New("volume owner epoch exhausted")
 )
 
-// OwnerRecord is the authoritative cluster-side identity of the last Owner.
-// It must be stored durably with compare-and-swap semantics (for example, a
-// Kubernetes Lease with resourceVersion CAS). The Pool Volume Descriptor
+// OwnerRecord is the authoritative durable identity of the last Owner. It is
+// stored on the shared SAN metadata device; the Pool Volume Descriptor
 // separately stores the epoch used by metadata readers.
 type OwnerRecord struct {
 	VolumeID string
@@ -30,8 +29,9 @@ type OwnerRecord struct {
 	Epoch    uint64
 }
 
-// OwnerRecordStore must provide linearizable reads and durable CAS updates.
-// A nil expected value means the record must not exist.
+// OwnerRecordStore must provide durable reads and CAS updates. Production
+// implementations must serialize CompareAndSwap across nodes with the
+// exclusive sanlock Owner resource. A nil expected value means no record exists.
 type OwnerRecordStore interface {
 	Load(context.Context, string) (record OwnerRecord, exists bool, err error)
 	CompareAndSwap(context.Context, string, *OwnerRecord, OwnerRecord) error
