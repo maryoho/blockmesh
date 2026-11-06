@@ -203,3 +203,22 @@ func TestOwnerCoordinatorWritesDurableRuntimeEvents(t *testing.T) {
 	if len(recordsOut)!=len(want){t.Fatalf("events=%d want=%d",len(recordsOut),len(want))}
 	for i,name:=range want{if recordsOut[i].Event.EventType!=name{t.Fatalf("event[%d]=%s want %s",i,recordsOut[i].Event.EventType,name)}}
 }
+
+func TestOwnerCoordinatorProvesVolumeFencedBeforeReservedReuse(t *testing.T){
+	old:=OwnerRecord{VolumeID:"vol",NodeID:"node-a",BootID:"boot-a",Epoch:11}
+	fencer:=&ownerTestFencer{};barrier:=&ownerTestBarrier{}
+	coordinator,_,lease:=newOwnerTestCoordinator(t,&old,11,fencer,barrier)
+	if err:=coordinator.ProveVolumeFenced(context.Background(),"vol",11);err!=nil{t.Fatal(err)}
+	if len(fencer.calls)!=1||fencer.calls[0].NodeID!="node-a"||barrier.calls!=1{t.Fatalf("fencing proof incomplete: fencer=%+v barrier=%d",fencer.calls,barrier.calls)}
+	if !lease.closed{t.Fatal("Owner resource was not released after fencing proof")}
+}
+
+func TestOwnerCoordinatorRejectsFencingProofWithoutMatchingOwnerRecord(t *testing.T){
+	old:=OwnerRecord{VolumeID:"vol",NodeID:"node-a",BootID:"boot-a",Epoch:11}
+	coordinator,_,lease:=newOwnerTestCoordinator(t,&old,11,&ownerTestFencer{},&ownerTestBarrier{})
+	if err:=coordinator.ProveVolumeFenced(context.Background(),"vol",12);err==nil{t.Fatal("mismatched OwnerEpoch fencing proof accepted")}
+	if !lease.closed{t.Fatal("Owner resource leaked after rejected fencing proof")}
+	coordinator,_,lease=newOwnerTestCoordinator(t,nil,12,&ownerTestFencer{},&ownerTestBarrier{})
+	if err:=coordinator.ProveVolumeFenced(context.Background(),"vol",12);err==nil{t.Fatal("missing OwnerRecord with prior descriptor epoch accepted")}
+	if !lease.closed{t.Fatal("Owner resource leaked after missing-record proof rejection")}
+}
