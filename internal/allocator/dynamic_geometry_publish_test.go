@@ -1,7 +1,8 @@
 package allocator
 
 import (
-	"testing"\n\t"encoding/binary"
+	"testing"
+	"encoding/binary"
 
 	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
