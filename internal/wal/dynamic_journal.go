@@ -76,7 +76,7 @@ func(j *DynamicJournal)loadCheckpoint()(format.DynamicCheckpoint,uint32,error){
 	other:=uint32(1)-slot
 	off,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,other);if err!=nil{return zero,0,err}
 	page,err:=chosen.Encode();if err!=nil{return zero,0,err}
-	if err=writeAtFull(j.dev,page,int64(off));err!=nil{return zero,0,err}
+	if err=writeDynamicAtFull(j.dev,page,int64(off));err!=nil{return zero,0,err}
 	if err=j.dev.Sync();err!=nil{return zero,0,err}
 	return chosen,slot,nil
 }
@@ -204,3 +204,7 @@ func(j *DynamicJournal)Recover()(bool,error){
 func(j *DynamicJournal)UsedBytes()uint64{j.mu.Lock();defer j.mu.Unlock();return j.end}
 func(j *DynamicJournal)CapacityBytes()uint64{return j.bankSize}
 func(j *DynamicJournal)AG()uint32{return j.ag}
+
+func writeDynamicAtFull(dev DynamicMetadataDevice,b []byte,off int64)error{
+	n,err:=dev.WriteAt(b,off);if err!=nil{return err};if n!=len(b){return io.ErrShortWrite};return nil
+}
