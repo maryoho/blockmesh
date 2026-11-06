@@ -24,7 +24,6 @@ func(d *dynamicVolumeFailDevice)WriteAt(p []byte,off int64)(int,error){
 	if off==d.failOffset&&!d.failed{d.failed=true;return 0,errors.New("injected Reserved allocator write failure")}
 	return d.Device.WriteAt(p,off)
 }
-func(d *dynamicVolumeFailDevice)Size()int64{if s,ok:=d.Device.(interface{Size()int64});ok{return s.Size()};return 0}
 
 func dynamicVolumeAllocatorFixture(t *testing.T)(*memdev,format.DynamicSuperblock){
 	t.Helper()
