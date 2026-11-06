@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Node-wide /dev/blockmesh endpoint and per-DM-Target queue registry. */
 #include <linux/atomic.h>
+#include <linux/byteorder/generic.h>
+#include <linux/mm.h>
 #include <linux/compat.h>
 #include <linux/fs.h>
 #include <linux/kref.h>
@@ -26,6 +28,10 @@ static_assert(sizeof(struct bm_uapi_queue_query) == 40);
 static_assert(sizeof(struct bm_uapi_cancel) == 40);
 static_assert(sizeof(struct bm_uapi_abi_info) == 64);
 
+struct bm_service_session {
+	u64 id;
+	u64 registry_seen;
+};
 struct bm_queue_mem {
 	struct kref ref;
 	void *area;
@@ -49,6 +55,7 @@ static DEFINE_MUTEX(bm_queues_lock);
 static DECLARE_WAIT_QUEUE_HEAD(bm_poll_wait);
 static atomic_t bm_service_open = ATOMIC_INIT(0);
 static atomic64_t bm_session_generation = ATOMIC64_INIT(0);
+static atomic64_t bm_registry_generation = ATOMIC64_INIT(1);
 static u32 bm_next_queue_id = 1; /* monotonic; removed IDs are never reused */
 
 static void bm_mem_release(struct kref *ref)
@@ -130,7 +137,9 @@ int bm_queue_create(u32 *queue_id, u64 *target_cookie)
 		goto err_unlock;
 	*queue_id = q->id;
 	*target_cookie = q->target_cookie;
+	atomic64_inc(&bm_registry_generation);
 	mutex_unlock(&bm_queues_lock);
+	wake_up_all(&bm_poll_wait);
 	return 0;
 err_unlock:
 	mutex_unlock(&bm_queues_lock);
@@ -158,6 +167,7 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 	mutex_unlock(&bm_queues_lock);
 	bm_mem_put(old_mem);
 	wake_up_all(&q->wait);
+	atomic64_inc(&bm_registry_generation);
 	wake_up_all(&bm_poll_wait);
 	kref_put(&q->ref, bm_queue_release);
 }
@@ -166,10 +176,15 @@ static int bm_open(struct inode *inode, struct file *file)
 {
 	u32 id;
 	struct bm_queue *q;
-	u64 session;
+	struct bm_service_session *session;
 	(void)inode;
-	if (atomic_cmpxchg(&bm_service_open, 0, 1))
+	session = kzalloc(sizeof(*session), GFP_KERNEL);
+	if (!session)
+		return -ENOMEM;
+	if (atomic_cmpxchg(&bm_service_open, 0, 1)) {
+		kfree(session);
 		return -EBUSY;
+	}
 
 	/* Preflight first: do not partially advance generations on overflow. */
 	mutex_lock(&bm_queues_lock);
@@ -179,6 +194,7 @@ static int bm_open(struct inode *inode, struct file *file)
 			mutex_unlock(&q->lock);
 			mutex_unlock(&bm_queues_lock);
 			atomic_set(&bm_service_open, 0);
+			kfree(session);
 			return -EOVERFLOW;
 		}
 		mutex_unlock(&q->lock);
@@ -194,15 +210,17 @@ static int bm_open(struct inode *inode, struct file *file)
 		bm_mem_put(old_mem); /* Old VMAs retain their own memory references. */
 	}
 	mutex_unlock(&bm_queues_lock);
-	session = atomic64_inc_return(&bm_session_generation);
-	if (!session)
-		session = atomic64_inc_return(&bm_session_generation);
-	file->private_data = (void *)(unsigned long)session;
+	session->id = atomic64_inc_return(&bm_session_generation);
+	if (!session->id)
+		session->id = atomic64_inc_return(&bm_session_generation);
+	session->registry_seen = atomic64_read(&bm_registry_generation);
+	file->private_data = session;
 	return 0;
 }
 
 static int bm_release_file(struct inode *inode, struct file *file)
 {
+	struct bm_service_session *session = file->private_data;
 	u32 id;
 	struct bm_queue *q;
 	(void)inode;
@@ -223,6 +241,8 @@ static int bm_release_file(struct inode *inode, struct file *file)
 	mutex_unlock(&bm_queues_lock);
 	wake_up_all(&bm_poll_wait);
 	atomic_set(&bm_service_open, 0);
+	kfree(session);
+	file->private_data = NULL;
 	return 0;
 }
 
@@ -259,6 +279,10 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (query.size != sizeof(query) || query.reserved ||
 		    query.after_queue_id > BM_UAPI_MAX_QUEUE_ID)
 			return -EINVAL;
+		if (!query.after_queue_id) {
+			struct bm_service_session *session = file->private_data;
+			session->registry_seen = atomic64_read(&bm_registry_generation);
+		}
 		index = (unsigned long)query.after_queue_id + 1;
 		mutex_lock(&bm_queues_lock);
 		q = xa_find(&bm_queues, &index, BM_UAPI_MAX_QUEUE_ID, XA_PRESENT);
@@ -431,12 +455,15 @@ static int bm_mmap(struct file *file, struct vm_area_struct *vma)
 
 static __poll_t bm_poll(struct file *file, poll_table *wait)
 {
+	struct bm_service_session *session = file->private_data;
 	u32 id;
 	struct bm_queue *q;
 	__poll_t mask = 0;
 	if (!file->private_data)
 		return EPOLLERR;
 	poll_wait(file, &bm_poll_wait, wait);
+	if (atomic64_read(&bm_registry_generation) != session->registry_seen)
+		mask |= EPOLLPRI;
 	mutex_lock(&bm_queues_lock);
 	xa_for_each(&bm_queues, id, q) {
 		struct bm_uapi_ring_ctrl *ctrl;
