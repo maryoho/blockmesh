@@ -12,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 #include "blockmesh_uapi.h"
+#include "bm_chrdev.h"
 
 static_assert(sizeof(struct bm_uapi_ring_ctrl) == BM_UAPI_RING_CTRL_SIZE);
 static_assert(sizeof(struct bm_uapi_request) == BM_UAPI_REQUEST_SIZE);
@@ -27,6 +28,8 @@ struct bm_target {
 	atomic_t inflight_writes;
 	u64 owner_epoch;
 	u64 instance_id;
+	u64 queue_cookie;
+	u32 queue_id;
 	bool gate_open;
 	bool fenced;
 };
@@ -176,9 +179,10 @@ static void bm_status(struct dm_target *ti, status_type_t type,
 	epoch = bm->owner_epoch; open = bm->gate_open; fenced = bm->fenced;
 	inflight = atomic_read(&bm->inflight_writes);
 	spin_unlock_irqrestore(&bm->state_lock, flags);
-	DMEMIT("instance=%016llx epoch=%llu gate=%u fenced=%u inflight=%d",
+	DMEMIT("instance=%016llx epoch=%llu gate=%u fenced=%u inflight=%d queue=%u cookie=%016llx",
 	       (unsigned long long)bm->instance_id, (unsigned long long)epoch,
-	       open ? 1 : 0, fenced ? 1 : 0, inflight);
+	       open ? 1 : 0, fenced ? 1 : 0, inflight, bm->queue_id,
+	       (unsigned long long)bm->queue_cookie);
 }
 static int bm_iterate_devices(struct dm_target *ti, iterate_devices_callout_fn fn, void *data)
 {
@@ -190,6 +194,7 @@ static void bm_dtr(struct dm_target *ti)
 	struct bm_target *bm = ti->private;
 	bm_close_gate(bm, true);
 	bm_wait_for_drain(bm);
+	bm_queue_destroy(bm->queue_id, bm->queue_cookie);
 	dm_put_device(ti, bm->dev);
 	kfree(bm);
 }
@@ -210,12 +215,14 @@ static int bm_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	atomic_set(&bm->inflight_writes, 0);
 	bm->owner_epoch = 0; bm->gate_open = false; bm->fenced = true;
 	do { bm->instance_id = get_random_u64(); } while (!bm->instance_id);
+	ret = bm_queue_create(&bm->queue_id, &bm->queue_cookie);
+	if (ret) { ti->error = "cannot create BlockMesh queue"; kfree(bm); return ret; }
 	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &bm->dev);
-	if (ret) { ti->error = "cannot open underlying device"; kfree(bm); return ret; }
+	if (ret) { ti->error = "cannot open underlying device"; bm_queue_destroy(bm->queue_id, bm->queue_cookie); kfree(bm); return ret; }
 	if (bm->start > bdev_nr_sectors(bm->dev->bdev) ||
 	    ti->len > bdev_nr_sectors(bm->dev->bdev) - bm->start) {
 		ti->error = "target range exceeds underlying device";
-		dm_put_device(ti, bm->dev); kfree(bm); return -EINVAL;
+		dm_put_device(ti, bm->dev); bm_queue_destroy(bm->queue_id, bm->queue_cookie); kfree(bm); return -EINVAL;
 	}
 	ti->private = bm;
 	ti->per_io_data_size = sizeof(struct bm_bio_ctx);
@@ -231,8 +238,19 @@ static struct target_type bm_target = {
 	.ctr = bm_ctr, .dtr = bm_dtr, .map = bm_map, .end_io = bm_end_io,
 	.message = bm_message, .status = bm_status, .iterate_devices = bm_iterate_devices,
 };
-static int __init bm_init(void) { return dm_register_target(&bm_target); }
-static void __exit bm_exit(void) { dm_unregister_target(&bm_target); }
+static int __init bm_init(void)
+{
+	int ret = bm_chrdev_init();
+	if (ret) return ret;
+	ret = dm_register_target(&bm_target);
+	if (ret) bm_chrdev_exit();
+	return ret;
+}
+static void __exit bm_exit(void)
+{
+	dm_unregister_target(&bm_target);
+	bm_chrdev_exit();
+}
 module_init(bm_init);
 module_exit(bm_exit);
 MODULE_DESCRIPTION("BlockMesh DM target with kernel OwnerEpoch write admission");

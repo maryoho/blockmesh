@@ -28,7 +28,11 @@
 #define BM_UAPI_MMAP_REQUEST_RING 0x00010000ULL
 #define BM_UAPI_MMAP_COMP_CTRL 0x00040000ULL
 #define BM_UAPI_MMAP_COMP_RING 0x00050000ULL
-#define BM_UAPI_MMAP_PAYLOAD 0x00060000ULL\n/* mmap byte offset = (queue_id << 44) | queue_local_offset. */\n#define BM_UAPI_MMAP_QUEUE_SHIFT 44U\n#define BM_UAPI_MMAP_LOCAL_MASK ((1ULL << BM_UAPI_MMAP_QUEUE_SHIFT) - 1ULL)\n#define BM_UAPI_MAX_QUEUE_ID ((1U << 20) - 1U)
+#define BM_UAPI_MMAP_PAYLOAD 0x00060000ULL
+/* mmap byte offset = (queue_id << 44) | queue_local_offset. */
+#define BM_UAPI_MMAP_QUEUE_SHIFT 44U
+#define BM_UAPI_MMAP_LOCAL_MASK ((1ULL << BM_UAPI_MMAP_QUEUE_SHIFT) - 1ULL)
+#define BM_UAPI_MAX_QUEUE_ID ((1U << 20) - 1U)
 
 /* All multibyte wire fields are little-endian. Indices are aligned __u32. */
 struct bm_uapi_ring_ctrl {
@@ -58,10 +62,14 @@ struct bm_uapi_setup {
 	__u64 queue_generation;
 	__u64 request_ctrl_offset, request_ring_offset;
 	__u64 completion_ctrl_offset, completion_ring_offset, payload_offset;
-	__u32 max_batch;
-	__u32 reserved[3];
+	__u32 max_batch, queue_id;
+	__u32 reserved[2];
 };
-struct bm_uapi_queue_query {\n\t__u32 size, after_queue_id, queue_id, ring_order;\n\t__u64 queue_generation, target_cookie, reserved;\n};\nstruct bm_uapi_cancel {
+struct bm_uapi_queue_query {
+	__u32 size, after_queue_id, queue_id, ring_order;
+	__u64 queue_generation, target_cookie, reserved;
+};
+struct bm_uapi_cancel {
 	__u32 size, flags;
 	__u64 request_id, queue_generation, reserved[2];
 };
@@ -74,5 +82,6 @@ struct bm_uapi_abi_info {
 #define BM_IOC_GET_ABI _IOWR(BM_IOC_MAGIC, 0x00, struct bm_uapi_abi_info)
 #define BM_IOC_SETUP_QUEUE _IOWR(BM_IOC_MAGIC, 0x01, struct bm_uapi_setup)
 #define BM_IOC_RESET_QUEUE _IOW(BM_IOC_MAGIC, 0x02, __u64)
-#define BM_IOC_CANCEL _IOW(BM_IOC_MAGIC, 0x03, struct bm_uapi_cancel)\n#define BM_IOC_NEXT_QUEUE _IOWR(BM_IOC_MAGIC, 0x04, struct bm_uapi_queue_query)
+#define BM_IOC_CANCEL _IOW(BM_IOC_MAGIC, 0x03, struct bm_uapi_cancel)
+#define BM_IOC_NEXT_QUEUE _IOWR(BM_IOC_MAGIC, 0x04, struct bm_uapi_queue_query)
 #endif
