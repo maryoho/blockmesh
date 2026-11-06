@@ -231,6 +231,104 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 	return d,nil
 }
 
+ // ExpandRegion extends the Reserved page bitmap after MetadataView growth.
+ // It can reuse the existing bitmap layout only while BitmapPages remains
+ // unchanged; otherwise an explicit allocator-layout migration is required.
+ func(a *DynamicVolumeAllocator) ExpandRegion(dev Device,nextSB format.DynamicSuperblock,committer ClusterSafeCommitter) error {
+	if a==nil||dev==nil||committer==nil||!committer.ClusterSafe(){return ErrClusterSafeCommitterRequired}
+	a.mu.Lock();defer a.mu.Unlock()
+	if err:=nextSB.Validate();err!=nil{return err}
+	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation!=a.sb.Generation+1||
+		nextSB.Geometry.ReservedOffset!=a.sb.Geometry.ReservedOffset||
+		nextSB.Geometry.MetadataBytes<a.sb.Geometry.MetadataBytes{return ErrGeometry}
+	expected,bitmapPages,err:=dynamicReservedGeometry(nextSB);if err!=nil{return err}
+	if bitmapPages!=a.header.BitmapPages||expected.AllocStart!=a.header.AllocStart||
+		expected.RegionPages<a.header.RegionPages||expected.RegionPages>uint64(len(a.bitmap))*8{return errors.New("Reserved allocator bitmap capacity requires layout migration")}
+	if sized,ok:=dev.(interface{Size()int64});ok&&(sized.Size()<0||uint64(sized.Size())<nextSB.Geometry.MetadataBytes){return ErrGeometry}
+	if expected.RegionPages==a.header.RegionPages{a.dev=dev;a.sb=nextSB;return nil}
+	nextBitmap:=append([]byte(nil),a.bitmap...)
+	for bit:=a.header.RegionPages;bit<expected.RegionPages;bit++{
+		mask:=byte(1<<uint(bit%8))
+		if nextBitmap[bit/8]&mask==0{return ErrCorrupt}
+		nextBitmap[bit/8]&^=mask
+	}
+	nextHeader:=a.header;nextHeader.Generation++;nextHeader.RegionPages=expected.RegionPages
+	nextHeader.BitmapCRC=crc32.Checksum(nextBitmap,crcTable)
+	images,err:=a.bitmapHeaderImages(nextBitmap,nextHeader);if err!=nil{return err}
+	if err=committer.CommitImages(images);err!=nil{return err}
+	a.dev=dev;a.sb=nextSB;a.bitmap=nextBitmap;a.header=nextHeader;a.headerSlot=1-a.headerSlot
+	return nil
+}
+
+// GrowVolume expands one contiguous Arena into immediately adjacent free
+// Reserved pages. Existing Lifecycle pages are copied to their new tail
+// location and synced before the descriptor/bitmap transaction is committed.
+func(a *DynamicVolumeAllocator) GrowVolume(index uint32,pages uint64,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,uint64,error){
+	var zero format.DynamicVolumeDescriptor
+	if a==nil||committer==nil||!committer.ClusterSafe()||pages==0{return zero,0,ErrClusterSafeCommitterRequired}
+	a.mu.Lock();defer a.mu.Unlock()
+	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index);if err!=nil{return zero,0,err}
+	d,slot,err:=a.readDescriptorWithSlot(pair);if err!=nil{return zero,0,err}
+	if d.Generation==math.MaxUint64||d.VolumeSequence==math.MaxUint64||d.ArenaPages>math.MaxUint64-pages{return zero,0,errors.New("Volume Arena sequence or size exhausted")}
+	if d.ArenaStart<a.header.RegionStart{return zero,0,ErrGeometry}
+	start:=d.ArenaStart-a.header.RegionStart
+	used:=d.ArenaPages+d.LifecyclePages
+	if used<d.ArenaPages||start>a.header.RegionPages||used>a.header.RegionPages-start{return zero,0,ErrGeometry}
+	end:=start+used
+	if pages>a.header.RegionPages-end{return zero,0,ErrDynamicVolumeSpace}
+	nextBitmap:=append([]byte(nil),a.bitmap...)
+	for bit:=end;bit<end+pages;bit++{
+		if nextBitmap[bit/8]&(1<<uint(bit%8))!=0{return zero,0,ErrDynamicVolumeSpace}
+		nextBitmap[bit/8]|=1<<uint(bit%8)
+	}
+	next:=d;next.Generation++;next.VolumeSequence++;next.ArenaPages+=pages
+	if next.LifecyclePages!=0{
+		oldLifecycle:=make([]byte,next.LifecyclePages*format.PageSize)
+		if err=readFullAt(a.dev,oldLifecycle,int64(d.LifecycleStart*format.PageSize));err!=nil{return zero,0,err}
+		next.LifecycleStart=d.LifecycleStart+pages
+		if err=writeFullAt(a.dev,oldLifecycle,int64(next.LifecycleStart*format.PageSize));err!=nil{return zero,0,fmt.Errorf("relocate Volume lifecycle pages: %w",err)}
+		if err=a.dev.Sync();err!=nil{return zero,0,fmt.Errorf("sync relocated Volume lifecycle pages: %w",err)}
+	}
+	if err=next.ValidatePool(a.sb);err!=nil{return zero,0,err}
+	desc,err:=next.Encode();if err!=nil{return zero,0,err}
+	nextHeader:=a.header;nextHeader.Generation++;nextHeader.BitmapCRC=crc32.Checksum(nextBitmap,crcTable)
+	images,err:=a.bitmapHeaderImages(nextBitmap,nextHeader);if err!=nil{return zero,0,err}
+	newSlot:=uint64(1)-slot
+	images=append(images,PageImage{Offset:pair+newSlot*format.PageSize,Data:desc})
+	if len(images)>MaxMetadataTransactionPages{return zero,0,ErrMetadataTransactionTooLarge}
+	if err=committer.CommitImages(images);err!=nil{return zero,0,err}
+	a.bitmap=nextBitmap;a.header=nextHeader;a.headerSlot=1-a.headerSlot
+	return next,newSlot,nil
+}
+
+func(a *DynamicVolumeAllocator)readDescriptorWithSlot(pair uint64)(format.DynamicVolumeDescriptor,uint64,error){
+	var best format.DynamicVolumeDescriptor
+	var bestSlot uint64
+	found:=false
+	for slot:=uint64(0);slot<2;slot++{
+		b:=make([]byte,format.PageSize);if err:=readFullAt(a.dev,b,int64(pair+slot*format.PageSize));err!=nil{return best,0,err}
+		d,err:=format.DecodeDynamicVolumeDescriptor(b);if err!=nil{continue}
+		if err=d.ValidatePool(a.sb);err!=nil{continue}
+		if found&&d.VolumeID!=best.VolumeID{return best,0,ErrCorrupt}
+		if found&&d.Generation==best.Generation&&d!=best{return best,0,ErrCorrupt}
+		if !found||d.Generation>best.Generation{best,bestSlot,found=d,slot,true}
+	}
+	if !found{return best,0,ErrUnformatted}
+	return best,bestSlot,nil
+}
+
+// DynamicVolumeAllocatorPresent distinguishes a legacy Reserved region from
+// a formatted or interrupted new allocator; callers must never fall back to
+// the legacy slot-0 Arena grower when either marker is present.
+func DynamicVolumeAllocatorPresent(dev Device,sb format.DynamicSuperblock)bool{
+	if dev==nil{return false}
+	off:=int64(sb.Geometry.ReservedOffset)
+	page:=make([]byte,format.PageSize)
+	if err:=readFullAt(dev,page,off);err!=nil{return false}
+	magic:=binary.LittleEndian.Uint64(page[:8])
+	return magic==dynamicReservedMagic||magic==dynamicReservedFormatMagic
+}
+
 // ReleaseVolume never trusts a timeout or a caller-provided boolean. A platform
 // fencing verifier must prove that every initiator for the Volume is fenced
 // before its Arena pages can be returned to the shared Reserved region.
