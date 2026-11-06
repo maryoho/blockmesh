@@ -24,6 +24,11 @@ func GuardDynamicSharedCommitter(c *DynamicSharedCommitter,lease DynamicOwnerLea
 		return errors.New("Dynamic WAL committer and matching Volume Owner lease are required")
 	}
 	expected:=lease.Epoch()
+	if proof,ok:=lease.(interface{ReservationVerified()bool;PreviousOwnerFenced()bool;OldOwnerIODrained()bool});ok {
+		if !proof.ReservationVerified()||!proof.PreviousOwnerFenced()||!proof.OldOwnerIODrained(){
+			return errors.New("Owner lease has not completed SCSI PR reservation, previous-owner fencing and I/O drain")
+		}
+	}
 	guard:=func()error{
 		if !lease.Valid(){return ErrDynamicOwnerLeaseLost}
 		if lease.VolumeID()!=volumeID||lease.Epoch()!=expected{return ErrDynamicOwnerEpochMismatch}
