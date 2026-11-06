@@ -117,6 +117,10 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	store3,err:=metastore.OpenDynamicPoolVolume(metaExpanded,next,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
 	committer3,err:=wal.NewDynamicSharedCommitter(metaExpanded,next,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
+	oldArenaPages:=store3.Superblock().ArenaPages
+	if err=store3.ExpandDynamicArenaUnderLease(context.Background(),lease,locks,committer3);err!=nil{t.Fatal(err)}
+	store3,err=metastore.OpenDynamicPoolVolume(metaExpanded,next,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
+	if store3.Superblock().ArenaPages<=oldArenaPages{t.Fatal("PersistentArena did not consume expanded MetadataView capacity")}
 	tree3,err:=btree.OpenPersistentWithExternalPages(store3,committer3,ResolveIdempotencyPages);if err!=nil{t.Fatal(err)}
 	alloc3,err:=NewDynamicPoolAllocator(store3,tree3,locks,dataExpanded);if err!=nil{t.Fatal(err)}
 	second:=AllocateRequest{IdempotencyKey:[16]byte{0x56},Fingerprint:[32]byte{0xbb},LogicalStart:2,BlockCount:3,Operation:1}
