@@ -220,7 +220,10 @@ func dynamicFormatPool(id string,c poolConfig)error{
 	locker:=newSanlock(c)
 	resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",record.PoolUUID,0)
 	committer,err:=wal.NewDynamicSharedCommitter(metadata,sb,0,locker,resource);if err!=nil{return err}
+	if err=wal.GuardDynamicSharedCommitter(committer,owner,id,nil);err!=nil{return err}
 	if _,err=volumeAllocator.AllocateVolume(0,descriptor,committer);err!=nil{return fmt.Errorf("allocate initial BMPOOL03 Volume: %w",err)}
+	epochReader,err:=metastore.NewDynamicOwnerEpochReader(metadata,sb,0,id);if err!=nil{return err}
+	if err=wal.GuardDynamicSharedCommitter(committer,owner,id,epochReader.ReadOwnerEpoch);err!=nil{return err}
 	volume,err:=metastore.OpenDynamicPoolVolume(metadata,sb,0,id);if err!=nil{return err}
 	if err=metastore.FormatLifecycle(volume);err!=nil{return fmt.Errorf("initialize initial Volume lifecycle: %w",err)}
 	out:=dynamicPoolStatus{PoolID:id,PoolUUID:fmt.Sprintf("%x",record.PoolUUID),ViewGeneration:viewGeneration,
@@ -260,6 +263,7 @@ func dynamicRecoverPool(id string,c poolConfig)error{
 	for ag:=uint32(0);ag<sb.Geometry.AGCount;ag++{
 		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",sb.PoolUUID,ag)
 		committer,e:=wal.NewDynamicSharedCommitter(metadata,sb,ag,locker,resource);if e!=nil{return e}
+		if e=wal.GuardDynamicSharedCommitter(committer,owner,id,nil);e!=nil{return e}
 		if e=committer.Recover();e!=nil{return fmt.Errorf("recover AG %d WAL: %w",ag,e)}
 	}
 	if metastore.DynamicVolumeAllocatorPresent(metadata,sb){
@@ -271,6 +275,7 @@ func dynamicRecoverPool(id string,c poolConfig)error{
 		if e!=nil{return e}
 		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",sb.PoolUUID,0)
 		committer,e:=wal.NewDynamicSharedCommitter(metadata,sb,0,locker,resource);if e!=nil{return e}
+		if e=wal.GuardDynamicSharedCommitter(committer,owner,id,nil);e!=nil{return e}
 		if e=volumeAllocator.ReconcileRegion(committer);e!=nil{return fmt.Errorf("reconcile Reserved allocator geometry: %w",e)}
 	}
 	if !owner.Valid(){return errors.New("Owner lease lost during Pool recovery")}
@@ -325,17 +330,20 @@ func expandPoolMetadata(id string,c poolConfig)error{
 	if err=allocator.PublishDynamicGeometryUnderLease(ctx,metadata,currentSB,nextSB,owner,locker,nil);err!=nil{return fmt.Errorf("publish expanded BMPOOL03 geometry: %w",err)}
 	walResource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",record.PoolUUID,0)
 	globalCommitter,err:=wal.NewDynamicSharedCommitter(metadata,nextSB,0,locker,walResource);if err!=nil{return err}
+	volume,err:=metastore.OpenDynamicPoolVolume(metadata,nextSB,0,id);if err!=nil{return err}
+	epochReader,err:=metastore.NewDynamicOwnerEpochReader(metadata,nextSB,0,id);if err!=nil{return err}
+	if err=wal.GuardDynamicSharedCommitter(globalCommitter,owner,id,epochReader.ReadOwnerEpoch);err!=nil{return err}
 	if reservedAllocator{
 		if !owner.Valid(){return errors.New("Owner lease lost before Reserved allocator expansion")}
 		if err=volumeAllocator.ExpandRegion(metadata,nextSB,globalCommitter);err!=nil{return fmt.Errorf("expand Reserved allocator: %w",err)}
 		if !owner.Valid(){return errors.New("Owner lease lost during Reserved allocator expansion")}
 	}
-	volume,err:=metastore.OpenDynamicPoolVolume(metadata,nextSB,0,id);if err!=nil{return err}
 	descriptor,err:=volume.DynamicPoolDescriptor();if err!=nil{return err}
 	volumeCommitter:=globalCommitter
 	if descriptor.AG!=0{
 		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",record.PoolUUID,descriptor.AG)
 		volumeCommitter,err=wal.NewDynamicSharedCommitter(metadata,nextSB,descriptor.AG,locker,resource);if err!=nil{return err}
+		if err=wal.GuardDynamicSharedCommitter(volumeCommitter,owner,id,epochReader.ReadOwnerEpoch);err!=nil{return err}
 	}
 	if reservedAllocator{
 		pages:=c.ArenaGrowthPages;if pages==0{pages=256}
