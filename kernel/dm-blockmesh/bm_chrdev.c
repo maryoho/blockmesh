@@ -174,7 +174,7 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 
 static int bm_open(struct inode *inode, struct file *file)
 {
-	u32 id;
+	unsigned long id;
 	struct bm_queue *q;
 	struct bm_service_session *session;
 	(void)inode;
@@ -221,7 +221,7 @@ static int bm_open(struct inode *inode, struct file *file)
 static int bm_release_file(struct inode *inode, struct file *file)
 {
 	struct bm_service_session *session = file->private_data;
-	u32 id;
+	unsigned long id;
 	struct bm_queue *q;
 	(void)inode;
 	(void)file;
@@ -456,7 +456,7 @@ static int bm_mmap(struct file *file, struct vm_area_struct *vma)
 static __poll_t bm_poll(struct file *file, poll_table *wait)
 {
 	struct bm_service_session *session = file->private_data;
-	u32 id;
+	unsigned long id;
 	struct bm_queue *q;
 	__poll_t mask = 0;
 	if (!file->private_data)
