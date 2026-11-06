@@ -65,7 +65,7 @@ func NewMetadataView(parent device.Device, extents []Extent) (*MetadataView, err
 	return v, nil
 }
 
-func (v *MetadataView) Size() int64 {
+// Close releases only the logical view; the shared parent LUN remains owned by BootstrapStore.\nfunc (v *MetadataView) Close() error { return nil }\n\nfunc (v *MetadataView) Size() int64 {
 	if v == nil { return 0 }
 	return int64(v.size)
 }

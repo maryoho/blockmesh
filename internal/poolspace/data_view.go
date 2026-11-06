@@ -32,7 +32,7 @@ func NewDataView(parent device.Device,extents []Extent)(*DataView,error){
 	v.size=logical
 	return v,nil
 }
-func(v *DataView)Size()int64{if v==nil{return 0};return int64(v.size)}
+// Close releases only the logical view; the shared parent LUN remains owned by BootstrapStore.\nfunc(v *DataView)Close()error{return nil}\nfunc(v *DataView)Size()int64{if v==nil{return 0};return int64(v.size)}
 func(v *DataView)Sync()error{if v==nil||v.parent==nil{return ErrInvalidGeometry};return v.parent.Sync()}
 func(v *DataView)ReadAt(p []byte,off int64)(int,error){
 	if v==nil||v.parent==nil{return 0,ErrInvalidGeometry}
