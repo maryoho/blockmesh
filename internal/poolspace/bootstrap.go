@@ -198,6 +198,18 @@ func allocatorFromMap(m ExtentMap)(*Allocator,error){
 func(s *BootstrapStore)Record()BootstrapRecord{if s==nil{return BootstrapRecord{}};s.mu.Lock();defer s.mu.Unlock();return s.record}
 func(s *BootstrapStore)Extents()[]Extent{if s==nil||s.allocator==nil{return nil};s.mu.Lock();defer s.mu.Unlock();return s.allocator.Extents()}
 
+// OpenExtentView returns a bounded non-owning view over one physical extent.
+// Metadata and Data views always share the same parent Device; closing a view
+// never closes the underlying LUN.
+func(s *BootstrapStore)OpenExtentView(index int)(*device.Range,error){
+ if s==nil||s.dev==nil{return nil,ErrInvalidGeometry}
+ s.mu.Lock();defer s.mu.Unlock()
+ if index<0||index>=len(s.allocator.extents){return nil,ErrInvalidGeometry}
+ e:=s.allocator.extents[index]
+ return device.NewRange(s.dev,e.Start,e.Length)
+}
+
+
 // SetCommitLocker installs the distributed SAN lock required for Bootstrap
 // updates. A host-local flock does not satisfy this interface.
 func(s *BootstrapStore)SetCommitLocker(l BootstrapLocker)error{
