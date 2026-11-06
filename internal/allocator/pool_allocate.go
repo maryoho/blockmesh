@@ -128,6 +128,20 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	defer unlock()
 	if err = ctx.Err(); err != nil { return result, err }
 	if !ownerLease.Valid() { return result, errors.New("Volume Owner lease lost before allocation") }
+	// Re-read the durable descriptor after obtaining the AG lock. This closes
+	// the race with a concurrent OwnerEpoch takeover or root publication while
+	// this request was waiting for the lock.
+	if a.dynamic {
+		current,e:=a.store.DynamicPoolDescriptor();if e!=nil{return result,e}
+		if current.VolumeID!=volumeID||current.AG!=ag||current.OwnerEpoch!=ownerEpoch{return result,errors.New("BMPOOL03 Volume Descriptor changed while waiting for AG lock")}
+		generation,mappingSequence=current.Generation,current.MappingSequence
+	} else {
+		current,e:=a.store.PoolDescriptor();if e!=nil{return result,e}
+		if current.VolumeID!=volumeID||current.AG!=ag||current.OwnerEpoch!=ownerEpoch{return result,errors.New("BMPOOL02 Volume Descriptor changed while waiting for AG lock")}
+		generation,mappingSequence=current.Generation,current.MappingSequence
+	}
+	if !ownerLease.Valid(){return result,errors.New("Volume Owner lease lost after descriptor refresh")}
+
 
 	// Idempotency lookup is serialized by the same AG lock as the eventual
 	// index insertion, including hash-collision chain extension.
