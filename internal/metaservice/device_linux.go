@@ -43,13 +43,14 @@ func(d *Device)scan()error{
  seen:=make(map[uint32]struct{})
  for after:=uint32(0);;{
   q:=make([]byte,40);binary.LittleEndian.PutUint32(q[:4],40);binary.LittleEndian.PutUint32(q[4:8],after)
-  e:=ioctl(d.fd,ioctlNextQueue,q);if errors.Is(e,syscall.ENOENT){return nil};if e!=nil{return fmt.Errorf("NEXT_QUEUE: %w",e)}
+  e:=ioctl(d.fd,ioctlNextQueue,q);if errors.Is(e,syscall.ENOENT){break};if e!=nil{return fmt.Errorf("NEXT_QUEUE: %w",e)}
   id,order:=binary.LittleEndian.Uint32(q[8:12]),binary.LittleEndian.Uint32(q[12:16])
   if id==0||id<=after{return errors.New("NEXT_QUEUE returned invalid Queue ID")};after=id
   seen[id]=struct{}{}
   if d.queues[id]!=nil{continue};if e=d.setup(id,order);e!=nil{if errors.Is(e,syscall.ENOENT){delete(seen,id);continue};return fmt.Errorf("setup Queue %d: %w",id,e)}
  }
  for id:=range d.queues{if _,ok:=seen[id];!ok{d.unmap(id)}}
+ return nil
 }
 func(d *Device)setup(id,order uint32)error{
  b:=make([]byte,uapi.SetupSize);binary.LittleEndian.PutUint32(b[:4],uapi.SetupSize)
