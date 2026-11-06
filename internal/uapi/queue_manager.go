@@ -10,7 +10,7 @@ import (
 const (
     MmapQueueShift = 44
     MmapLocalMask uint64 = (1 << MmapQueueShift) - 1
-    MaxQueueID uint32 = (1 << 20) - 1
+    MaxQueueID uint32 = (1 << 19) - 1
 )
 
 // EncodeMmapOffset gives every Queue ID a disjoint 16TiB byte-offset window.

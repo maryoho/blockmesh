@@ -32,7 +32,7 @@
 /* mmap byte offset = (queue_id << 44) | queue_local_offset. */
 #define BM_UAPI_MMAP_QUEUE_SHIFT 44U
 #define BM_UAPI_MMAP_LOCAL_MASK ((1ULL << BM_UAPI_MMAP_QUEUE_SHIFT) - 1ULL)
-#define BM_UAPI_MAX_QUEUE_ID ((1U << 20) - 1U)
+#define BM_UAPI_MAX_QUEUE_ID ((1U << 19) - 1U)
 
 /* All multibyte wire fields are little-endian. Indices are aligned __u32. */
 struct bm_uapi_ring_ctrl {
