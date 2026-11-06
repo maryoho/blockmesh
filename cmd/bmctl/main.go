@@ -15,9 +15,13 @@ import (
 	"strings"
 	"time"
 
+	"blockmesh/internal/allocator"
 	"blockmesh/internal/device"
+	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
 	"blockmesh/internal/lock"
 	"blockmesh/internal/poolspace"
+	"blockmesh/internal/wal"
 )
 
 type poolConfig struct {
@@ -33,6 +37,14 @@ type poolConfig struct {
 	OwnerLeaseHelper string `json:"owner_lease_helper"`
 	MetadataUsageFile string `json:"metadata_usage_file"`
 	MetadataUsageMaxAgeSeconds int64 `json:"metadata_usage_max_age_seconds"`
+	AGSizeBytes uint64 `json:"ag_size_bytes"`
+	AGCapacity uint32 `json:"ag_capacity"`
+	WALSegmentBytes uint64 `json:"wal_segment_bytes"`
+	MappingBytes uint64 `json:"mapping_bytes"`
+	CheckpointBytes uint64 `json:"checkpoint_bytes"`
+	InitialArenaPages uint64 `json:"initial_arena_pages"`
+	LifecyclePages uint64 `json:"lifecycle_pages"`
+	ArenaGrowthPages uint64 `json:"arena_growth_pages"`
 }
 
 type usageSnapshot struct {
@@ -58,7 +70,7 @@ func main(){
 	if len(os.Args)<2||os.Args[1]!="pool"{usage();os.Exit(2)}
 	if err:=runPool(os.Args[2:]);err!=nil{fmt.Fprintln(os.Stderr,"bmctl:",err);os.Exit(1)}
 }
-func usage(){fmt.Fprintln(os.Stderr,"Usage: bmctl pool <format|rescan|metadata-expand|metadata-expand-status> --pool <id> [--config-dir /etc/blockmesh/pools]")}
+func usage(){fmt.Fprintln(os.Stderr,"Usage: bmctl pool <format|dynamic-format|dynamic-status|dynamic-recover|rescan|metadata-expand|metadata-expand-status> --pool <id> [--config-dir /etc/blockmesh/pools]")}
 func runPool(args []string)error{
 	if len(args)==0{usage();return errors.New("pool operation is required")}
 	op:=args[0]
@@ -74,6 +86,13 @@ func runPool(args []string)error{
 	case "format":
 		if !*confirm{return errors.New("refusing destructive Pool format without --confirm-format")}
 		return formatPool(*poolID,cfg)
+	case "dynamic-format":
+		if !*confirm{return errors.New("refusing destructive BMPOOL03 format without --confirm-format")}
+		return dynamicFormatPool(*poolID,cfg)
+	case "dynamic-status":
+		return dynamicStatusPool(*poolID,cfg)
+	case "dynamic-recover":
+		return dynamicRecoverPool(*poolID,cfg)
 	case "rescan":
 		return rescanPool(*poolID,cfg)
 	case "metadata-expand":
@@ -113,7 +132,7 @@ func formatPool(id string,c poolConfig)error{
 	return printStatus(id,store)
 }
 type ownerLeaseReady struct { Epoch uint64 `json:"epoch"` }
-type helperOwnerLease struct { cmd *exec.Cmd; stdin io.WriteCloser; done chan struct{}; mu sync.Mutex; waitErr error; epoch uint64 }
+type helperOwnerLease struct { cmd *exec.Cmd; stdin io.WriteCloser; done chan struct{}; mu sync.Mutex; waitErr error; epoch uint64; resource string }
 func acquireOwnerLease(c poolConfig,poolID string)(*helperOwnerLease,error){
  if strings.TrimSpace(c.OwnerLeaseHelper)==""{return nil,errors.New("owner_lease_helper is required for Pool metadata mutation")}
  cmd:=exec.Command(c.OwnerLeaseHelper,"--pool",poolID,"--device",c.DevicePath)
@@ -121,7 +140,7 @@ func acquireOwnerLease(c poolConfig,poolID string)(*helperOwnerLease,error){
  stdin,err:=cmd.StdinPipe();if err!=nil{return nil,err}
  cmd.Stderr=os.Stderr
  if err=cmd.Start();err!=nil{return nil,fmt.Errorf("start Owner lease helper: %w",err)}
- lease:=&helperOwnerLease{cmd:cmd,stdin:stdin,done:make(chan struct{})}
+ lease:=&helperOwnerLease{cmd:cmd,stdin:stdin,done:make(chan struct{}),resource:"volume:"+poolID}
  go func(){err:=cmd.Wait();lease.mu.Lock();lease.waitErr=err;lease.mu.Unlock();close(lease.done)}()
  var ready ownerLeaseReady
  if err=json.NewDecoder(bufio.NewReader(stdout)).Decode(&ready);err!=nil{_ = lease.Close();return nil,fmt.Errorf("read Owner lease helper readiness: %w",err)}
@@ -131,6 +150,7 @@ func acquireOwnerLease(c poolConfig,poolID string)(*helperOwnerLease,error){
  return lease,nil
 }
 func(l *helperOwnerLease)Epoch()uint64{if l==nil{return 0};return l.epoch}
+func(l *helperOwnerLease)Resource()string{if l==nil{return ""};return l.resource}
 func(l *helperOwnerLease)Valid()bool{if l==nil{return false};select{case <-l.done:return false;default:return true}}
 func(l *helperOwnerLease)Close()error{
  if l==nil{return nil}
@@ -147,6 +167,111 @@ func openStore(c poolConfig,poolID string,writable bool)(*device.BlockDevice,*po
  if err=store.SetOwnerLease(owner);err!=nil{_ = owner.Close();dev.Close();return nil,nil,nil,err}
  return dev,store,owner,nil
 }
+type dynamicPoolStatus struct {
+	PoolID string `json:"pool_id"`
+	PoolUUID string `json:"pool_uuid"`
+	ViewGeneration uint64 `json:"view_generation"`
+	SuperblockGeneration uint64 `json:"superblock_generation"`
+	MetadataBytes uint64 `json:"metadata_bytes"`
+	DataBytes uint64 `json:"data_bytes"`
+	AGCount uint32 `json:"ag_count"`
+	AGCapacity uint32 `json:"ag_capacity"`
+	WALSegmentBytes uint64 `json:"wal_segment_bytes"`
+	ReservedAllocator bool `json:"reserved_allocator"`
+}
+
+func dynamicGeometryConfig(c poolConfig,metadataBytes,dataBytes uint64)(format.DynamicGeometryConfig,error){
+	agSize:=c.AGSizeBytes;if agSize==0{agSize=1<<40}
+	walBytes:=c.WALSegmentBytes;if walBytes==0{walBytes=4<<20}
+	mappingBytes:=c.MappingBytes;if mappingBytes==0{mappingBytes=8<<20}
+	agCapacity:=c.AGCapacity;if agCapacity==0{agCapacity=8}
+	checkpointBytes:=c.CheckpointBytes
+	minCheckpoint:=uint64(agCapacity)*2*format.PageSize
+	if checkpointBytes==0{checkpointBytes=minCheckpoint}
+	return format.DynamicGeometryConfig{DataBytes:dataBytes,MetadataBytes:metadataBytes,AGSizeBytes:agSize,
+		AGCapacity:agCapacity,WALSegmentBytes:walBytes,MappingBytes:mappingBytes,CheckpointBytes:checkpointBytes},nil
+}
+
+func dynamicFormatPool(id string,c poolConfig)error{
+	dev,bootstrap,owner,err:=openStore(c,id,true);if err!=nil{return err}
+	defer dev.Close();defer owner.Close()
+	metadata,data,viewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	if data==nil||data.Size()<=0{return errors.New("Pool has no DataView capacity; allocate Data extents before BMPOOL03 format")}
+	cfg,err:=dynamicGeometryConfig(c,uint64(metadata.Size()),uint64(data.Size()));if err!=nil{return err}
+	g,err:=format.PlanDynamicGeometry(cfg);if err!=nil{return fmt.Errorf("plan BMPOOL03 geometry: %w",err)}
+	record:=bootstrap.Record()
+	sb,err:=format.NewDynamicSuperblock(g,record.PoolUUID,1,viewGeneration);if err!=nil{return err}
+	if err=allocator.FormatDynamicPool(metadata,sb);err!=nil{return err}
+	if err=metastore.FormatDynamicVolumeAllocator(metadata,sb);err!=nil{return err}
+	volumeAllocator,err:=metastore.OpenDynamicVolumeAllocator(metadata,sb);if err!=nil{return err}
+	lifecyclePages:=c.LifecyclePages;if lifecyclePages==0{lifecyclePages=8}
+	arenaPages:=c.InitialArenaPages
+	if arenaPages==0{
+		regionPages:=(g.MetadataBytes-g.ReservedOffset)/format.PageSize
+		bitmapPages:=(regionPages+uint64(format.PageSize)*8-1)/(uint64(format.PageSize)*8)
+		overhead:=uint64(2)+bitmapPages+lifecyclePages
+		if regionPages<=overhead+16{return errors.New("BMPOOL03 Reserved region is too small for an initial Volume Arena")}
+		arenaPages=(regionPages-overhead)*3/4
+	}
+	descriptor:=format.DynamicVolumeDescriptor{VolumeID:id,AG:0,Generation:1,VolumeSequence:1,
+		MappingRootOffset:g.MappingOffset,BitmapSequence:1,OwnerEpoch:owner.Epoch(),ArenaPages:arenaPages,
+		RootPage:^uint64(0),LifecyclePages:lifecyclePages}
+	locker:=newSanlock(c)
+	resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",record.PoolUUID,0)
+	committer,err:=wal.NewDynamicSharedCommitter(metadata,sb,0,locker,resource);if err!=nil{return err}
+	if _,err=volumeAllocator.AllocateVolume(0,descriptor,committer);err!=nil{return fmt.Errorf("allocate initial BMPOOL03 Volume: %w",err)}
+	volume,err:=metastore.OpenDynamicPoolVolume(metadata,sb,0,id);if err!=nil{return err}
+	if err=metastore.FormatLifecycle(volume);err!=nil{return fmt.Errorf("initialize initial Volume lifecycle: %w",err)}
+	out:=dynamicPoolStatus{PoolID:id,PoolUUID:fmt.Sprintf("%x",record.PoolUUID),ViewGeneration:viewGeneration,
+		SuperblockGeneration:sb.Generation,MetadataBytes:g.MetadataBytes,DataBytes:g.DataBytes,
+		AGCount:g.AGCount,AGCapacity:g.AGCapacity,WALSegmentBytes:g.WALSegmentBytes,ReservedAllocator:true}
+	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
+func dynamicStatusPool(id string,c poolConfig)error{
+	dev,bootstrap,_,err:=openStore(c,id,false);if err!=nil{return err};defer dev.Close()
+	metadata,data,generation,err:=bootstrap.OpenViews();if err!=nil{return err}
+	sb,err:=allocator.OpenDynamicSuperblockPair(metadata);if err!=nil{return err}
+	reserved:=metastore.DynamicVolumeAllocatorPresent(metadata,sb)
+	out:=dynamicPoolStatus{PoolID:id,PoolUUID:fmt.Sprintf("%x",sb.PoolUUID),ViewGeneration:generation,
+		SuperblockGeneration:sb.Generation,MetadataBytes:sb.Geometry.MetadataBytes,DataBytes:sb.Geometry.DataBytes,
+		AGCount:sb.Geometry.AGCount,AGCapacity:sb.Geometry.AGCapacity,WALSegmentBytes:sb.Geometry.WALSegmentBytes,
+		ReservedAllocator:reserved}
+	if data==nil||uint64(data.Size())<sb.Geometry.DataBytes{return errors.New("DataView is smaller than persisted BMPOOL03 geometry")}
+	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
+func dynamicRecoverPool(id string,c poolConfig)error{
+	dev,bootstrap,owner,err:=openStore(c,id,true);if err!=nil{return err}
+	defer dev.Close();defer owner.Close()
+	metadata,data,viewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	sb,err:=allocator.OpenDynamicSuperblockPair(metadata)
+	if errors.Is(err,allocator.ErrDynamicFormatIncomplete){
+		if data==nil{return errors.New("Pool has no DataView")}
+		cfg,e:=dynamicGeometryConfig(c,uint64(metadata.Size()),uint64(data.Size()));if e!=nil{return e}
+		g,e:=format.PlanDynamicGeometry(cfg);if e!=nil{return e}
+		sb,e=format.NewDynamicSuperblock(g,bootstrap.Record().PoolUUID,1,viewGeneration);if e!=nil{return e}
+		if e=allocator.RecoverDynamicFormat(metadata,sb);e!=nil{return e}
+		sb,err=allocator.OpenDynamicSuperblockPair(metadata)
+	}
+	if err!=nil{return err}
+	locker:=newSanlock(c)
+	for ag:=uint32(0);ag<sb.Geometry.AGCount;ag++{
+		if _,err=wal.OpenDynamicJournal(metadata,sb,ag);err!=nil{return fmt.Errorf("recover AG %d WAL: %w",ag,err)}
+	}
+	if metastore.DynamicVolumeAllocatorPresent(metadata,sb){
+		if _,err=metastore.OpenDynamicVolumeAllocator(metadata,sb);errors.Is(err,metastore.ErrDynamicVolumeAllocatorUnformatted){
+			if err=metastore.RecoverDynamicVolumeAllocatorFormat(metadata,sb);err!=nil{return err}
+		}else if err!=nil{return err}
+	}
+	_ = locker
+	out:=dynamicPoolStatus{PoolID:id,PoolUUID:fmt.Sprintf("%x",sb.PoolUUID),ViewGeneration:viewGeneration,
+		SuperblockGeneration:sb.Generation,MetadataBytes:sb.Geometry.MetadataBytes,DataBytes:sb.Geometry.DataBytes,
+		AGCount:sb.Geometry.AGCount,AGCapacity:sb.Geometry.AGCapacity,WALSegmentBytes:sb.Geometry.WALSegmentBytes,
+		ReservedAllocator:metastore.DynamicVolumeAllocatorPresent(metadata,sb)}
+	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
 func rescanPool(id string,c poolConfig)error{
 	dev,store,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
 	actual,err:=store.Rescan();if err!=nil{return err}
