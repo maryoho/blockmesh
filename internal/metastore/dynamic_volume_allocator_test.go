@@ -20,6 +20,7 @@ func(dynamicVolumeTestCommitter)ClusterSafe()bool{return true}
 
 type dynamicVolumeTestFence struct{err error}
 type dynamicVolumeTestFenceLease struct{volumeID string;epoch uint64;valid bool}
+func(l *dynamicVolumeTestFenceLease)Resource()string{return "test-volume-fencing"}
 func(l *dynamicVolumeTestFenceLease)Valid()bool{return l.valid}
 func(l *dynamicVolumeTestFenceLease)VolumeID()string{return l.volumeID}
 func(l *dynamicVolumeTestFenceLease)Epoch()uint64{return l.epoch}
