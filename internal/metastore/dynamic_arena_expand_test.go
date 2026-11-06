@@ -30,13 +30,20 @@ func TestExpandDynamicArenaRelocatesLifecycleAndPublishesDescriptor(t *testing.T
 	oldLifecycle:=make([]byte,desc.LifecyclePages*PageSize)
 	for i:=range oldLifecycle{oldLifecycle[i]=byte(i*31+7)}
 	if _,err=dev.WriteAt(oldLifecycle,int64(desc.LifecycleStart*PageSize));err!=nil{t.Fatal(err)}
-	store,err:=OpenDynamicPoolVolume(dev,sb,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
+	nextGeometry,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:g.DataBytes,MetadataBytes:oldMeta+extra,
+		AGSizeBytes:g.AGSizeBlocks*format.BlockSize,WALSegmentBytes:g.WALSegmentBytes,MappingBytes:g.MappingSize,CheckpointBytes:g.CheckpointSize})
+	if err!=nil{t.Fatal(err)}
+	nextSB,err:=format.NewDynamicSuperblock(nextGeometry,uuid,2,2);if err!=nil{t.Fatal(err)}
+	encoded,err:=nextSB.Encode();if err!=nil{t.Fatal(err)}
+	if _,err=dev.WriteAt(encoded,0);err!=nil{t.Fatal(err)}
+	if _,err=dev.WriteAt(encoded,int64(PageSize));err!=nil{t.Fatal(err)}
+	store,err:=OpenDynamicPoolVolume(dev,nextSB,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
 	if err=store.ExpandDynamicArena(dynamicArenaCommitter{dev});err!=nil{t.Fatal(err)}
 	got,err:=store.DynamicPoolDescriptor();if err!=nil{t.Fatal(err)}
 	if got.ArenaPages<=desc.ArenaPages||got.LifecycleStart<=desc.LifecycleStart{t.Fatalf("Arena did not grow: old=%+v new=%+v",desc,got)}
 	copied:=make([]byte,len(oldLifecycle))
 	if _,err=dev.ReadAt(copied,int64(got.LifecycleStart*PageSize));err!=nil{t.Fatal(err)}
 	if string(copied)!=string(oldLifecycle){t.Fatal("lifecycle pages changed during relocation")}
-	reopened,err:=OpenDynamicPoolVolume(dev,sb,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
+	reopened,err:=OpenDynamicPoolVolume(dev,nextSB,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
 	if reopened.Superblock().ArenaPages!=got.ArenaPages||reopened.Superblock().LifecycleStart!=got.LifecycleStart{t.Fatal("reopened Store lost expanded Arena geometry")}
 }
