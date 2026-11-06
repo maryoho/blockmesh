@@ -26,9 +26,9 @@ func TestBuildDynamicGeometryUpdateKeepsMetadataOffsets(t *testing.T){
 	if err!=nil{t.Fatal(err)}
 	if next.Geometry.AGCount!=old.Geometry.AGCount||next.Geometry.LastAGBlocks!=6||next.Geometry.MappingOffset!=old.Geometry.MappingOffset||
 		next.Geometry.ReservedOffset!=old.Geometry.ReservedOffset{t.Fatalf("unexpected geometry update: %+v",next.Geometry)}
-	if _,err=BuildDynamicGeometryUpdate(old,old.Geometry.MetadataBytes,9*format.BlockSize,2);err!=ErrDynamicGeometryRequiresMigration{
-		t.Fatalf("expected AG-count migration requirement, got %v",err)
-	}
+	grown,err:=BuildDynamicGeometryUpdate(old,old.Geometry.MetadataBytes,9*format.BlockSize,2)
+	if err!=nil{t.Fatalf("reserved AG capacity should permit AG-count growth: %v",err)}
+	if grown.Geometry.AGCount!=2||grown.Geometry.AGCapacity!=old.Geometry.AGCapacity{t.Fatalf("unexpected AG activation geometry: %+v",grown.Geometry)}
 }
 
 func TestPublishDynamicGeometryExpandsLastAGBitmapAndDualSuperblock(t *testing.T){
