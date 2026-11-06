@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"context"
+	"bufio"
+	"io"
+	"os/exec"
+	"sync"
 	"errors"
 	"flag"
 	"fmt"
@@ -26,6 +29,7 @@ type poolConfig struct {
 	SanlockBinary string `json:"sanlock_binary"`
 	LockHelperBinary string `json:"lock_helper_binary"`
 	ReadyDir string `json:"ready_dir"`
+	OwnerLeaseHelper string `json:"owner_lease_helper"`
 	MetadataUsageFile string `json:"metadata_usage_file"`
 	MetadataUsageMaxAgeSeconds int64 `json:"metadata_usage_max_age_seconds"`
 }
@@ -107,14 +111,43 @@ func formatPool(id string,c poolConfig)error{
 	if formatErr!=nil{return formatErr};if releaseErr!=nil{return releaseErr}
 	return printStatus(id,store)
 }
-func openStore(c poolConfig,writable bool)(*device.BlockDevice,*poolspace.BootstrapStore,error){
-	dev,err:=openPoolDevice(c,writable);if err!=nil{return nil,nil,err}
-	store,err:=poolspace.OpenPoolSpace(dev);if err!=nil{dev.Close();return nil,nil,err}
-	if writable{if err=store.SetCommitLocker(newSanlock(c));err!=nil{dev.Close();return nil,nil,err}}
-	return dev,store,nil
+type ownerLeaseReady struct { Epoch uint64 `json:"epoch"` }
+type helperOwnerLease struct { cmd *exec.Cmd; stdin io.WriteCloser; done chan struct{}; mu sync.Mutex; waitErr error; epoch uint64 }
+func acquireOwnerLease(c poolConfig,poolID string)(*helperOwnerLease,error){
+ if strings.TrimSpace(c.OwnerLeaseHelper)==""{return nil,errors.New("owner_lease_helper is required for Pool metadata mutation")}
+ cmd:=exec.Command(c.OwnerLeaseHelper,"--pool",poolID,"--device",c.DevicePath)
+ stdout,err:=cmd.StdoutPipe();if err!=nil{return nil,err}
+ stdin,err:=cmd.StdinPipe();if err!=nil{return nil,err}
+ cmd.Stderr=os.Stderr
+ if err=cmd.Start();err!=nil{return nil,fmt.Errorf("start Owner lease helper: %w",err)}
+ lease:=&helperOwnerLease{cmd:cmd,stdin:stdin,done:make(chan struct{})}
+ go func(){err:=cmd.Wait();lease.mu.Lock();lease.waitErr=err;lease.mu.Unlock();close(lease.done)}()
+ var ready ownerLeaseReady
+ if err=json.NewDecoder(bufio.NewReader(stdout)).Decode(&ready);err!=nil{_ = lease.Close();return nil,fmt.Errorf("read Owner lease helper readiness: %w",err)}
+ if ready.Epoch==0{_ = lease.Close();return nil,errors.New("Owner lease helper returned zero OwnerEpoch")}
+ lease.epoch=ready.Epoch
+ if !lease.Valid(){return nil,errors.New("Owner lease helper exited immediately after readiness")}
+ return lease,nil
+}
+func(l *helperOwnerLease)Epoch()uint64{if l==nil{return 0};return l.epoch}
+func(l *helperOwnerLease)Valid()bool{if l==nil{return false};select{case <-l.done:return false;default:return true}}
+func(l *helperOwnerLease)Close()error{
+ if l==nil{return nil}
+ if l.stdin!=nil{_ = l.stdin.Close()}
+ select{case <-l.done:l.mu.Lock();defer l.mu.Unlock();return l.waitErr
+ case <-time.After(5*time.Second):_ = l.cmd.Process.Kill();<-l.done;l.mu.Lock();defer l.mu.Unlock();return l.waitErr}
+}
+func openStore(c poolConfig,poolID string,writable bool)(*device.BlockDevice,*poolspace.BootstrapStore,*helperOwnerLease,error){
+ dev,err:=openPoolDevice(c,writable);if err!=nil{return nil,nil,nil,err}
+ store,err:=poolspace.OpenPoolSpace(dev);if err!=nil{dev.Close();return nil,nil,nil,err}
+ if !writable{return dev,store,nil,nil}
+ if err=store.SetCommitLocker(newSanlock(c));err!=nil{dev.Close();return nil,nil,nil,err}
+ owner,err:=acquireOwnerLease(c,poolID);if err!=nil{dev.Close();return nil,nil,nil,err}
+ if err=store.SetOwnerLease(owner);err!=nil{_ = owner.Close();dev.Close();return nil,nil,nil,err}
+ return dev,store,owner,nil
 }
 func rescanPool(id string,c poolConfig)error{
-	dev,store,err:=openStore(c,true);if err!=nil{return err};defer dev.Close()
+	dev,store,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
 	actual,err:=store.Rescan();if err!=nil{return err}
 	fmt.Printf("{\"pool_id\":%q,\"device_bytes\":%d,\"generation\":%d}\n",id,actual,store.Record().Generation)
 	return nil
@@ -126,13 +159,13 @@ func expandPoolMetadata(id string,c poolConfig)error{
 	if usage.ObservedAt.IsZero()||time.Since(usage.ObservedAt)>time.Duration(c.MetadataUsageMaxAgeSeconds)*time.Second||usage.ObservedAt.After(time.Now().Add(5*time.Minute)){
 		return errors.New("metadata usage snapshot is missing, stale, or from the future")
 	}
-	dev,store,err:=openStore(c,true);if err!=nil{return err};defer dev.Close()
+	dev,store,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
 	target,err:=store.ExpandMetadata(usage.UsedBytes,usage.GrowthBytes);if err!=nil{return err}
 	fmt.Printf("{\"pool_id\":%q,\"metadata_bytes\":%d,\"generation\":%d}\n",id,target,store.Record().Generation)
 	return nil
 }
 func statusPool(id string,c poolConfig)error{
-	dev,store,err:=openStore(c,false);if err!=nil{return err};defer dev.Close()
+	dev,store,_,err:=openStore(c,id,false);if err!=nil{return err};defer dev.Close()
 	return printStatus(id,store)
 }
 func printStatus(id string,s *poolspace.BootstrapStore)error{

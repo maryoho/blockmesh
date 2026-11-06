@@ -1,13 +1,17 @@
-# P4-1.2.5.9 — bmctl Pool operations
+# bmctl Pool commands (BMPOOL03)
 
-Pool configuration is stored at /etc/blockmesh/pools/<pool-id>.json. Required fields:
-- device_path: one multipath, single-path iSCSI, or local block device
-- lockspace, lock_device, lock_offset_bytes: sanlock resource location (the offset must be unique for this Pool)
-- volume_slots and logical_sector_bytes: used by explicit format
+Pool configuration lives at /etc/blockmesh/pools/<pool-id>.json.
 
-Optional usage telemetry fields:
-- metadata_usage_file: JSON snapshot with used_bytes, growth_bytes and observed_at (RFC3339)
-- metadata_usage_max_age_seconds: snapshot freshness limit (default 3600)
+Required:
+- device_path: multipath, single-path iSCSI, or local block device
+- lockspace, lock_device, lock_offset_bytes: unique sanlock resource location
+- owner_lease_helper: helper implementing the fenced Owner lease contract in owner-lease-helper.md
+
+For format, also set volume_slots and optionally logical_sector_bytes. If the logical sector field is omitted, bmctl detects it from the block device.
+
+For metadata expansion, configure metadata_usage_file with a fresh JSON snapshot:
+{"used_bytes": 123456, "growth_bytes": 123456, "observed_at": "2026-11-06T09:00:00Z"}
+The usage and growth values are observations in the dynamic Metadata area; the CLI never accepts a target capacity. metadata_usage_max_age_seconds defaults to 3600.
 
 Commands:
 - bmctl pool format --pool pool-001 --confirm-format
@@ -15,6 +19,4 @@ Commands:
 - bmctl pool metadata-expand --pool pool-001
 - bmctl pool metadata-expand-status --pool pool-001
 
-Metadata expansion never accepts a target size. It uses a fresh usage/growth snapshot and the internal planner. The metadata service must maintain the snapshot; this command does not fabricate usage metrics.
-
-The command implementation acquires the configured SAN sanlock resource. The current CLI does not construct a complete OwnerCoordinator (PR fencer, reservation manager, authoritative OwnerRecord CAS and old-owner I/O drain), so its mutating calls fail closed until a live fenced Owner lease is injected by the runtime integration. Do not bypass BootstrapStore.SetOwnerLease or substitute a config-file epoch. The status command is read-only.
+Mutating commands hold the helper-provided fenced Owner lease and the distributed Bootstrap sanlock lock. Status is read-only. The metadata service must provide authoritative usage telemetry; this CLI does not invent it.
