@@ -55,7 +55,7 @@ func TestBootstrapWALRecoversUncertainCommit(t *testing.T){
 	if recovered.Record().Generation!=2{t.Fatalf("durable Commit was not recovered: generation=%d",recovered.Record().Generation)}
 }
 func TestBootstrapRejectsStaleWriter(t *testing.T){
-	f,s:=newSparsePool(t);defer f.Close()
+	f,_:=newSparsePool(t);defer f.Close()
 	first,err:=OpenBootstrap(f);if err!=nil{t.Fatal(err)}
 	second,err:=OpenBootstrap(f);if err!=nil{t.Fatal(err)}
 	if err=first.SetCommitLocker(testBootstrapLocker{});err!=nil{t.Fatal(err)}
