@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"hash/crc32"
 	"testing"
 )
 

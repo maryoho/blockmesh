@@ -35,6 +35,9 @@ func (s DynamicSuperblock) Validate() error {
 		return fmt.Errorf("%w: invalid superblock identity or generation",ErrInvalidDynamicGeometry)
 	}
 	g:=s.Geometry
+	if g.AGSizeBlocks==0 || g.AGSizeBlocks > ^uint64(0)/BlockSize {
+		return fmt.Errorf("%w: AG size overflows byte geometry",ErrInvalidDynamicGeometry)
+	}
 	planned,err:=PlanDynamicGeometry(DynamicGeometryConfig{
 		DataBytes:g.DataBytes,MetadataBytes:g.MetadataBytes,
 		AGSizeBytes:g.AGSizeBlocks*BlockSize,WALSegmentBytes:g.WALSegmentBytes,
