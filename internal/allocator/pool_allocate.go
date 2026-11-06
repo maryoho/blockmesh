@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/bits"
 
 	"blockmesh/internal/btree"
 	"blockmesh/internal/format"
@@ -97,6 +96,10 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		return result, errors.New("Owner lease does not match Volume Descriptor")
 	}
 	if desc.OwnerEpoch == 0 { return result, errors.New("Volume Descriptor has no active OwnerEpoch") }
+	epochLease, ok := ownerLease.(interface{ Epoch() uint64 })
+	if !ok || epochLease.Epoch() != desc.OwnerEpoch {
+		return result, errors.New("Owner lease epoch does not match the durable Volume Descriptor")
+	}
 	if req.LogicalStart+uint64(req.BlockCount) > pool.TotalBlocks {
 		return result, errors.New("logical allocation range exceeds Pool capacity")
 	}
@@ -222,5 +225,3 @@ func (v *poolDataView) WriteAt(p []byte, off int64)(int,error) {
 func (v *poolDataView) Sync() error { return v.dev.Sync() }
 func (v *poolDataView) Size() int64 { return v.size }
 
-// Keep the platform integer width check explicit for large mapping batches.
-var _ = bits.UintSize
