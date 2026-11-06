@@ -1,0 +1,137 @@
+package allocator
+
+import (
+	"errors"
+	"fmt"
+	"math"
+
+	"blockmesh/internal/device"
+	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
+)
+
+var ErrDynamicGeometryRequiresMigration=errors.New("BMPOOL03 growth exceeds reserved AG geometry; metadata layout migration is required")
+
+// BuildDynamicGeometryUpdate replans a new logical view generation while
+// preserving every existing metadata-region offset. This first online-growth
+// implementation supports metadata growth and Data growth within the existing
+// final AG; adding another AG requires a separately reserved AG-capacity plan.
+func BuildDynamicGeometryUpdate(current format.DynamicSuperblock,metadataBytes,dataBytes,viewGeneration uint64)(format.DynamicSuperblock,error){
+	var zero format.DynamicSuperblock
+	if err:=current.Validate();err!=nil{return zero,err}
+	if metadataBytes<current.Geometry.MetadataBytes||dataBytes<current.Geometry.DataBytes||viewGeneration<=current.ViewGeneration{
+		return zero,errors.New("BMPOOL03 geometry update cannot shrink views or regress ViewGeneration")
+	}
+	if current.Generation==math.MaxUint64{return zero,errors.New("BMPOOL03 superblock generation exhausted")}
+	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{
+		DataBytes:dataBytes,MetadataBytes:metadataBytes,AGSizeBytes:current.Geometry.AGSizeBlocks*format.BlockSize,
+		WALSegmentBytes:current.Geometry.WALSegmentBytes,MappingBytes:current.Geometry.MappingSize,
+		CheckpointBytes:current.Geometry.CheckpointSize,
+	})
+	if err!=nil{return zero,err}
+	old:=current.Geometry
+	if g.AGCount!=old.AGCount||g.AGSizeBlocks!=old.AGSizeBlocks||
+		g.NodeTableOffset!=old.NodeTableOffset||g.NodeTableSize!=old.NodeTableSize||
+		g.WALOffset!=old.WALOffset||g.WALSize!=old.WALSize||
+		g.BitmapOffset!=old.BitmapOffset||g.BitmapSize!=old.BitmapSize||g.BitmapStride!=old.BitmapStride||
+		g.BitmapPaddedBytes!=old.BitmapPaddedBytes||g.MappingOffset!=old.MappingOffset||
+		g.MappingSize!=old.MappingSize||g.CheckpointOffset!=old.CheckpointOffset||
+		g.CheckpointSize!=old.CheckpointSize||g.ReservedOffset!=old.ReservedOffset{
+		return zero,ErrDynamicGeometryRequiresMigration
+	}
+	next,err:=format.NewDynamicSuperblock(g,current.PoolUUID,current.Generation+1,viewGeneration)
+	return next,err
+}
+
+// PlanDynamicBitmapGrow clears only the bitmap bits that were padding in the
+// old final AG and become valid DataView blocks in the new geometry. The
+// caller must commit these after-images before publishing the new superblock.
+func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,newSB format.DynamicSuperblock)([]metastore.PageImage,error){
+	if r==nil||oldSB.Validate()!=nil||newSB.Validate()!=nil{return nil,errors.New("invalid BMPOOL03 bitmap growth request")}
+	oldG,newG:=oldSB.Geometry,newSB.Geometry
+	if oldG.AGCount!=newG.AGCount||oldG.BitmapOffset!=newG.BitmapOffset||oldG.BitmapStride!=newG.BitmapStride||
+		oldG.BitmapPaddedBytes!=newG.BitmapPaddedBytes||newG.LastAGBlocks<oldG.LastAGBlocks{
+		return nil,ErrDynamicGeometryRequiresMigration
+	}
+	if newG.LastAGBlocks==oldG.LastAGBlocks{return nil,nil}
+	ag:=oldG.AGCount-1
+	base:=oldG.BitmapOffset+uint64(ag)*oldG.BitmapStride
+	desc:=make([]byte,format.PageSize)
+	if err:=readAtFull(r,desc,int64(base));err!=nil{return nil,err}
+	if binaryLittleUint64(desc[:8])!=bitmapDescriptorMagic||binaryLittleUint32(desc[8:12])!=ag{return nil,errors.New("BMPOOL03 final AG bitmap descriptor invalid")}
+	seq:=binaryLittleUint64(desc[16:24]);if seq==math.MaxUint64{return nil,errors.New("BMPOOL03 bitmap sequence exhausted")}
+	bitmap:=make([]byte,oldG.BitmapPaddedBytes)
+	if err:=readAtFull(r,bitmap,int64(base+format.PageSize));err!=nil{return nil,err}
+	if crc32Checksum(bitmap)!=binaryLittleUint32(desc[24:28]){return nil,errors.New("BMPOOL03 final AG bitmap CRC32C mismatch")}
+	for bit:=oldG.LastAGBlocks;bit<newG.LastAGBlocks;bit++{
+		mask:=byte(1<<uint(bit%8))
+		if bitmap[bit/8]&mask==0{return nil,fmt.Errorf("newly exposed bitmap bit %d was not reserved padding",bit)}
+		bitmap[bit/8]&^=mask
+	}
+	images:=make([]metastore.PageImage,0,int(oldG.BitmapPaddedBytes/format.PageSize)+1)
+	for p:=uint64(0);p<oldG.BitmapPaddedBytes/format.PageSize;p++{
+		off:=base+format.PageSize+p*format.PageSize
+		page:=append([]byte(nil),bitmap[p*format.PageSize:(p+1)*format.PageSize]...)
+		images=append(images,metastore.PageImage{Offset:off,Data:page})
+	}
+	binaryPut64(desc[16:24],seq+1);binaryPut32(desc[24:28],crc32Checksum(bitmap))
+	images=append(images,metastore.PageImage{Offset:base,Data:desc})
+	return images,nil
+}
+
+// PublishDynamicGeometry commits newly exposed final-AG bitmap bits first,
+// then publishes the new geometry to the older superblock copy and finally
+// mirrors it to the previous active copy. A crash at any point leaves either
+// the old valid geometry or at least one complete new copy.
+func PublishDynamicGeometry(dev device.Device,current,next format.DynamicSuperblock,bitmapCommitter metastore.Committer)error{
+	if dev==nil{return errors.New("nil BMPOOL03 MetadataView")}
+	if err:=current.Validate();err!=nil{return err};if err:=next.Validate();err!=nil{return err}
+	if next.PoolUUID!=current.PoolUUID||next.Generation!=current.Generation+1||
+		next.ViewGeneration<=current.ViewGeneration{return errors.New("BMPOOL03 geometry publication identity/generation mismatch")}
+	if uint64(dev.Size())<next.Geometry.MetadataBytes{return errors.New("expanded MetadataView is smaller than new geometry")}
+	if !sameDynamicMetadataLayout(current.Geometry,next.Geometry){return ErrDynamicGeometryRequiresMigration}
+	if next.Geometry.DataBytes>current.Geometry.DataBytes{
+		if bitmapCommitter==nil{return errors.New("bitmap WAL committer required before publishing Data growth")}
+		images,err:=PlanDynamicBitmapGrow(dev,current,next);if err!=nil{return err}
+		if len(images)>0{if err=bitmapCommitter.CommitImages(images);err!=nil{return fmt.Errorf("publish newly exposed Data bitmap bits: %w",err)}}
+	}
+	selected,slot,err:=readDynamicSuperblockPairWithSlot(dev);if err!=nil{return err}
+	if selected!=current{return errors.New("stale BMPOOL03 geometry publisher: current on-disk superblock changed")}
+	encoded,err:=next.Encode();if err!=nil{return err}
+	inactive:=uint64(1)-slot
+	if err=writeDynamicAtFull(dev,encoded,int64(inactive*format.PageSize));err!=nil{return fmt.Errorf("publish first BMPOOL03 superblock copy: %w",err)}
+	if err=dev.Sync();err!=nil{return fmt.Errorf("sync first BMPOOL03 superblock copy: %w",err)}
+	if err=writeDynamicAtFull(dev,encoded,int64(slot*format.PageSize));err!=nil{return fmt.Errorf("publish second BMPOOL03 superblock copy: %w",err)}
+	if err=dev.Sync();err!=nil{return fmt.Errorf("sync second BMPOOL03 superblock copy: %w",err)}
+	return nil
+}
+
+func sameDynamicMetadataLayout(a,b format.DynamicGeometry)bool{
+	return a.AGCount==b.AGCount&&a.AGSizeBlocks==b.AGSizeBlocks&&a.NodeTableOffset==b.NodeTableOffset&&
+		a.NodeTableSize==b.NodeTableSize&&a.WALOffset==b.WALOffset&&a.WALSize==b.WALSize&&
+		a.WALSegmentBytes==b.WALSegmentBytes&&a.BitmapOffset==b.BitmapOffset&&a.BitmapSize==b.BitmapSize&&
+		a.BitmapStride==b.BitmapStride&&a.BitmapPaddedBytes==b.BitmapPaddedBytes&&a.MappingOffset==b.MappingOffset&&
+		a.MappingSize==b.MappingSize&&a.CheckpointOffset==b.CheckpointOffset&&a.CheckpointSize==b.CheckpointSize&&
+		a.ReservedOffset==b.ReservedOffset
+}
+
+func readDynamicSuperblockPairWithSlot(dev device.Device)(format.DynamicSuperblock,uint64,error){
+	var zero format.DynamicSuperblock
+	type candidate struct{sb format.DynamicSuperblock;slot uint64}
+	var valid []candidate
+	for slot:=uint64(0);slot<2;slot++{
+		sb,err:=format.ReadDynamicSuperblock(dev,int64(slot*format.PageSize));if err==nil{valid=append(valid,candidate{sb,slot})}
+	}
+	if len(valid)==0{return zero,0,errors.New("no valid BMPOOL03 superblock copy")}
+	if len(valid)==2{
+		if valid[0].sb.PoolUUID!=valid[1].sb.PoolUUID{return zero,0,errors.New("BMPOOL03 superblock copies have different Pool UUIDs")}
+		if valid[0].sb.Generation==valid[1].sb.Generation&&valid[0].sb!=valid[1].sb{return zero,0,errors.New("conflicting BMPOOL03 superblock copies")}
+		if valid[1].sb.Generation>valid[0].sb.Generation{return valid[1].sb,valid[1].slot,nil}
+	}
+	return valid[0].sb,valid[0].slot,nil
+}
+
+func binaryLittleUint64(b []byte)uint64{return uint64(b[0])|uint64(b[1])<<8|uint64(b[2])<<16|uint64(b[3])<<24|uint64(b[4])<<32|uint64(b[5])<<40|uint64(b[6])<<48|uint64(b[7])<<56}
+func binaryLittleUint32(b []byte)uint32{return uint32(b[0])|uint32(b[1])<<8|uint32(b[2])<<16|uint32(b[3])<<24}
+func binaryPut64(b []byte,v uint64){for i:=0;i<8;i++{b[i]=byte(v>>(8*i))}}
+func binaryPut32(b []byte,v uint32){for i:=0;i<4;i++{b[i]=byte(v>>(8*i))}}
