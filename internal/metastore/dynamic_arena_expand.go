@@ -22,20 +22,26 @@ func(s *Store)ExpandDynamicArena(committer Committer)error{
 	d:=s.dynamicDescriptor
 	if d.Generation==math.MaxUint64||d.VolumeSequence==math.MaxUint64{return errors.New("BMPOOL03 Volume Descriptor sequence exhausted")}
 	totalPages:=s.dynamicSB.Geometry.MetadataBytes/PageSize
-	if totalPages<=d.ArenaStart+d.ArenaPages{return errors.New("expanded MetadataView has no additional Arena pages")}
 	next:=d
 	next.Generation++;next.VolumeSequence++
 	if d.LifecyclePages==0{
-		next.ArenaPages=totalPages-d.ArenaStart
+		newArenaPages:=totalPages-d.ArenaStart
+		if newArenaPages<=d.ArenaPages{return errors.New("expanded MetadataView has no additional Arena pages")}
+		next.ArenaPages=newArenaPages
 	}else{
 		if d.LifecyclePages>totalPages{return ErrGeometry}
 		newLifecycleStart:=totalPages-d.LifecyclePages
 		if newLifecycleStart<=d.LifecycleStart{return errors.New("expanded MetadataView does not move lifecycle tail forward")}
 		if newLifecycleStart<d.ArenaStart{return ErrGeometry}
+		// Buffer the complete lifecycle set before writing: a small metadata
+		// expansion can make source and destination ranges overlap.
+		pages:=make([][]byte,d.LifecyclePages)
 		for i:=uint64(0);i<d.LifecyclePages;i++{
-			page:=make([]byte,PageSize)
-			if err:=readFullAt(s.dev,page,int64((d.LifecycleStart+i)*PageSize));err!=nil{return fmt.Errorf("read lifecycle page %d: %w",d.LifecycleStart+i,err)}
-			if err:=writeFullAt(s.dev,page,int64((newLifecycleStart+i)*PageSize));err!=nil{return fmt.Errorf("copy lifecycle page %d: %w",d.LifecycleStart+i,err)}
+			pages[i]=make([]byte,PageSize)
+			if err:=readFullAt(s.dev,pages[i],int64((d.LifecycleStart+i)*PageSize));err!=nil{return fmt.Errorf("read lifecycle page %d: %w",d.LifecycleStart+i,err)}
+		}
+		for i:=uint64(0);i<d.LifecyclePages;i++{
+			if err:=writeFullAt(s.dev,pages[i],int64((newLifecycleStart+i)*PageSize));err!=nil{return fmt.Errorf("copy lifecycle page %d: %w",newLifecycleStart+i,err)}
 		}
 		if err:=s.dev.Sync();err!=nil{return fmt.Errorf("sync relocated lifecycle pages: %w",err)}
 		next.LifecycleStart=newLifecycleStart
