@@ -6,7 +6,7 @@ import (
 )
 
 func TestPlanDynamicGeometryPartialLastAG(t *testing.T) {
-	data := uint64(10*1024*1024*1024 + 512*1024*1024)
+	data := uint64(8*1024*1024*1024 + 512*1024*1024)
 	g, err := PlanDynamicGeometry(DynamicGeometryConfig{
 		DataBytes:data, MetadataBytes:2<<30, AGSizeBytes:4<<30,
 		WALSegmentBytes:16<<20, MappingBytes:256<<20, CheckpointBytes:64<<20,

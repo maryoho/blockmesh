@@ -44,7 +44,7 @@ func (s DynamicSuperblock) Validate() error {
 		MappingBytes:g.MappingSize,CheckpointBytes:g.CheckpointSize,
 	})
 	if err!=nil{return err}
-	if planned!=g { return fmt.Errorf("%w: persisted geometry is inconsistent",ErrInvalidDynamicGeometry) }
+	if planned!=g { return fmt.Errorf("%w: persisted geometry is inconsistent (planned=%+v persisted=%+v)",ErrInvalidDynamicGeometry,planned,g) }
 	return nil
 }
 
