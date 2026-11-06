@@ -99,6 +99,7 @@ func DecodeDynamicSuperblock(b []byte) (DynamicSuperblock,error) {
 	s.ViewGeneration=binary.LittleEndian.Uint64(b[48:56])
 	g:=DynamicGeometry{
 		DataBytes:binary.LittleEndian.Uint64(b[56:64]),MetadataBytes:binary.LittleEndian.Uint64(b[64:72]),
+		TotalBlocks:binary.LittleEndian.Uint64(b[56:64])/BlockSize,
 		AGSizeBlocks:binary.LittleEndian.Uint64(b[72:80]),AGCount:binary.LittleEndian.Uint32(b[80:84]),
 		LastAGBlocks:binary.LittleEndian.Uint64(b[88:96]),BitmapBytesPerAG:binary.LittleEndian.Uint64(b[96:104]),
 		BitmapPaddedBytes:binary.LittleEndian.Uint64(b[104:112]),BitmapStride:binary.LittleEndian.Uint64(b[112:120]),

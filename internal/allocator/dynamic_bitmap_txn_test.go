@@ -51,7 +51,7 @@ func TestPlanDynamicBitmapAllocationRejectsBeyondPartialAG(t *testing.T){
 }
 
 func TestPlanDynamicBitmapAllocationRejectsCorruptDescriptor(t *testing.T){
-	sb,r:=dynamicBitmapFixture(t)
+	sb,_:=dynamicBitmapFixture(t)
 	image:=make([]byte,sb.Geometry.BitmapOffset+sb.Geometry.BitmapSize)
 	if _,_,err:=PlanDynamicBitmapAllocation(bytes.NewReader(image),sb,0,1);err==nil{
 		t.Fatal("expected invalid descriptor rejection")
