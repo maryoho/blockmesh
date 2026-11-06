@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/btree"
 	"blockmesh/internal/metastore"
 )
 
@@ -98,3 +99,37 @@ func TestZeroBlocksRejectsOutOfRange(t *testing.T) {
 	d := &zeroTestDevice{data: make([]byte, format.BlockSize)}
 	if err := ZeroBlocks(context.Background(), d, 1, 1); err == nil { t.Fatal("expected out-of-range error") }
 }
+
+
+func TestResolveIdempotencyPagesValidatesAndPinsChains(t *testing.T) {
+	var key [16]byte
+	var fp [32]byte
+	key[0],fp[0]=5,6
+	record:=IdempotencyRecord{Key:key,Fingerprint:fp,LogicalStart:1,PhysicalStart:2,BlockCount:1,OwnerEpoch:3}
+	page,err:=BuildIdempotencyRecordPage(9,4,record);if err!=nil {t.Fatal(err)}
+	storeReader:=idempotencyPageReader{9:page}
+	// Adapter to the resolver's Store API is exercised via a tiny formatted store below.
+	dev:=newIdempotencyMemDevice(32)
+	store,err:=metastore.Format(dev,metastore.Layout{VolumeID:"idem-resolver",TotalPages:32,ArenaStart:2,ArenaPages:28})
+	if err!=nil {t.Fatal(err)}
+	if err=store.WritePage(page);err!=nil {t.Fatal(err)}
+	if err=store.Sync();err!=nil {t.Fatal(err)}
+	got,err:=ResolveIdempotencyPages(store,[]btree.Item{{Key:IdempotencyHash(key),Value:9}})
+	if err!=nil||len(got)!=1||got[0]!=9 {t.Fatalf("resolved pages=%v err=%v",got,err)}
+	if _,err=ResolveIdempotencyPages(store,[]btree.Item{{Key:IdempotencyHash(key)^1,Value:9}});!errors.Is(err,ErrIdempotencyRecord) {
+		t.Fatalf("mis-keyed record error=%v",err)
+	}
+	_ = storeReader
+}
+
+type idempotencyMemDevice struct { b []byte }
+func newIdempotencyMemDevice(pages int) *idempotencyMemDevice { return &idempotencyMemDevice{b:make([]byte,pages*int(format.PageSize))} }
+func (d *idempotencyMemDevice) ReadAt(p []byte,off int64)(int,error) {
+	if off<0||off>=int64(len(d.b)){return 0,io.EOF}
+	n:=copy(p,d.b[off:]);if n!=len(p){return n,io.EOF};return n,nil
+}
+func (d *idempotencyMemDevice) WriteAt(p []byte,off int64)(int,error) {
+	if off<0||off+int64(len(p))>int64(len(d.b)){return 0,io.ErrShortWrite}
+	return copy(d.b[off:],p),nil
+}
+func (d *idempotencyMemDevice) Sync() error { return nil }

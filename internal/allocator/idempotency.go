@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/crc32"
 
+	"blockmesh/internal/btree"
 	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
 )
@@ -185,4 +186,34 @@ func LookupIdempotencyRecord(reader IdempotencyPageReader, headPage uint64, key 
 		pageID = record.NextPage
 	}
 	return IdempotencyRecord{}, false, nil
+}
+
+
+// ResolveIdempotencyPages implements btree.ExternalPageResolver. It walks
+// every high-bit index entry and validates the complete immutable collision
+// chain. Returning all page IDs lets PersistentArena reconstruct their Live
+// state after restart; a missing, duplicated, cyclic or mis-keyed record fails
+// closed rather than allowing a referenced page to be recycled.
+func ResolveIdempotencyPages(store *metastore.Store, items []btree.Item) ([]uint64, error) {
+	if store == nil { return nil, ErrIdempotencyRecord }
+	seen := make(map[uint64]struct{})
+	var live []uint64
+	for _, item := range items {
+		if item.Key>>63 == 0 { continue }
+		if item.Value == 0 || item.Value == metastore.NoPage { return nil, ErrIdempotencyRecord }
+		for pageID := item.Value; pageID != 0; {
+			if pageID == metastore.NoPage { return nil, ErrIdempotencyRecord }
+			if _, ok := seen[pageID]; ok { return nil, ErrIdempotencyRecord }
+			page, err := store.ReadPage(pageID)
+			if err != nil { return nil, err }
+			if page.Type != IdempotencyRecordPageType { return nil, ErrIdempotencyRecord }
+			record, err := DecodeIdempotencyRecordPayload(page.Payload)
+			if err != nil { return nil, err }
+			if IdempotencyHash(record.Key) != item.Key { return nil, ErrIdempotencyRecord }
+			seen[pageID] = struct{}{}
+			live = append(live, pageID)
+			pageID = record.NextPage
+		}
+	}
+	return live, nil
 }
