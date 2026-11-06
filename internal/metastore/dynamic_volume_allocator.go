@@ -231,6 +231,23 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 	return d,nil
 }
 
+ // CanExpandRegion validates whether a new MetadataView size fits the
+ // allocator's existing bitmap capacity without moving its metadata pages.
+ func(a *DynamicVolumeAllocator) CanExpandRegion(nextSB format.DynamicSuperblock) error {
+	if a==nil{return errors.New("nil Reserved allocator")}
+	a.mu.Lock();defer a.mu.Unlock()
+	if err:=nextSB.Validate();err!=nil{return err}
+	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation!=a.sb.Generation+1||
+		nextSB.Geometry.ReservedOffset!=a.sb.Geometry.ReservedOffset||
+		nextSB.Geometry.MetadataBytes<a.sb.Geometry.MetadataBytes{return ErrGeometry}
+	expected,bitmapPages,err:=dynamicReservedGeometry(nextSB);if err!=nil{return err}
+	if bitmapPages!=a.header.BitmapPages||expected.AllocStart!=a.header.AllocStart||
+		expected.RegionPages<a.header.RegionPages||expected.RegionPages>uint64(len(a.bitmap))*8{
+		return errors.New("Reserved allocator bitmap capacity requires layout migration")
+	}
+	return nil
+}
+
  // ExpandRegion extends the Reserved page bitmap after MetadataView growth.
  // It can reuse the existing bitmap layout only while BitmapPages remains
  // unchanged; otherwise an explicit allocator-layout migration is required.
