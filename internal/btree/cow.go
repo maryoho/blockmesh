@@ -488,6 +488,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
   newPages=append(newPages,t.externalPages...)
   var err error
+  committed:=false
   reservation:=supplied
   if len(arenaPages)>0 {
    if t.persistentArena==nil {return errors.New("external Arena pages require PersistentArena")}
@@ -500,7 +501,6 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
     if len(ids)!=len(arenaPages) {return metastore.ErrInvalidPageSet}
     for i:=range arenaPages {if arenaPages[i].ID!=ids[i] {return metastore.ErrInvalidPageSet}}
    }
-   committed:=false
    defer func(){if !committed {_=reservation.Abort()}}()
    for _,page:=range arenaPages {
     image,e:=metastore.EncodePageImage(page);if e!=nil {return e}
