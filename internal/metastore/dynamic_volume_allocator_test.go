@@ -185,6 +185,6 @@ func TestDynamicOwnerEpochReaderReadsAuthoritativeVolumeDescriptor(t *testing.T)
 	reader,err:=NewDynamicOwnerEpochReader(dev,sb,0,d.VolumeID);if err!=nil{t.Fatal(err)}
 	epoch,err:=reader.ReadOwnerEpoch();if err!=nil{t.Fatal(err)}
 	if epoch!=42{t.Fatalf("OwnerEpoch=%d want 42",epoch)}
-	if _,err=NewDynamicOwnerEpochReader(dev,sb,0,"wrong-volume");err!=nil{t.Fatal(err)}
-	if _,err=reader.ReadOwnerEpoch();err!=nil{t.Fatal(err)}
+	wrong,err:=NewDynamicOwnerEpochReader(dev,sb,0,"wrong-volume");if err!=nil{t.Fatal(err)}
+	if _,err=wrong.ReadOwnerEpoch();err==nil{t.Fatal("expected mismatched Volume ID rejection")}
 }
