@@ -228,7 +228,7 @@ func(s *BootstrapStore)OpenDataView()(*DataView,error){
  s.mu.Lock();defer s.mu.Unlock()
  var dataExtents []Extent
  for _,e:=range s.allocator.extents{if e.Kind==Data{dataExtents=append(dataExtents,e)}}
- return NewDataView(s.dev,dataExtents)
+ v,err:=NewDataView(s.dev,dataExtents);if err!=nil{return nil,err};v.generation=s.record.Generation;return v,nil
 }
 
 // OpenMetadataView exposes Metadata extents as a logical device while keeping
@@ -238,7 +238,7 @@ func(s *BootstrapStore)OpenMetadataView()(*MetadataView,error){
  s.mu.Lock();defer s.mu.Unlock()
  var extents []Extent
  for _,e:=range s.allocator.extents{if e.Kind==Metadata{extents=append(extents,e)}}
- return NewMetadataView(s.dev,extents)
+ v,err:=NewMetadataView(s.dev,extents);if err!=nil{return nil,err};v.generation=s.record.Generation;return v,nil
 }
 
 // OpenViews snapshots both logical address spaces from one Extent Map
@@ -253,6 +253,8 @@ func(s *BootstrapStore)OpenViews()(*MetadataView,*DataView,uint64,error){
  metadata,err:=NewMetadataView(s.dev,metadataExtents);if err!=nil{return nil,nil,0,err}
  var data *DataView
  if len(dataExtents)>0{data,err=NewDataView(s.dev,dataExtents);if err!=nil{return nil,nil,0,err}}
+ metadata.generation=s.record.Generation
+ if data!=nil{data.generation=s.record.Generation}
  return metadata,data,s.record.Generation,nil
 }
 

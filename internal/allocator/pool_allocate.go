@@ -72,6 +72,7 @@ func NewDynamicPoolAllocator(store *metastore.Store, tree *btree.Tree, locks loc
 	if _,err=store.DynamicPoolDescriptor();err!=nil{return nil,fmt.Errorf("%w: %v",ErrPoolAllocatorUnavailable,err)}
 	if !tree.UsesPersistentArena()||!tree.UsesClusterSafeCommitter(){return nil,ErrPoolAllocatorUnavailable}
 	if data.Size()<0||uint64(data.Size())<sb.Geometry.DataBytes{return nil,errors.New("DataView is smaller than BMPOOL03 Data geometry")}
+	if view,ok:=data.(interface{Generation()uint64});ok&&view.Generation()!=0&&view.Generation()!=sb.ViewGeneration{return nil,errors.New("DataView Extent Map generation does not match BMPOOL03 superblock")}
 	return &PoolAllocator{store:store,tree:tree,locks:locks,data:data,dynamic:true},nil
 }
 

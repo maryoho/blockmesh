@@ -13,6 +13,7 @@ import (
 // DynamicSuperblock and Volume Descriptor are MetadataView-relative.
 func OpenDynamicPoolVolume(dev Device,pool format.DynamicSuperblock,index uint32,expectedVolumeID string)(*Store,error){
 	if dev==nil{return nil,errors.New("nil BMPOOL03 MetadataView")}
+	if view,ok:=dev.(interface{Generation()uint64});ok&&view.Generation()!=0&&view.Generation()!=pool.ViewGeneration{return nil,errors.New("MetadataView Extent Map generation does not match BMPOOL03 superblock")}
 	if err:=pool.Validate();err!=nil{return nil,fmt.Errorf("invalid BMPOOL03 superblock: %w",err)}
 	if sized,ok:=dev.(interface{Size()int64});ok{
 		if sized.Size()<0||uint64(sized.Size())<pool.Geometry.MetadataBytes{return nil,errors.New("MetadataView is smaller than BMPOOL03 geometry")}

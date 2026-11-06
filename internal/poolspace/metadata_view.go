@@ -16,6 +16,7 @@ type MetadataView struct {
 	extents []Extent
 	starts []uint64
 	size uint64
+	generation uint64
 }
 
 func NewMetadataView(parent device.Device, extents []Extent) (*MetadataView, error) {
@@ -67,6 +68,8 @@ func NewMetadataView(parent device.Device, extents []Extent) (*MetadataView, err
 
 // Close releases only the logical view; the shared parent LUN remains owned by BootstrapStore.
 func (v *MetadataView) Close() error { return nil }
+
+func (v *MetadataView) Generation() uint64 { if v==nil{return 0};return v.generation }
 
 func (v *MetadataView) Size() int64 {
 	if v == nil { return 0 }
