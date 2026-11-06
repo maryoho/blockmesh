@@ -108,8 +108,9 @@ func OpenDynamicSuperblockPair(dev device.Device)(format.DynamicSuperblock,error
 
 func initializeDynamicBitmaps(dev device.Device,sb format.DynamicSuperblock)error{
 	g:=sb.Geometry
-	for ag:=uint32(0);ag<g.AGCount;ag++{
-		valid,err:=g.AGBlocks(ag);if err!=nil{return err}
+	for ag:=uint32(0);ag<g.AGCapacity;ag++{
+		var valid uint64
+		if ag<g.AGCount { var err error; valid,err=g.AGBlocks(ag);if err!=nil{return err} }
 		base:=g.BitmapOffset+uint64(ag)*g.BitmapStride
 		bitmap:=make([]byte,g.BitmapPaddedBytes)
 		// Bits beyond the valid block count are permanently allocated. This

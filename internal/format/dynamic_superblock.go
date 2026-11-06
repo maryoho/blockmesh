@@ -41,7 +41,7 @@ func (s DynamicSuperblock) Validate() error {
 	planned,err:=PlanDynamicGeometry(DynamicGeometryConfig{
 		DataBytes:g.DataBytes,MetadataBytes:g.MetadataBytes,
 		AGSizeBytes:g.AGSizeBlocks*BlockSize,WALSegmentBytes:g.WALSegmentBytes,
-		MappingBytes:g.MappingSize,CheckpointBytes:g.CheckpointSize,
+		MappingBytes:g.MappingSize,CheckpointBytes:g.CheckpointSize, AGCapacity:g.AGCapacity,
 	})
 	if err!=nil{return err}
 	if planned!=g { return fmt.Errorf("%w: persisted geometry is inconsistent (planned=%+v persisted=%+v)",ErrInvalidDynamicGeometry,planned,g) }
@@ -80,6 +80,7 @@ func (s DynamicSuperblock) Encode() ([]byte,error) {
 	binary.LittleEndian.PutUint64(b[200:208],g.CheckpointOffset)
 	binary.LittleEndian.PutUint64(b[208:216],g.CheckpointSize)
 	binary.LittleEndian.PutUint64(b[216:224],g.ReservedOffset)
+	binary.LittleEndian.PutUint32(b[224:228],g.AGCapacity)
 	binary.LittleEndian.PutUint32(b[DynamicSuperCRCOff:DynamicSuperCRCOff+4],crc32.Checksum(b,castagnoli))
 	return b,nil
 }
@@ -109,7 +110,7 @@ func DecodeDynamicSuperblock(b []byte) (DynamicSuperblock,error) {
 		NodeTableOffset:binary.LittleEndian.Uint64(b[168:176]),NodeTableSize:binary.LittleEndian.Uint64(b[176:184]),
 		MappingOffset:binary.LittleEndian.Uint64(b[184:192]),MappingSize:binary.LittleEndian.Uint64(b[192:200]),
 		CheckpointOffset:binary.LittleEndian.Uint64(b[200:208]),CheckpointSize:binary.LittleEndian.Uint64(b[208:216]),
-		ReservedOffset:binary.LittleEndian.Uint64(b[216:224]),}
+		ReservedOffset:binary.LittleEndian.Uint64(b[216:224]),AGCapacity:binary.LittleEndian.Uint32(b[224:228]),}
 	s.Geometry=g
 	if err:=s.Validate();err!=nil{return DynamicSuperblock{},err}
 	return s,nil

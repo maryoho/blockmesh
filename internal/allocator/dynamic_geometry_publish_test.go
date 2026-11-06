@@ -1,7 +1,7 @@
 package allocator
 
 import (
-	"testing"
+	"testing"\n\t"encoding/binary"
 
 	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
@@ -10,7 +10,7 @@ import (
 func dynamicGeometryUpdateFixture(t *testing.T)(*dynamicFormatMem,format.DynamicSuperblock){
 	t.Helper()
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:4*format.BlockSize,MetadataBytes:64<<20,
-		AGSizeBytes:8*format.BlockSize,WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10})
+		AGSizeBytes:8*format.BlockSize,WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10,AGCapacity:4})
 	if err!=nil{t.Fatal(err)}
 	var id [16]byte;copy(id[:],"geometry-grow03")
 	sb,err:=format.NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
@@ -57,4 +57,24 @@ type dynamicPageImageCommitter struct{dev *dynamicFormatMem}
 func(c dynamicPageImageCommitter)CommitImages(images []metastore.PageImage)error{
 	for _,image:=range images{if _,err:=c.dev.WriteAt(image.Data,int64(image.Offset));err!=nil{return err}}
 	return c.dev.Sync()
+}
+
+func TestDynamicGeometryGrowthActivatesReservedAG(t *testing.T) {
+	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:4*format.BlockSize,MetadataBytes:64<<20,
+		AGSizeBytes:2*format.BlockSize,WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10,AGCapacity:4})
+	if err!=nil{t.Fatal(err)}
+	var id [16]byte;copy(id[:],"ag-capacity03")
+	old,err:=format.NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
+	dev:=newDynamicFormatMem(g.MetadataBytes)
+	if err=FormatDynamicPool(dev,old);err!=nil{t.Fatal(err)}
+	next,err:=BuildDynamicGeometryUpdate(old,old.Geometry.MetadataBytes,6*format.BlockSize,2);if err!=nil{t.Fatal(err)}
+	if next.Geometry.AGCount!=3||next.Geometry.AGCapacity!=4||next.Geometry.WALOffset!=old.Geometry.WALOffset||next.Geometry.BitmapOffset!=old.Geometry.BitmapOffset{t.Fatalf("bad AG growth geometry: %+v",next.Geometry)}
+	if err=PublishDynamicGeometry(dev,old,next,dynamicPageImageCommitter{dev:dev});err!=nil{t.Fatal(err)}
+	got,err:=OpenDynamicSuperblockPair(dev);if err!=nil{t.Fatal(err)}
+	if got!=next{t.Fatalf("published=%+v want=%+v",got,next)}
+	for ag:=uint32(0);ag<next.Geometry.AGCount;ag++{
+		off:=next.Geometry.BitmapOffset+uint64(ag)*next.Geometry.BitmapStride
+		desc:=make([]byte,format.PageSize);if _,err=dev.ReadAt(desc,int64(off));err!=nil{t.Fatal(err)}
+		if binary.LittleEndian.Uint32(desc[8:12])!=ag{t.Fatalf("AG %d descriptor not initialized",ag)}
+	}
 }

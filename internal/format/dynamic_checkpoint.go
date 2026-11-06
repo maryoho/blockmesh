@@ -46,8 +46,8 @@ func DecodeDynamicCheckpoint(b []byte,expectedAG uint32)(DynamicCheckpoint,error
 }
 
 func DynamicCheckpointOffset(g DynamicGeometry,ag,slot uint32)(uint64,error){
-	if ag>=g.AGCount||slot>1{return 0,errors.New("BMPOOL03 checkpoint index out of range")}
-	need:=uint64(g.AGCount)*2*PageSize
+	if ag>=g.AGCapacity||slot>1{return 0,errors.New("BMPOOL03 checkpoint index out of range")}
+	need:=uint64(g.AGCapacity)*2*PageSize
 	if need>g.CheckpointSize{return 0,fmt.Errorf("%w: checkpoint region needs %d bytes, has %d",ErrInvalidDynamicGeometry,need,g.CheckpointSize)}
 	rel:=(uint64(ag)*2+uint64(slot))*PageSize
 	if g.CheckpointOffset>g.MetadataBytes||rel>g.MetadataBytes-g.CheckpointOffset||PageSize>g.MetadataBytes-g.CheckpointOffset-rel{return 0,ErrInvalidDynamicGeometry}
@@ -58,8 +58,8 @@ func DynamicCheckpointOffset(g DynamicGeometry,ag,slot uint32)(uint64,error){
 // AG. It is called during format before the BMPOOL03 superblock is published.
 func InitializeDynamicCheckpoints(w io.WriterAt,g DynamicGeometry)error{
 	if w==nil{return errors.New("nil checkpoint writer")}
-	if uint64(g.AGCount)*2*PageSize>g.CheckpointSize{return ErrInvalidDynamicGeometry}
-	for ag:=uint32(0);ag<g.AGCount;ag++{
+	if uint64(g.AGCapacity)*2*PageSize>g.CheckpointSize{return ErrInvalidDynamicGeometry}
+	for ag:=uint32(0);ag<g.AGCapacity;ag++{
 		b,err:=(DynamicCheckpoint{AG:ag,Generation:1,ActiveBank:0}).Encode();if err!=nil{return err}
 		for slot:=uint32(0);slot<2;slot++{
 			off,err:=DynamicCheckpointOffset(g,ag,slot);if err!=nil{return err}

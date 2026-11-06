@@ -31,11 +31,11 @@ func BuildDynamicGeometryUpdate(current format.DynamicSuperblock,metadataBytes,d
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{
 		DataBytes:dataBytes,MetadataBytes:metadataBytes,AGSizeBytes:current.Geometry.AGSizeBlocks*format.BlockSize,
 		WALSegmentBytes:current.Geometry.WALSegmentBytes,MappingBytes:current.Geometry.MappingSize,
-		CheckpointBytes:current.Geometry.CheckpointSize,
+		CheckpointBytes:current.Geometry.CheckpointSize, AGCapacity:current.Geometry.AGCapacity,
 	})
 	if err!=nil{return zero,err}
 	old:=current.Geometry
-	if g.AGCount!=old.AGCount||g.AGSizeBlocks!=old.AGSizeBlocks||
+	if g.AGCapacity!=old.AGCapacity||g.AGSizeBlocks!=old.AGSizeBlocks||
 		g.NodeTableOffset!=old.NodeTableOffset||g.NodeTableSize!=old.NodeTableSize||
 		g.WALOffset!=old.WALOffset||g.WALSize!=old.WALSize||
 		g.BitmapOffset!=old.BitmapOffset||g.BitmapSize!=old.BitmapSize||g.BitmapStride!=old.BitmapStride||
@@ -54,12 +54,13 @@ func BuildDynamicGeometryUpdate(current format.DynamicSuperblock,metadataBytes,d
 func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,newSB format.DynamicSuperblock)([]metastore.PageImage,error){
 	if r==nil||oldSB.Validate()!=nil||newSB.Validate()!=nil{return nil,errors.New("invalid BMPOOL03 bitmap growth request")}
 	oldG,newG:=oldSB.Geometry,newSB.Geometry
-	if oldG.AGCount!=newG.AGCount||oldG.BitmapOffset!=newG.BitmapOffset||oldG.BitmapStride!=newG.BitmapStride||
+	if newG.AGCount<oldG.AGCount||oldG.BitmapOffset!=newG.BitmapOffset||oldG.BitmapStride!=newG.BitmapStride||
 		oldG.BitmapPaddedBytes!=newG.BitmapPaddedBytes||newG.LastAGBlocks<oldG.LastAGBlocks{
 		return nil,ErrDynamicGeometryRequiresMigration
 	}
-	if newG.LastAGBlocks==oldG.LastAGBlocks{return nil,nil}
+	if newValid==oldG.LastAGBlocks{return nil,nil}
 	ag:=oldG.AGCount-1
+	newValid,err:=newG.AGBlocks(ag);if err!=nil{return nil,err}
 	base:=oldG.BitmapOffset+uint64(ag)*oldG.BitmapStride
 	desc:=make([]byte,format.PageSize)
 	if err:=readAtFull(r,desc,int64(base));err!=nil{return nil,err}
@@ -68,7 +69,7 @@ func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,ne
 	bitmap:=make([]byte,oldG.BitmapPaddedBytes)
 	if err:=readAtFull(r,bitmap,int64(base+format.PageSize));err!=nil{return nil,err}
 	if crc32.Checksum(bitmap,castagnoli)!=binary.LittleEndian.Uint32(desc[24:28]){return nil,errors.New("BMPOOL03 final AG bitmap CRC32C mismatch")}
-	for bit:=oldG.LastAGBlocks;bit<newG.LastAGBlocks;bit++{
+	for bit:=oldG.LastAGBlocks;bit<newValid;bit++{
 		mask:=byte(1<<uint(bit%8))
 		if bitmap[bit/8]&mask==0{return nil,fmt.Errorf("newly exposed bitmap bit %d was not reserved padding",bit)}
 		bitmap[bit/8]&^=mask
@@ -104,6 +105,9 @@ func publishDynamicGeometryChecked(dev device.Device,current,next format.Dynamic
 		if bitmapCommitter==nil{return errors.New("bitmap WAL committer required before publishing Data growth")}
 		images,err:=PlanDynamicBitmapGrow(dev,current,next);if err!=nil{return err}
 		if len(images)>0{if err=bitmapCommitter.CommitImages(images);err!=nil{return fmt.Errorf("publish newly exposed Data bitmap bits: %w",err)}}
+	}
+	if next.Geometry.AGCount>current.Geometry.AGCount {
+		if err:=initializeDynamicAGSlots(dev,current.Geometry,next.Geometry);err!=nil{return fmt.Errorf("initialize newly reserved AG slots: %w",err)}
 	}
 	if _,err:=OpenDynamicSuperblockPair(dev);err!=nil{return err}
 	selected,slot,err:=readDynamicSuperblockPairWithSlot(dev);if err!=nil{return err}
@@ -143,7 +147,7 @@ func PublishDynamicGeometryUnderLease(ctx context.Context,dev device.Device,curr
 }
 
 func sameDynamicMetadataLayout(a,b format.DynamicGeometry)bool{
-	return a.AGCount==b.AGCount&&a.AGSizeBlocks==b.AGSizeBlocks&&a.NodeTableOffset==b.NodeTableOffset&&
+	return a.AGCapacity==b.AGCapacity&&a.AGSizeBlocks==b.AGSizeBlocks&&a.NodeTableOffset==b.NodeTableOffset&&
 		a.NodeTableSize==b.NodeTableSize&&a.WALOffset==b.WALOffset&&a.WALSize==b.WALSize&&
 		a.WALSegmentBytes==b.WALSegmentBytes&&a.BitmapOffset==b.BitmapOffset&&a.BitmapSize==b.BitmapSize&&
 		a.BitmapStride==b.BitmapStride&&a.BitmapPaddedBytes==b.BitmapPaddedBytes&&a.MappingOffset==b.MappingOffset&&
@@ -169,4 +173,43 @@ func readDynamicSuperblockPairWithSlot(dev device.Device)(format.DynamicSuperblo
 
 func writeDynamicDeviceFull(dev device.Device,b []byte,off int64)error{
 	n,err:=dev.WriteAt(b,off);if err!=nil{return err};if n!=len(b){return io.ErrShortWrite};return nil
+}
+
+
+// initializeDynamicAGSlots initializes previously reserved AG slots while they
+// are still unreachable through the old Superblock. The caller publishes the
+// increased AGCount only after all WAL, bitmap and checkpoint metadata is durable.
+func initializeDynamicAGSlots(dev device.Device, oldG, newG format.DynamicGeometry) error {
+	for ag:=oldG.AGCount; ag<newG.AGCount; ag++ {
+		seg:=newG.WALOffset+uint64(ag)*newG.WALSegmentBytes
+		if err:=zeroDynamicRangeDevice(dev,seg,newG.WALSegmentBytes); err!=nil{return fmt.Errorf("zero AG %d WAL slot: %w",ag,err)}
+		valid,err:=newG.AGBlocks(ag); if err!=nil{return err}
+		bitmap:=make([]byte,newG.BitmapPaddedBytes)
+		for bit:=valid; bit<uint64(len(bitmap))*8; bit++ { bitmap[bit/8] |= 1<<uint(bit%8) }
+		base:=newG.BitmapOffset+uint64(ag)*newG.BitmapStride
+		desc:=make([]byte,format.PageSize)
+		binary.LittleEndian.PutUint64(desc[:8],bitmapDescriptorMagic)
+		binary.LittleEndian.PutUint32(desc[8:12],ag)
+		binary.LittleEndian.PutUint64(desc[16:24],1)
+		binary.LittleEndian.PutUint32(desc[24:28],crc32.Checksum(bitmap,castagnoli))
+		if err=writeDynamicDeviceFull(dev,bitmap,int64(base+format.PageSize));err!=nil{return err}
+		if err=writeDynamicDeviceFull(dev,desc,int64(base));err!=nil{return err}
+		cp:=(format.DynamicCheckpoint{AG:ag,Generation:1,ActiveBank:0})
+		page,err:=cp.Encode();if err!=nil{return err}
+		for slot:=uint32(0);slot<2;slot++ {
+			off,err:=format.DynamicCheckpointOffset(newG,ag,slot);if err!=nil{return err}
+			if err=writeDynamicDeviceFull(dev,page,int64(off));err!=nil{return err}
+		}
+	}
+	return dev.Sync()
+}
+
+func zeroDynamicRangeDevice(dev device.Device, off, length uint64) error {
+	zero:=make([]byte,1<<20)
+	for done:=uint64(0);done<length; {
+		n:=uint64(len(zero));if length-done<n{n=length-done}
+		if err:=writeDynamicDeviceFull(dev,zero[:int(n)],int64(off+done));err!=nil{return err}
+		done+=n
+	}
+	return nil
 }

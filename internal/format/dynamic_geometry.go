@@ -13,6 +13,8 @@ type DynamicGeometryConfig struct {
 	DataBytes       uint64
 	MetadataBytes   uint64
 	AGSizeBytes     uint64
+	// AGCapacity reserves stable metadata slots for future online AG growth. Zero defaults to the initial AG count.
+	AGCapacity      uint32
 	WALSegmentBytes uint64
 	MappingBytes    uint64
 	CheckpointBytes uint64
@@ -25,6 +27,7 @@ type DynamicGeometry struct {
 	TotalBlocks       uint64
 	AGSizeBlocks      uint64
 	AGCount           uint32
+	AGCapacity        uint32
 	LastAGBlocks      uint64
 	BitmapBytesPerAG  uint64
 	BitmapPaddedBytes uint64
@@ -65,19 +68,22 @@ func PlanDynamicGeometry(c DynamicGeometryConfig) (DynamicGeometry, error) {
 	if agCount == 0 || agCount > math.MaxUint32 {
 		return g, fmt.Errorf("%w: AG count out of range", ErrInvalidDynamicGeometry)
 	}
-	minCheckpoint, ok := mulGeometry(agCount, 2*PageSize)
+	minCheckpoint, ok := mulGeometry(agCapacity, 2*PageSize)
 	if !ok || c.CheckpointBytes < minCheckpoint {
 		return g, fmt.Errorf("%w: checkpoint region requires at least %d bytes for %d AGs", ErrInvalidDynamicGeometry, minCheckpoint, agCount)
 	}
+	agCapacity := uint64(c.AGCapacity)
+	if agCapacity == 0 { agCapacity = agCount }
+	if agCapacity < agCount || agCapacity > math.MaxUint32 { return g, fmt.Errorf("%w: AG capacity must be between active AG count and uint32 max", ErrInvalidDynamicGeometry) }
 	last := total - (agCount-1)*agSize
 	bitmapRaw := ceilDivGeometry(agSize, 8)
 	bitmapPadded, ok := alignUpGeometry(bitmapRaw, PageSize)
 	if !ok { return g, ErrInvalidDynamicGeometry }
 	stride, ok := addGeometry(PageSize, bitmapPadded)
 	if !ok { return g, ErrInvalidDynamicGeometry }
-	walSize, ok := mulGeometry(agCount, c.WALSegmentBytes)
+	walSize, ok := mulGeometry(agCapacity, c.WALSegmentBytes)
 	if !ok { return g, ErrInvalidDynamicGeometry }
-	bitmapSize, ok := mulGeometry(agCount, stride)
+	bitmapSize, ok := mulGeometry(agCapacity, stride)
 	if !ok { return g, ErrInvalidDynamicGeometry }
 
 	const headerEnd = uint64(2 * 1024 * 1024)
@@ -93,7 +99,7 @@ func PlanDynamicGeometry(c DynamicGeometryConfig) (DynamicGeometry, error) {
 	}
 	g = DynamicGeometry{
 		DataBytes:c.DataBytes, TotalBlocks:total, AGSizeBlocks:agSize,
-		AGCount:uint32(agCount), LastAGBlocks:last,
+		AGCount:uint32(agCount), AGCapacity:uint32(agCapacity), LastAGBlocks:last,
 		BitmapBytesPerAG:bitmapRaw, BitmapPaddedBytes:bitmapPadded, BitmapStride:stride,
 		BitmapOffset:bitmapOffset, BitmapSize:bitmapSize,
 		WALOffset:walOffset, WALSize:walSize, WALSegmentBytes:c.WALSegmentBytes,
