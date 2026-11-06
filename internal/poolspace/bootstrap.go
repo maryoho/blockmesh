@@ -65,7 +65,7 @@ type BootstrapStore struct {
 }
 
 func (r BootstrapRecord) encode() ([]byte,error) {
-	if r.Generation==0 || r.PoolUUID==([16]byte{}) || r.DeviceBytes==0 ||
+	if r.Generation==0 || (r.Generation>1 && r.OwnerEpoch==0) || r.PoolUUID==([16]byte{}) || r.DeviceBytes==0 ||
 		r.BootstrapBytes!=BootstrapSize || r.MetadataBytes<r.BootstrapBytes ||
 		r.MetadataBytes>r.DeviceBytes || r.ExtentMapGeneration==0 ||
 		(r.ExtentMapOffset!=extentMapSlotA && r.ExtentMapOffset!=extentMapSlotA+extentMapSlotSize) ||
@@ -209,7 +209,7 @@ func OpenBootstrap(dev device.Device)(*BootstrapStore,error){
 	for _,c:=range candidates[1:]{
 		if c.r.PoolUUID!=best.r.PoolUUID{return nil,errors.New("Bootstrap copies refer to different Pool UUIDs")}
 		if c.r.Generation==best.r.Generation&&c.r!=best.r{return nil,errors.New("conflicting Bootstrap copies at equal generation")}
-		if c.r.Generation>best.r.Generation{best=c}
+		if c.r.Generation>best.r.Generation{if c.r.OwnerEpoch<best.r.OwnerEpoch{return nil,errors.New("Bootstrap OwnerEpoch regressed across generations")};best=c}
 	}
 	if uint64(dev.Size())<best.r.DeviceBytes{return nil,errors.New("backing device is smaller than persisted Pool geometry; refusing shrink")}
  if block,ok:=dev.(interface{LogicalSectorSize()int});ok&&uint32(block.LogicalSectorSize())!=best.r.LogicalSectorBytes{return nil,errors.New("backing device logical sector size differs from persisted Pool geometry")}
