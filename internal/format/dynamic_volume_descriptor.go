@@ -27,6 +27,7 @@ type DynamicVolumeDescriptor struct {
 	MappingSequence uint64
 	LifecycleStart uint64
 	LifecyclePages uint64
+	OwnerRecordStart uint64
 }
 
 func(d DynamicVolumeDescriptor)Encode()([]byte,error){
@@ -50,6 +51,7 @@ func(d DynamicVolumeDescriptor)Encode()([]byte,error){
 	binary.LittleEndian.PutUint64(b[144:152],d.MappingSequence)
 	binary.LittleEndian.PutUint64(b[152:160],d.LifecycleStart)
 	binary.LittleEndian.PutUint64(b[160:168],d.LifecyclePages)
+	binary.LittleEndian.PutUint64(b[168:176],d.OwnerRecordStart)
 	binary.LittleEndian.PutUint32(b[dynamicVolumeDescriptorCRC:],crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli))
 	return b,nil
 }
@@ -60,13 +62,13 @@ func DecodeDynamicVolumeDescriptor(b []byte)(DynamicVolumeDescriptor,error){
 		crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli)!=binary.LittleEndian.Uint32(b[dynamicVolumeDescriptorCRC:]){return d,ErrVolumeDescriptor}
 	name:=b[56:120];end:=len(name);for i,c:=range name{if c==0{end=i;break}}
 	for _,c:=range name[end:]{if c!=0{return d,ErrVolumeDescriptor}}
-	for _,c:=range b[168:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
+	for _,c:=range b[176:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
 	d=DynamicVolumeDescriptor{VolumeID:string(name[:end]),AG:binary.LittleEndian.Uint32(b[12:16]),Generation:binary.LittleEndian.Uint64(b[16:24]),
 		VolumeSequence:binary.LittleEndian.Uint64(b[24:32]),MappingRootOffset:binary.LittleEndian.Uint64(b[32:40]),
 		BitmapSequence:binary.LittleEndian.Uint64(b[40:48]),OwnerEpoch:binary.LittleEndian.Uint64(b[48:56]),
 		ArenaStart:binary.LittleEndian.Uint64(b[120:128]),ArenaPages:binary.LittleEndian.Uint64(b[128:136]),
 		RootPage:binary.LittleEndian.Uint64(b[136:144]),MappingSequence:binary.LittleEndian.Uint64(b[144:152]),
-		LifecycleStart:binary.LittleEndian.Uint64(b[152:160]),LifecyclePages:binary.LittleEndian.Uint64(b[160:168])}
+		LifecycleStart:binary.LittleEndian.Uint64(b[152:160]),LifecyclePages:binary.LittleEndian.Uint64(b[160:168]),OwnerRecordStart:binary.LittleEndian.Uint64(b[168:176])}
 	if _,err:=d.Encode();err!=nil{return DynamicVolumeDescriptor{},err}
 	return d,nil
 }
@@ -84,6 +86,12 @@ func(d DynamicVolumeDescriptor)ValidatePool(sb DynamicSuperblock)error{
 		if d.LifecycleStart<d.ArenaStart+d.ArenaPages||d.LifecycleStart>totalPages||d.LifecyclePages>totalPages-d.LifecycleStart{return ErrVolumeDescriptor}
 	}
 	if d.RootPage!=^uint64(0)&&(d.RootPage<d.ArenaStart||d.RootPage-d.ArenaStart>=d.ArenaPages){return ErrVolumeDescriptor}
+	if d.OwnerRecordStart!=0{
+		if d.OwnerRecordStart<reservedStart||d.OwnerRecordStart>totalPages||2>totalPages-d.OwnerRecordStart{return ErrVolumeDescriptor}
+		expected:=d.ArenaStart+d.ArenaPages
+		if d.LifecyclePages!=0{expected=d.LifecycleStart+d.LifecyclePages}
+		if d.OwnerRecordStart!=expected{return ErrVolumeDescriptor}
+	}
 	return nil
 }
 
