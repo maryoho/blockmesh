@@ -91,12 +91,16 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 			request.operation = cpu_to_le16(BM_UAPI_OP_DISCARD);
 		else
 			request.operation = cpu_to_le16(BM_UAPI_OP_ALLOCATE_ZERO_PUBLISH);
-		if (write)
-			get_random_bytes(request.idempotency_key,
-					 sizeof(request.idempotency_key));
+		if (write) {
+			do {
+				get_random_bytes(request.idempotency_key,
+						 sizeof(request.idempotency_key));
+			} while (!memchr_inv(request.idempotency_key, 0,
+					     sizeof(request.idempotency_key)));
+		}
 	}
 	ret = bm_queue_submit(bm->queue_id, bm->queue_cookie, &request, bio,
-			      bm->dev->bdev, bm->start, sector_offset, block_count);
+			      bm->dev->bdev, bm->start, ti->len, sector_offset, block_count);
 	if (!ret)
 		return DM_MAPIO_SUBMITTED;
 fail:

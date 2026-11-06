@@ -4,6 +4,7 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/list.h>
+#include <linux/math64.h>
 #include <linux/byteorder/generic.h>
 #include <linux/mm.h>
 #include <linux/compat.h>
@@ -39,7 +40,7 @@ struct bm_pending {
 	struct list_head list;
 	struct bio *bio;
 	struct block_device *bdev;
-	u64 request_id, generation, logical_start, base_sector, sector_offset, owner_epoch;
+	u64 request_id, generation, logical_start, base_sector, target_sectors, sector_offset, owner_epoch;
 	u32 block_count;
 };
 struct bm_queue_mem {
@@ -194,6 +195,7 @@ int bm_queue_submit(u32 queue_id, u64 target_cookie,
 			pending->generation = q->generation;
 			pending->logical_start = le64_to_cpu(request->logical_start);
 			pending->base_sector = base_sector;
+			pending->target_sectors = target_sectors;
 			pending->sector_offset = sector_offset;
 			pending->owner_epoch = le64_to_cpu(request->owner_epoch);
 			pending->block_count = block_count;
@@ -272,7 +274,11 @@ static void bm_finish_pending(struct bm_pending *p,
 	    phys_block > div_u64(U64_MAX - p->base_sector - p->sector_offset, BM_UAPI_BLOCK_SECTORS))
 		goto io_error;
 	phys_sector = p->base_sector + phys_block * BM_UAPI_BLOCK_SECTORS + p->sector_offset;
-	if (phys_sector > bdev_nr_sectors(p->bdev) ||
+	if (p->base_sector > U64_MAX - p->target_sectors ||
+	    phys_sector < p->base_sector ||
+	    phys_sector > p->base_sector + p->target_sectors ||
+	    bio_sectors(bio) > p->base_sector + p->target_sectors - phys_sector ||
+	    phys_sector > bdev_nr_sectors(p->bdev) ||
 	    bio_sectors(bio) > bdev_nr_sectors(p->bdev) - phys_sector)
 		goto io_error;
 	bio_set_dev(bio, p->bdev);
