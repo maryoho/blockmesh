@@ -48,6 +48,7 @@ type PoolAllocator struct {
 	tree *btree.Tree
 	locks lock.DistributedLocker
 	data DataDevice
+	dynamic bool
 }
 
 func NewPoolAllocator(store *metastore.Store, tree *btree.Tree, locks lock.DistributedLocker, data DataDevice) (*PoolAllocator, error) {
@@ -61,6 +62,17 @@ func NewPoolAllocator(store *metastore.Store, tree *btree.Tree, locks lock.Distr
 		return nil, ErrPoolAllocatorUnavailable
 	}
 	return &PoolAllocator{store: store, tree: tree, locks: locks, data: data}, nil
+}
+
+// NewDynamicPoolAllocator binds the allocator to BMPOOL03 logical views. The
+// data argument must be the DataView; its byte zero is physical block ID zero.
+func NewDynamicPoolAllocator(store *metastore.Store, tree *btree.Tree, locks lock.DistributedLocker, data DataDevice) (*PoolAllocator,error) {
+	if store==nil||tree==nil||locks==nil||data==nil||!locks.Distributed(){return nil,ErrPoolAllocatorUnavailable}
+	sb,err:=store.DynamicPoolSuperblock();if err!=nil{return nil,fmt.Errorf("%w: %v",ErrPoolAllocatorUnavailable,err)}
+	if _,err=store.DynamicPoolDescriptor();err!=nil{return nil,fmt.Errorf("%w: %v",ErrPoolAllocatorUnavailable,err)}
+	if !tree.UsesPersistentArena()||!tree.UsesClusterSafeCommitter(){return nil,ErrPoolAllocatorUnavailable}
+	if data.Size()<0||uint64(data.Size())<sb.Geometry.DataBytes{return nil,errors.New("DataView is smaller than BMPOOL03 Data geometry")}
+	return &PoolAllocator{store:store,tree:tree,locks:locks,data:data,dynamic:true},nil
 }
 
 // AllocateZeroPublishTxn performs the complete allocation protocol:
@@ -88,25 +100,29 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		return result, errors.New("logical range overlaps the reserved idempotency key namespace")
 	}
 
-	pool, err := a.store.PoolSuperblock()
-	if err != nil { return result, err }
-	desc, err := a.store.PoolDescriptor()
-	if err != nil { return result, err }
-	if ownerLease.Resource() != "volume:"+desc.VolumeID || !ownerLease.Valid() {
-		return result, errors.New("Owner lease does not match Volume Descriptor")
+	var totalBlocks uint64
+	var volumeID string
+	var ownerEpoch,generation,mappingSequence uint64
+	var ag uint32
+	var dynamicSB format.DynamicSuperblock
+	if a.dynamic {
+		dynamicSB,err=a.store.DynamicPoolSuperblock();if err!=nil{return result,err}
+		desc,e:=a.store.DynamicPoolDescriptor();if e!=nil{return result,e}
+		totalBlocks=dynamicSB.Geometry.TotalBlocks;volumeID=desc.VolumeID;ownerEpoch=desc.OwnerEpoch
+		generation=desc.Generation;mappingSequence=desc.MappingSequence;ag=desc.AG
+	} else {
+		pool,e:=a.store.PoolSuperblock();if e!=nil{return result,e}
+		desc,e:=a.store.PoolDescriptor();if e!=nil{return result,e}
+		totalBlocks=pool.TotalBlocks;volumeID=desc.VolumeID;ownerEpoch=desc.OwnerEpoch
+		generation=desc.Generation;mappingSequence=desc.MappingSequence;ag=desc.AG
 	}
-	if desc.OwnerEpoch == 0 { return result, errors.New("Volume Descriptor has no active OwnerEpoch") }
-	epochLease, ok := ownerLease.(interface{ Epoch() uint64 })
-	if !ok || epochLease.Epoch() != desc.OwnerEpoch {
-		return result, errors.New("Owner lease epoch does not match the durable Volume Descriptor")
-	}
-	if req.LogicalStart+uint64(req.BlockCount) > pool.TotalBlocks {
-		return result, errors.New("logical allocation range exceeds Pool capacity")
-	}
-	if desc.Generation == math.MaxUint64 || desc.MappingSequence == math.MaxUint64 {
-		return result, errors.New("Volume metadata generation exhausted")
-	}
-	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", desc.AG))
+	if ownerLease.Resource()!="volume:"+volumeID||!ownerLease.Valid(){return result,errors.New("Owner lease does not match Volume Descriptor")}
+	if ownerEpoch==0{return result,errors.New("Volume Descriptor has no active OwnerEpoch")}
+	epochLease,ok:=ownerLease.(interface{Epoch()uint64})
+	if !ok||epochLease.Epoch()!=ownerEpoch{return result,errors.New("Owner lease epoch does not match the durable Volume Descriptor")}
+	if req.LogicalStart+uint64(req.BlockCount)>totalBlocks{return result,errors.New("logical allocation range exceeds Pool capacity")}
+	if generation==math.MaxUint64||mappingSequence==math.MaxUint64{return result,errors.New("Volume metadata generation exhausted")}
+	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", ag))
 	if err != nil { return result, fmt.Errorf("acquire AG %d lock: %w", desc.AG, err) }
 	defer unlock()
 	if err = ctx.Err(); err != nil { return result, err }
@@ -139,7 +155,11 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		}
 	}
 
-	physical, bitmapImages, err := PlanBitmapAllocation(a.store, pool, desc.AG, req.BlockCount)
+	var physical uint64
+	var bitmapImages []metastore.PageImage
+	if a.dynamic { physical,bitmapImages,err=PlanDynamicBitmapAllocation(a.store,dynamicSB,ag,req.BlockCount) } else {
+		pool,_:=a.store.PoolSuperblock();physical,bitmapImages,err=PlanBitmapAllocation(a.store,pool,ag,req.BlockCount)
+	}
 	if err != nil { return result, fmt.Errorf("plan AG bitmap allocation: %w", err) }
 	reservation, ids, err := a.tree.ReserveExternalPages(1)
 	if err != nil { return result, fmt.Errorf("reserve idempotency record page: %w", err) }
@@ -156,8 +176,10 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 
 	// Check the data LUN geometry before touching it. DataStartSector is
 	// relative to the underlying device; Pool logical block zero starts there.
-	view, err := newPoolDataView(a.data, pool)
-	if err != nil { return abortReservation(err) }
+	var view DataDevice
+	if a.dynamic { view=a.data } else {
+		pool,_:=a.store.PoolSuperblock();view,err=newPoolDataView(a.data,pool);if err!=nil{return abortReservation(err)}
+	}
 	if err = ZeroBlocks(ctx, view, physical, req.BlockCount); err != nil {
 		return abortReservation(fmt.Errorf("zero newly allocated data blocks: %w", err))
 	}
@@ -169,9 +191,9 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	record := IdempotencyRecord{
 		NextPage:head, Key:req.IdempotencyKey, Fingerprint:req.Fingerprint,
 		LogicalStart:req.LogicalStart, PhysicalStart:physical, BlockCount:req.BlockCount,
-		Operation:req.Operation, OwnerEpoch:desc.OwnerEpoch,
+		Operation:req.Operation, OwnerEpoch:ownerEpoch,
 	}
-	page, err := BuildIdempotencyRecordPage(ids[0], desc.Generation+1, record)
+	page, err := BuildIdempotencyRecordPage(ids[0], generation+1, record)
 	if err != nil { return abortReservation(err) }
 	updates := make([]btree.Item, 0, int(req.BlockCount)+1)
 	for i:=uint64(0); i<uint64(req.BlockCount); i++ {
@@ -185,7 +207,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		return result, fmt.Errorf("%w: publish allocation transaction: %v", ErrAllocationOutcomeUnknown, err)
 	}
 	return AllocateResult{LogicalStart:req.LogicalStart,PhysicalStart:physical,
-		BlockCount:req.BlockCount,OwnerEpoch:desc.OwnerEpoch}, nil
+		BlockCount:req.BlockCount,OwnerEpoch:ownerEpoch}, nil
 }
 
 func isKnownPreCommitAllocationError(err error) bool {
