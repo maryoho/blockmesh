@@ -77,7 +77,7 @@ func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,ne
 		page:=append([]byte(nil),bitmap[p*format.PageSize:(p+1)*format.PageSize]...)
 		images=append(images,metastore.PageImage{Offset:off,Data:page})
 	}
-	binaryPut64(desc[16:24],seq+1);binaryPut32(desc[24:28],crc32Checksum(bitmap))
+	binary.LittleEndian.PutUint64(desc[16:24],seq+1);binary.LittleEndian.PutUint32(desc[24:28],crc32.Checksum(bitmap,castagnoli))
 	images=append(images,metastore.PageImage{Offset:base,Data:desc})
 	return images,nil
 }
@@ -105,7 +105,7 @@ func PublishDynamicGeometry(dev device.Device,current,next format.DynamicSuperbl
 	inactive:=uint64(1)-slot
 	if err=writeDynamicDeviceFull(dev,encoded,int64(inactive*format.PageSize));err!=nil{return fmt.Errorf("publish first BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync first BMPOOL03 superblock copy: %w",err)}
-	if err=writeDynamicAtFull(dev,encoded,int64(slot*format.PageSize));err!=nil{return fmt.Errorf("publish second BMPOOL03 superblock copy: %w",err)}
+	if err=writeDynamicDeviceFull(dev,encoded,int64(slot*format.PageSize));err!=nil{return fmt.Errorf("publish second BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync second BMPOOL03 superblock copy: %w",err)}
 	return nil
 }

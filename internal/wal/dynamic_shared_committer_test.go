@@ -3,7 +3,6 @@ package wal
 import (
 	"testing"
 
-	"blockmesh/internal/format"
 	)
 
 func TestDynamicSharedCommitterRequiresDistributedLock(t *testing.T){
