@@ -1,40 +1,37 @@
 # Dynamic single-device Pool geometry and extent-space foundation
 
-This package is the first implementation slice for the agreed single-device
-model. One backing block device is divided into a bootstrap reservation and
-typed physical extents. Metadata and data extents are never allowed to overlap.
+BMPOOL03 is a versioned dynamic Pool format. One backing block device is divided into a Bootstrap reservation and typed physical extents. Metadata and Data extents never overlap, and all extent views share the same parent device.
 
 ## Capacity planning
 
-`poolspace.PlanDevice` computes an initial metadata budget from actual device
-capacity and Volume slot count. It budgets bitmap bytes, two COW mapping
-generations, WAL, per-Volume control metadata, and 30% headroom, then rounds
-to 1GiB extents. It does not take a user-supplied metadata size.
+poolspace.PlanDevice computes an initial Metadata budget from actual device capacity and Volume slot count. It budgets Bitmap, two COW Mapping generations, WAL, per-Volume control metadata and headroom, then rounds dynamic Metadata to 1GiB extents. The user does not specify a Metadata target size.
 
-The current estimator is deliberately a conservative sizing model, not a
-claim that all existing BMPOOL02 structures are already dynamically laid out.
-The legacy format still has fixed offsets and must not be formatted using this
-plan until the versioned Bootstrap/ExtentMap migration is complete.
+This estimator is a conservative budget model. It is not proof that the existing BMPOOL02 structures have already been migrated to a dynamic layout.
+
+## Persistent Bootstrap and Extent Map
+
+BMPOOL03 reserves 8MiB for two 4KiB Bootstrap records, two alternating 2MiB Extent Map slots, a two-page redo WAL and reserved growth space. Bootstrap records include Pool UUID, Generation, actual device capacity, Metadata capacity, logical sector size, OwnerEpoch and CRC32C.
+
+The inactive Extent Map is written and synced before the inactive Bootstrap after-image. WAL Intent and Commit protect root publication. Recovery selects the highest valid committed generation, ignores uncommitted after-images, and fails closed if a committed map is corrupt.
+
+The extent map validates full-device coverage with no gaps or overlaps. Its current fixed map slots impose a maximum encoded Extent Map size; larger highly fragmented layouts return ErrExtentMapTooLarge rather than silently truncating.
 
 ## Physical extent ownership
 
-`poolspace.Allocator` tracks contiguous physical ranges as Metadata, Data, or
-Free. Rescan only appends newly visible bytes as Free; shrink is rejected.
-Metadata expansion allocates only whole 1GiB extents from Free space and is
-all-or-nothing. Existing Data extents are never moved.
+poolspace.Allocator tracks Metadata, Data and Free ranges on the same physical device. Rescan appends newly visible bytes as Free and rejects shrink. Metadata expansion selects its size internally from usage and growth observations and allocates only whole 1GiB extents. Existing Data extents are never moved.
 
-## Extent map codec
+OpenExtentView provides a bounded view for one physical extent. OpenDataView concatenates fragmented Data extents into a logical Data device, retaining the same parent LUN.
 
-`ExtentMap` has generation, device capacity, contiguous full-device coverage,
-typed extents, and CRC32C. The codec validates ordering, gaps, overlap,
-bounds, kind values, reserved bytes and checksum.
+## Format compatibility and operational boundary
 
-## Important integration boundary
+DetectFormat distinguishes BMPOOL02 and BMPOOL03. A damaged BMPOOL02 Superblock is still recognized by magic and cannot fall through to the BMPOOL03 formatter. The BMPOOL03 formatter also refuses non-zero bytes in the reserved Bootstrap region. No in-place BMPOOL02 migration is performed.
 
-This foundation is not yet an online expansion implementation. The extent
-map codec is not yet stored in dual Bootstrap slots, and allocator mutations
-are not yet WAL-committed under the distributed Owner lease. Existing
-BMPOOL02 superblocks and PoolVolume descriptors still use the legacy fixed
-metadata geometry. The next integration change must introduce a versioned
-bootstrap layout and WAL publication before exposing rescan/metadata-expand
-as production commands. No command in this commit mutates a live Pool.
+bmctl provides explicit format, rescan, metadata-expand and metadata-expand-status commands. Mutating commands require a configured helper that holds a real fenced Owner lease, plus a distributed SAN Bootstrap lock. Metadata expansion uses a fresh metadata usage/growth snapshot; the CLI does not invent these counters.
+
+## Remaining integration before production
+
+- The metadata usage snapshot must be sourced from authoritative runtime counters.
+- BMPOOL03 is not yet wired into the existing per-AG Bitmap/Mapping WAL transaction. Data extent allocation, zeroing, mapping publication and Extent Map publication still need one crash-recoverable transaction/reconciliation design.
+- The configured Owner lease helper must implement the real OwnerCoordinator path: old-owner PR fencing on all paths, reservation verification, durable OwnerRecord CAS and old-owner I/O drain.
+- The two-page Bootstrap WAL protects Pool Extent Map root publication only; it does not replace the existing BMPOOL02 AG Journal.
+- Sparse-file tests and CI are not substitutes for two-node SAN power-loss and multipath fault qualification.
