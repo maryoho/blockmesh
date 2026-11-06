@@ -146,3 +146,32 @@ func TestDynamicVolumeAllocatorExpandRegionKeepsExistingAllocations(t *testing.T
 	nextVolume,err:=reopened.AllocateVolume(1,dynamicVolumeDescriptor(nextSB,"after-expand"),committer);if err!=nil{t.Fatal(err)}
 	if nextVolume.ArenaStart<oldVolume.ArenaStart+oldVolume.ArenaPages+oldVolume.LifecyclePages{t.Fatalf("existing allocation overlapped: old=%+v new=%+v",oldVolume,nextVolume)}
 }
+
+func TestDynamicVolumeAllocatorReconcilesRegionAfterGeometryPublish(t *testing.T){
+	oldDev,oldSB:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(oldDev,oldSB);err!=nil{t.Fatal(err)}
+	newMeta:=oldSB.Geometry.MetadataBytes+1<<20
+	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:oldSB.Geometry.DataBytes,MetadataBytes:newMeta,
+		AGSizeBytes:oldSB.Geometry.AGSizeBlocks*format.BlockSize,WALSegmentBytes:oldSB.Geometry.WALSegmentBytes,
+		MappingBytes:oldSB.Geometry.MappingSize,CheckpointBytes:oldSB.Geometry.CheckpointSize,AGCapacity:oldSB.Geometry.AGCapacity})
+	if err!=nil{t.Fatal(err)}
+	nextSB,err:=format.NewDynamicSuperblock(g,oldSB.PoolUUID,oldSB.Generation+1,oldSB.ViewGeneration+1);if err!=nil{t.Fatal(err)}
+	newDev:=newMemdev(newMeta/PageSize);copy(newDev.b,oldDev.b)
+	// The Superblock is already newer but the allocator header still records
+	// the old Reserved region size, as after a crash in the publication window.
+	reopened,err:=OpenDynamicVolumeAllocator(newDev,nextSB);if err!=nil{t.Fatal(err)}
+	if err=reopened.ReconcileRegion(dynamicArenaCommitter{newDev});err!=nil{t.Fatal(err)}
+	if _,err=OpenDynamicVolumeAllocator(newDev,nextSB);err!=nil{t.Fatal(err)}
+}
+
+func TestStoreExpandDynamicArenaByUsesReservedAllocator(t *testing.T){
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	desc,err:=a.AllocateVolume(0,dynamicVolumeDescriptor(sb,"store-grow"),dynamicArenaCommitter{dev});if err!=nil{t.Fatal(err)}
+	store,err:=OpenDynamicPoolVolume(dev,sb,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(store);err!=nil{t.Fatal(err)}
+	if err=store.ExpandDynamicArenaBy(12,dynamicArenaCommitter{dev});err!=nil{t.Fatal(err)}
+	got,err:=store.DynamicPoolDescriptor();if err!=nil{t.Fatal(err)}
+	if got.ArenaPages!=desc.ArenaPages+12||got.LifecycleStart!=desc.LifecycleStart+12{t.Fatalf("Store Arena expansion mismatch: %+v",got)}
+}
