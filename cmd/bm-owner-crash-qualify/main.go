@@ -15,9 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"blockmesh/internal/allocator"
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/metadata"
+	"blockmesh/internal/poolspace"
 	"blockmesh/internal/metastore"
 	"blockmesh/internal/volume"
 )
@@ -64,10 +66,12 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args)==0 { return errors.New("usage: snapshot --device <multipath> --index <n> --volume-id <id> [--output file] | verify --before file --after file --node-id id --boot-id id") }
+	if len(args)==0 { return errors.New("usage: snapshot|snapshot-dynamic --device <multipath> --index <n> --volume-id <id> [--output file] | verify|verify-dynamic --before file --after file --node-id id --boot-id id") }
 	switch args[0] {
 	case "snapshot": return runSnapshot(args[1:])
 	case "verify": return runVerify(args[1:])
+	case "snapshot-dynamic": return runSnapshotDynamic(args[1:])
+	case "verify-dynamic": return runVerifyDynamic(args[1:])
 	default: return fmt.Errorf("unknown command %q", args[0])
 	}
 }
@@ -151,7 +155,7 @@ func readDescriptorPages(dev *device.BlockDevice, pair uint64, pool format.Super
 	return out,nil
 }
 
-func readOwnerPages(dev *device.BlockDevice, offsets [2]uint64) ([]pageEvidence,error) {
+func readOwnerPages(dev interface{ReadAt([]byte,int64)(int,error)}, offsets [2]uint64) ([]pageEvidence,error) {
 	out:=make([]pageEvidence,0,2)
 	for i,off:=range offsets {
 		b:=make([]byte,4096)
@@ -165,6 +169,127 @@ func readOwnerPages(dev *device.BlockDevice, offsets [2]uint64) ([]pageEvidence,
 		out=append(out,p)
 	}
 	return out,nil
+}
+
+type dynamicSnapshot struct {
+	Schema string `json:"schema"`
+	CapturedAt time.Time `json:"captured_at"`
+	Hostname string `json:"hostname"`
+	BootID string `json:"boot_id"`
+	Kernel string `json:"kernel"`
+	Device string `json:"device"`
+	VolumeID string `json:"volume_id"`
+	VolumeIndex uint32 `json:"volume_index"`
+	PoolUUID string `json:"pool_uuid"`
+	ViewGeneration uint64 `json:"view_generation"`
+	SuperblockGeneration uint64 `json:"superblock_generation"`
+	AGCount uint32 `json:"ag_count"`
+	AGCapacity uint32 `json:"ag_capacity"`
+	DescriptorPages []pageEvidence `json:"descriptor_pages"`
+	OwnerRecordPages []pageEvidence `json:"owner_record_pages"`
+	SelectedOwner *ownerIdentity `json:"selected_owner,omitempty"`
+}
+
+func runSnapshotDynamic(args []string)error{
+	fs:=flag.NewFlagSet("snapshot-dynamic",flag.ContinueOnError)
+	path:=fs.String("device","","read-only parent multipath device")
+	index:=fs.Uint("index",0,"BMPOOL03 Volume descriptor index")
+	volumeID:=fs.String("volume-id","","expected Volume ID")
+	out:=fs.String("output","","new JSON evidence file; existing files are never overwritten")
+	if err:=fs.Parse(args);err!=nil{return err}
+	if fs.NArg()!=0||*path==""||*volumeID==""{return errors.New("--device and --volume-id are required")}
+	if uint64(*index)>=format.MaxVolumeDescriptors{return errors.New("Volume index exceeds Node Table capacity")}
+	dev,err:=device.OpenBlockDevice(*path,false,false);if err!=nil{return err};defer dev.Close()
+	bootstrap,err:=poolspace.OpenBootstrap(dev);if err!=nil{return fmt.Errorf("open Pool Bootstrap: %w",err)}
+	metadata,_,viewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	sb,err:=allocator.OpenDynamicSuperblockPair(metadata);if err!=nil{return fmt.Errorf("open BMPOOL03 Superblock: %w",err)}
+	pair,err:=format.DynamicVolumeDescriptorPairOffset(sb,uint32(*index));if err!=nil{return err}
+	descriptorPages,err:=readDynamicDescriptorPages(metadata,pair,sb);if err!=nil{return err}
+	store,err:=metastore.OpenDynamicPoolVolume(metadata,sb,uint32(*index),*volumeID);if err!=nil{return err}
+	ownerA,ownerB,err:=store.OwnerRecordRange();if err!=nil{return err}
+	ownerPages,err:=readOwnerPages(metadata,[2]uint64{ownerA,ownerB});if err!=nil{return err}
+	ownerStore,err:=metastore.NewDynamicSANOwnerRecordStore(metadata,sb,uint32(*index),*volumeID);if err!=nil{return err}
+	record,exists,err:=ownerStore.Load(context.Background(),*volumeID);if err!=nil{return fmt.Errorf("decode BMPOOL03 SAN OwnerRecord: %w",err)}
+	var selected *ownerIdentity
+	if exists{selected=&ownerIdentity{VolumeID:record.VolumeID,NodeID:record.NodeID,BootID:record.BootID,Epoch:record.Epoch}}
+	host,_:=os.Hostname();bootBytes,_:=os.ReadFile("/proc/sys/kernel/random/boot_id");kernelBytes,_:=os.ReadFile("/proc/sys/kernel/osrelease")
+	e:=dynamicSnapshot{Schema:"blockmesh-owner-crash-evidence/v2",CapturedAt:time.Now().UTC(),Hostname:host,
+		BootID:strings.TrimSpace(string(bootBytes)),Kernel:strings.TrimSpace(string(kernelBytes)),Device:*path,
+		VolumeID:*volumeID,VolumeIndex:uint32(*index),PoolUUID:fmt.Sprintf("%x",sb.PoolUUID),ViewGeneration:viewGeneration,
+		SuperblockGeneration:sb.Generation,AGCount:sb.Geometry.AGCount,AGCapacity:sb.Geometry.AGCapacity,
+		DescriptorPages:descriptorPages,OwnerRecordPages:ownerPages,SelectedOwner:selected}
+	if *out==""{enc:=json.NewEncoder(os.Stdout);enc.SetIndent("","  ");return enc.Encode(e)}
+	f,err:=os.OpenFile(*out,os.O_CREATE|os.O_EXCL|os.O_WRONLY,0600);if err!=nil{return fmt.Errorf("create evidence (existing files are never overwritten): %w",err)}
+	enc:=json.NewEncoder(f);enc.SetIndent("","  ");writeErr:=enc.Encode(e);syncErr:=f.Sync();closeErr:=f.Close()
+	if writeErr!=nil{return writeErr};if syncErr!=nil{return syncErr};if closeErr!=nil{return closeErr}
+	fmt.Fprintf(os.Stderr,"evidence written: %s\n",*out);return nil
+}
+
+func readDynamicDescriptorPages(dev interface{ReadAt([]byte,int64)(int,error)},pair uint64,pool format.DynamicSuperblock)([]pageEvidence,error){
+	out:=make([]pageEvidence,0,2)
+	for i:=0;i<2;i++{
+		off:=pair+uint64(i)*format.PageSize;b:=make([]byte,format.PageSize)
+		n,err:=dev.ReadAt(b,int64(off));if err!=nil||n!=len(b){return nil,fmt.Errorf("read BMPOOL03 descriptor page %d: n=%d err=%v",i,n,err)}
+		p:=pageEvidence{Index:i,Offset:off,SHA256:sha256Hex(b),NonZero:!allZero(b)}
+		d,decodeErr:=format.DecodeDynamicVolumeDescriptor(b);if decodeErr==nil{decodeErr=d.ValidatePool(pool)}
+		if decodeErr!=nil{p.Error=decodeErr.Error()}else{p.Valid=true;p.Generation=d.Generation;p.OwnerEpoch=d.OwnerEpoch;p.VolumeID=d.VolumeID}
+		out=append(out,p)
+	}
+	return out,nil
+}
+
+func loadDynamicSnapshot(path string)(dynamicSnapshot,error){
+	var s dynamicSnapshot
+	b,err:=os.ReadFile(path);if err!=nil{return s,err}
+	if err=json.Unmarshal(b,&s);err!=nil{return s,fmt.Errorf("decode %s: %w",path,err)}
+	if s.Schema!="blockmesh-owner-crash-evidence/v2"{return s,fmt.Errorf("%s has unsupported BMPOOL03 evidence schema",path)}
+	return s,nil
+}
+
+func verifyDynamicSnapshots(before,after dynamicSnapshot,node,boot string)(verification,error){
+	fail:=func(format string,args ...any)(verification,error){return verification{},fmt.Errorf(format,args...)}
+	if before.VolumeID==""||before.VolumeID!=after.VolumeID||before.PoolUUID!=after.PoolUUID||before.VolumeIndex!=after.VolumeIndex{
+		return fail("before/after BMPOOL03 snapshots refer to different Pool Volume identities")
+	}
+	if after.ViewGeneration<before.ViewGeneration||after.SuperblockGeneration<before.SuperblockGeneration{
+		return fail("BMPOOL03 view or Superblock generation moved backwards")
+	}
+	if after.SelectedOwner==nil||after.SelectedOwner.VolumeID!=after.VolumeID||after.SelectedOwner.NodeID!=node||after.SelectedOwner.BootID!=boot{
+		return fail("post-recovery BMPOOL03 SAN OwnerRecord identity does not match expected node/boot/volume")
+	}
+	oldMax:=uint64(0)
+	for _,p:=range before.DescriptorPages{if p.Valid&&p.OwnerEpoch>oldMax{oldMax=p.OwnerEpoch}}
+	for _,p:=range before.OwnerRecordPages{if p.Valid&&p.OwnerEpoch>oldMax{oldMax=p.OwnerEpoch}}
+	if before.SelectedOwner!=nil&&before.SelectedOwner.Epoch>oldMax{oldMax=before.SelectedOwner.Epoch}
+	if oldMax==0{return fail("pre-fault BMPOOL03 evidence has no valid durable OwnerEpoch")}
+	if after.SelectedOwner.Epoch<=oldMax{return fail("recovered OwnerEpoch %d is not greater than pre-fault maximum %d",after.SelectedOwner.Epoch,oldMax)}
+	var descriptorEpoch,descriptorGeneration uint64
+	valid:=0
+	for _,p:=range after.DescriptorPages{if !p.Valid{continue};valid++;if p.Generation>descriptorGeneration{descriptorGeneration=p.Generation;descriptorEpoch=p.OwnerEpoch}}
+	if valid==0{return fail("post-recovery BMPOOL03 has no valid descriptor copy")}
+	if descriptorEpoch!=after.SelectedOwner.Epoch{return fail("BMPOOL03 descriptor OwnerEpoch %d does not match SAN OwnerRecord Epoch %d",descriptorEpoch,after.SelectedOwner.Epoch)}
+	return verification{Passed:true,VolumeID:after.VolumeID,PreviousMaxEpoch:oldMax,RecoveredOwnerEpoch:after.SelectedOwner.Epoch,
+		DescriptorEpoch:descriptorEpoch,OwnerRecordIdentity:node+"/"+boot,Checks:[]string{
+			"same Pool UUID, Volume ID and Volume index before/after",
+			"BMPOOL03 View and Superblock generations are monotonic",
+			"new SAN OwnerRecord identity matches expected node and boot",
+			"new OwnerRecord Epoch exceeds every valid pre-fault durable epoch",
+			"highest-generation BMDVOL03 descriptor OwnerEpoch matches SAN OwnerRecord",
+		}},nil
+}
+
+func runVerifyDynamic(args []string)error{
+	fs:=flag.NewFlagSet("verify-dynamic",flag.ContinueOnError)
+	beforePath:=fs.String("before","","pre-fault BMPOOL03 snapshot JSON")
+	afterPath:=fs.String("after","","post-recovery BMPOOL03 snapshot JSON")
+	node:=fs.String("node-id","","expected new Owner NodeID")
+	boot:=fs.String("boot-id","","expected new Owner BootID")
+	if err:=fs.Parse(args);err!=nil{return err}
+	if fs.NArg()!=0||*beforePath==""||*afterPath==""||*node==""||*boot==""{return errors.New("--before, --after, --node-id and --boot-id are required")}
+	before,err:=loadDynamicSnapshot(*beforePath);if err!=nil{return err}
+	after,err:=loadDynamicSnapshot(*afterPath);if err!=nil{return err}
+	result,err:=verifyDynamicSnapshots(before,after,*node,*boot);if err!=nil{return err}
+	enc:=json.NewEncoder(os.Stdout);enc.SetIndent("","  ");return enc.Encode(result)
 }
 
 func runVerify(args []string) error {
