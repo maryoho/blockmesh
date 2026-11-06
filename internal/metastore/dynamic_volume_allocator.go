@@ -249,9 +249,10 @@ func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,p
 	d,err:=a.readDescriptor(pair);if err!=nil{return err}
 	if err=proof.ProveVolumeFenced(ctx,d.VolumeID,d.OwnerEpoch);err!=nil{return fmt.Errorf("refuse Reserved-region reuse before Volume fencing: %w",err)}
 	if a.header.Generation==math.MaxUint64{return errors.New("Reserved allocator generation exhausted")}
+	if d.ArenaStart<a.header.RegionStart{return ErrGeometry}
 	start:=d.ArenaStart-a.header.RegionStart
 	need:=d.ArenaPages+d.LifecyclePages
-	if start<a.header.AllocStart||need==0||start>a.header.RegionPages||need>a.header.RegionPages-start{return ErrGeometry}
+	if need<d.ArenaPages||start<a.header.AllocStart||need==0||start>a.header.RegionPages||need>a.header.RegionPages-start{return ErrGeometry}
 	nextBitmap:=append([]byte(nil),a.bitmap...)
 	for bit:=start;bit<start+need;bit++{
 		if nextBitmap[bit/8]&(1<<uint(bit%8))==0{return ErrCorrupt}
@@ -276,6 +277,7 @@ func(a *DynamicVolumeAllocator) ensureUniqueVolumeID(id string,except uint32)err
 		pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,i);if err!=nil{return err}
 		d,err:=a.readDescriptor(pair)
 		if err==nil&&d.VolumeID==id{return errors.New("BMPOOL03 Volume ID is already allocated")}
+		if err!=nil&&!errors.Is(err,ErrUnformatted){return fmt.Errorf("inspect Volume descriptor slot %d: %w",i,err)}
 	}
 	return nil
 }
