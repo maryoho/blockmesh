@@ -26,7 +26,7 @@ func TestPlanDynamicGeometryPartialLastAG(t *testing.T) {
 func TestPlanDynamicGeometrySmallDeviceAndNonPowerOfTwoAG(t *testing.T) {
 	g,err:=PlanDynamicGeometry(DynamicGeometryConfig{
 		DataBytes:6*BlockSize, MetadataBytes:64<<20, AGSizeBytes:4*BlockSize,
-		WALSegmentBytes:PageSize, MappingBytes:8<<20, CheckpointBytes:PageSize,
+		WALSegmentBytes:4*PageSize, MappingBytes:8<<20, CheckpointBytes:16*PageSize,
 	})
 	if err!=nil { t.Fatal(err) }
 	if g.AGCount!=2 || g.LastAGBlocks!=2 || g.BitmapStride!=2*PageSize {
