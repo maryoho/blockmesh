@@ -8,7 +8,6 @@
 #include <linux/device-mapper.h>
 #include <linux/module.h>
 #include <linux/random.h>
-#include <linux/hex.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
