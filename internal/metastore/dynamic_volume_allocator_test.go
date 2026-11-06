@@ -175,3 +175,16 @@ func TestStoreExpandDynamicArenaByUsesReservedAllocator(t *testing.T){
 	got,err:=store.DynamicPoolDescriptor();if err!=nil{t.Fatal(err)}
 	if got.ArenaPages!=desc.ArenaPages+12||got.LifecycleStart!=desc.LifecycleStart+12{t.Fatalf("Store Arena expansion mismatch: %+v",got)}
 }
+
+func TestDynamicOwnerEpochReaderReadsAuthoritativeVolumeDescriptor(t *testing.T){
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	d:=dynamicVolumeDescriptor(sb,"epoch-reader-volume");d.OwnerEpoch=42
+	if _,err=a.AllocateVolume(0,d,dynamicArenaCommitter{dev});err!=nil{t.Fatal(err)}
+	reader,err:=NewDynamicOwnerEpochReader(dev,sb,0,d.VolumeID);if err!=nil{t.Fatal(err)}
+	epoch,err:=reader.ReadOwnerEpoch();if err!=nil{t.Fatal(err)}
+	if epoch!=42{t.Fatalf("OwnerEpoch=%d want 42",epoch)}
+	if _,err=NewDynamicOwnerEpochReader(dev,sb,0,"wrong-volume");err!=nil{t.Fatal(err)}
+	if _,err=reader.ReadOwnerEpoch();err!=nil{t.Fatal(err)}
+}
