@@ -26,6 +26,7 @@ type DynamicSharedCommitter struct {
 	Locker lock.DistributedLocker
 	Resource string
 	Timeout time.Duration
+	Guard func() error
 }
 
 func NewDynamicSharedCommitter(dev DynamicMetadataDevice,sb format.DynamicSuperblock,ag uint32,locker lock.DistributedLocker,resource string)(*DynamicSharedCommitter,error){
@@ -39,21 +40,29 @@ func(c *DynamicSharedCommitter)withJournal(fn func(*DynamicJournal)error)error{
 	timeout:=c.Timeout;if timeout<=0{timeout=30*time.Second}
 	ctx,cancel:=context.WithTimeout(context.Background(),timeout);defer cancel()
 	release,err:=c.Locker.Lock(ctx,c.Resource);if err!=nil{return fmt.Errorf("acquire BMPOOL03 AG%d WAL lease: %w",c.AG,err)}
+	if err=c.checkGuard();err!=nil{return errors.Join(err,release())}
 	j,openErr:=OpenDynamicJournal(c.Device,c.Superblock,c.AG);if openErr!=nil{return errors.Join(openErr,release())}
-	opErr:=fn(j);releaseErr:=release()
+	if err=c.checkGuard();err!=nil{return errors.Join(err,release())}
+	opErr:=fn(j)
+	guardErr:=c.checkGuard()
+	releaseErr:=release()
+	if guardErr!=nil{opErr=errors.Join(opErr,guardErr)}
 	if opErr!=nil&&releaseErr!=nil{return errors.Join(opErr,releaseErr)}
 	if opErr!=nil{return opErr};return releaseErr
 }
 func(c *DynamicSharedCommitter)CommitImages(images []metastore.PageImage)error{
 	return c.withJournal(func(j *DynamicJournal)error{
+		if err:=c.checkGuard();err!=nil{return err}
 		err:=j.CommitImages(images)
 		if !errors.Is(err,ErrJournalFull){return err}
 		// ErrJournalFull is returned only when append could not write a
 		// complete record. The durable tail may contain an unmatched Intent;
 		// Checkpoint safely retires it because its Commit record is absent.
+		if err=c.checkGuard();err!=nil{return err}
 		if err=j.Checkpoint();err!=nil{return fmt.Errorf("automatic BMPOOL03 WAL checkpoint after JournalFull: %w",err)}
+		if err=c.checkGuard();err!=nil{return err}
 		if err=j.CommitImages(images);err!=nil{return fmt.Errorf("retry BMPOOL03 transaction after checkpoint: %w",err)}
-		return nil
+		return c.checkGuard()
 	})
 }
 func(c *DynamicSharedCommitter)Recover()error{
@@ -64,3 +73,14 @@ func(c *DynamicSharedCommitter)Checkpoint()error{
 }
 func(*DynamicSharedCommitter)ClusterSafe()bool{return true}
 var _ metastore.ClusterSafeCommitter=(*DynamicSharedCommitter)(nil)
+
+
+// SetGuard installs an Owner Lease/OwnerEpoch admission check. Set it before
+// the committer is shared with concurrent callers.
+func(c *DynamicSharedCommitter)SetGuard(guard func()error){
+	if c!=nil{c.Guard=guard}
+}
+func(c *DynamicSharedCommitter)checkGuard()error{
+	if c==nil||c.Guard==nil{return nil}
+	return c.Guard()
+}
