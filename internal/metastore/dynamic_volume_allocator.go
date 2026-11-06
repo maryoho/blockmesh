@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/lock"
 )
 
 const (
@@ -363,14 +364,8 @@ func DynamicVolumeAllocatorPresent(dev Device,sb format.DynamicSuperblock)bool{
 // DynamicVolumeFencingLease is held for the entire descriptor/bitmap release
 // transaction. The Owner sanlock resource must not be released between PR
 // fencing proof and metadata publication.
-type DynamicVolumeFencingLease interface {
-	Valid() bool
-	VolumeID() string
-	Epoch() uint64
-	Close() error
-}
 type DynamicVolumeFencingProof interface {
-	AcquireVolumeFencing(context.Context,string,uint64)(DynamicVolumeFencingLease,error)
+	AcquireVolumeFencing(context.Context,string,uint64)(lock.VolumeFencingLease,error)
 }
 
 func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,proof DynamicVolumeFencingProof,committer ClusterSafeCommitter)(retErr error) {

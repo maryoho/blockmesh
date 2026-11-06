@@ -111,3 +111,12 @@ func (l *fileLease) Close() error {
 	}
 	return closeErr
 }
+
+
+// VolumeFencingLease keeps the exclusive Owner resource held from successful
+// all-path PR fencing through the metadata transaction that releases a Volume.
+type VolumeFencingLease interface {
+	Lease
+	VolumeID() string
+	Epoch() uint64
+}

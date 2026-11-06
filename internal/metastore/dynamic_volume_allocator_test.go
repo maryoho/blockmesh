@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/lock"
 	"blockmesh/internal/volume"
 )
 
@@ -23,7 +24,7 @@ func(l *dynamicVolumeTestFenceLease)Valid()bool{return l.valid}
 func(l *dynamicVolumeTestFenceLease)VolumeID()string{return l.volumeID}
 func(l *dynamicVolumeTestFenceLease)Epoch()uint64{return l.epoch}
 func(l *dynamicVolumeTestFenceLease)Close()error{l.valid=false;return nil}
-func(f dynamicVolumeTestFence)AcquireVolumeFencing(_ context.Context,volumeID string,epoch uint64)(DynamicVolumeFencingLease,error){
+func(f dynamicVolumeTestFence)AcquireVolumeFencing(_ context.Context,volumeID string,epoch uint64)(lock.VolumeFencingLease,error){
 	if f.err!=nil{return nil,f.err}
 	return &dynamicVolumeTestFenceLease{volumeID:volumeID,epoch:epoch,valid:true},nil
 }

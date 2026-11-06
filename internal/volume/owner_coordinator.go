@@ -195,7 +195,7 @@ func(l *OwnerFencingLease)Close()error{if l==nil||l.lease==nil{return nil};retur
 
 // AcquireVolumeFencing returns a lease that remains held until the caller
 // commits the descriptor/allocator release transaction and closes it.
-func(c *OwnerCoordinator)AcquireVolumeFencing(ctx context.Context,volumeID string,ownerEpoch uint64)(*OwnerFencingLease,error){
+func(c *OwnerCoordinator)AcquireVolumeFencing(ctx context.Context,volumeID string,ownerEpoch uint64)(lock.VolumeFencingLease,error){
 	if c==nil||ctx==nil||strings.TrimSpace(volumeID)==""||ownerEpoch==0{return nil,errors.New("OwnerCoordinator, context, Volume ID and OwnerEpoch are required")}
 	resource:=c.cfg.ResourceFor(volumeID);if strings.TrimSpace(resource)==""{return nil,errors.New("Owner sanlock resource is empty")}
 	lease,err:=c.cfg.Locker.Acquire(ctx,resource);if err!=nil{return nil,fmt.Errorf("acquire exclusive Owner resource for Volume fencing: %w",err)}
