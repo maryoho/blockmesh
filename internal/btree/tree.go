@@ -50,6 +50,8 @@ type Tree struct {
 	journal metastore.Committer
 	persistentArena *metastore.PersistentArena
 	readerCoordinator metastore.ReaderCoordinator
+	externalPageResolver ExternalPageResolver
+	externalPages []uint64
 	root   uint64
 }
 
@@ -97,11 +99,31 @@ func openTree(store *metastore.Store, allowPersistent bool, journals ...metastor
 // OpenPersistent opens a tree whose Arena and retire queue are persisted
 // in the lifecycle region configured in metastore.Layout. The caller must
 // recover the WAL before calling this function.
+// ExternalPageResolver discovers every non-B+Tree Arena page referenced by
+// indexed records. Returned IDs are pinned Live during Arena reconstruction.
+type ExternalPageResolver func(*metastore.Store, []Item) ([]uint64, error)
+
 func OpenPersistent(store *metastore.Store, journal metastore.Committer, coordinators ...metastore.ReaderCoordinator) (*Tree, error) {
+	return OpenPersistentWithExternalPages(store, journal, nil, coordinators...)
+}
+
+// OpenPersistentWithExternalPages must be used when high-bit namespace keys
+// point to immutable external Arena pages. The resolver validates all records
+// and collision-chain links and returns every referenced page ID.
+func OpenPersistentWithExternalPages(store *metastore.Store, journal metastore.Committer, resolver ExternalPageResolver, coordinators ...metastore.ReaderCoordinator) (*Tree, error) {
 	if journal == nil { return nil, errors.New("nil WAL committer") }
 	t, err := openTree(store, true, journal)
 	if err != nil { return nil, err }
-	persistent, err := metastore.NewPersistentArena(store, t.pages, journal, coordinators...)
+	hasExternal := false
+	for _, item := range t.items { if item.Key>>63 != 0 { hasExternal = true; break } }
+	if hasExternal && resolver == nil { return nil, errors.New("external-page index keys require an ExternalPageResolver") }
+	if resolver != nil {
+		t.externalPages, err = resolver(store, append([]Item(nil), t.items...))
+		if err != nil { return nil, fmt.Errorf("resolve external Arena pages: %w", err) }
+		t.externalPageResolver = resolver
+	}
+	live := append(append([]uint64(nil), t.pages...), t.externalPages...)
+	persistent, err := metastore.NewPersistentArena(store, live, journal, coordinators...)
 	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
 	t.persistentArena = persistent
 	if len(coordinators)==1 { t.readerCoordinator=coordinators[0] }
@@ -123,11 +145,21 @@ func (t *Tree) Refresh() error {
 	if err:=t.store.Refresh();err!=nil{return err}
 	fresh,err:=openTree(t.store,true,t.journal)
 	if err!=nil{return fmt.Errorf("reload published B+Tree root: %w",err)}
-	persistent,err:=metastore.NewPersistentArena(t.store,fresh.pages,t.journal,t.readerCoordinator)
+	hasExternal:=false
+	for _,item:=range fresh.items {if item.Key>>63!=0 {hasExternal=true;break}}
+	if hasExternal&&t.externalPageResolver==nil {return errors.New("external-page index keys require an ExternalPageResolver")}
+	var external []uint64
+	if t.externalPageResolver!=nil {
+		external,err=t.externalPageResolver(t.store,append([]Item(nil),fresh.items...))
+		if err!=nil{return fmt.Errorf("resolve external Arena pages after refresh: %w",err)}
+	}
+	live:=append(append([]uint64(nil),fresh.pages...),external...)
+	persistent,err:=metastore.NewPersistentArena(t.store,live,t.journal,t.readerCoordinator)
 	if err!=nil{return fmt.Errorf("rebuild persistent Arena after refresh: %w",err)}
 	t.root=fresh.root
 	t.items=append([]Item(nil),fresh.items...)
 	t.pages=append([]uint64(nil),fresh.pages...)
+	t.externalPages=external
 	t.persistentArena=persistent
 	return nil
 }
@@ -227,9 +259,16 @@ func (t *Tree) Put(key, value uint64) error {
 // Every extra image must be a full aligned 4KiB page and must not overlap the
 // Volume Descriptor/root image or any COW page.
 func (t *Tree) PutBatchWithImages(updates []Item, extra []metastore.PageImage) error {
+	return t.PutBatchWithArenaPages(updates,nil,extra)
+}
+
+// PutBatchWithArenaPages reserves COW pages and immutable external Arena pages
+// from one Reservation, then publishes their images, index updates, lifecycle
+// state and root in one WAL transaction.
+func (t *Tree) PutBatchWithArenaPages(updates []Item, arenaPages []metastore.Page, extra []metastore.PageImage) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(updates)==0 && len(extra)==0 { return nil }
+	if len(updates)==0 && len(extra)==0 && len(arenaPages)==0 { return nil }
 	if len(extra)>0 && t.journal==nil { return errors.New("atomic extra images require a WAL-backed B+Tree") }
 	next:=append([]Item(nil),t.items...)
 	var root *cowNode
@@ -261,7 +300,7 @@ func (t *Tree) PutBatchWithImages(updates []Item, extra []metastore.PageImage) e
 	}
 	if !changed && len(extra)==0 { return nil }
 	if root==nil && len(extra)>0 { root=nil }
-	return t.publishCOWWithImages(root,next,extra)
+	return t.publishCOWWithArenaPages(root,next,arenaPages,extra)
 }
 
 // Delete removes key and returns ErrKeyNotFound when it does not exist.

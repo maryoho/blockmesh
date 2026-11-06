@@ -184,18 +184,27 @@ func (p *PersistentArena) CommitPagesAndPublishWithImages(reservation *Reservati
  if p.rootSequence==math.MaxUint64||mappingSequence!=p.rootSequence+1||retireGeneration!=p.rootSequence{return errors.New("invalid lifecycle generation")}
  if p.store.Superblock().MappingSequence!=p.rootSequence{return ErrLifecycleCorrupt}
  if p.stateGeneration==math.MaxUint64{return errors.New("lifecycle generation exhausted")}
- // Validate the volatile reservation against the exact COW page set before
- // recording any durable after-images.
+ // Validate that every reserved page is represented by either a COW
+ // Page or an encoded Arena PageImage. Fixed-LBA extras (bitmap/lifecycle)
+ // do not consume Arena reservations.
  p.arena.mu.Lock()
+ reservedIDs:=make(map[uint64]struct{})
  if reservation==nil {
   if len(pages)!=0 {p.arena.mu.Unlock();return errors.New("COW pages require an Arena reservation")}
  } else {
-  if reservation.arena!=p.arena||reservation.done||len(reservation.pages)!=len(pages) {p.arena.mu.Unlock();return ErrInvalidPageSet}
-  reservedIDs:=make(map[uint64]struct{},len(reservation.pages))
+  if reservation.arena!=p.arena||reservation.done {p.arena.mu.Unlock();return ErrInvalidPageSet}
   for _,id:=range reservation.pages {owner,ok:=p.arena.reserved[id];if !ok||owner!=reservation.id {p.arena.mu.Unlock();return ErrInvalidPageSet};reservedIDs[id]=struct{}{}}
-  for _,page:=range pages {if _,ok:=reservedIDs[page.ID];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet};delete(reservedIDs,page.ID)}
-  if len(reservedIDs)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
  }
+ for _,page:=range pages {if _,ok:=reservedIDs[page.ID];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet};delete(reservedIDs,page.ID)}
+ for _,image:=range extra {
+  if image.Offset%PageSize!=0||len(image.Data)!=int(PageSize) {p.arena.mu.Unlock();return errors.New("extra WAL images must be aligned 4KiB pages")}
+  id:=image.Offset/PageSize
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages {continue}
+  if _,ok:=reservedIDs[id];!ok {p.arena.mu.Unlock();return fmt.Errorf("%w: extra Arena page %d is not reserved",ErrInvalidPageSet,id)}
+  if _,err:=decodePage(id,image.Data);err!=nil {p.arena.mu.Unlock();return fmt.Errorf("%w: invalid encoded Arena page %d: %v",ErrInvalidPageSet,id,err)}
+  delete(reservedIDs,id)
+ }
+ if len(reservedIDs)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
  newLiveSet:=make(map[uint64]struct{},len(newLivePages))
  for _,id:=range newLivePages {
   if id<p.arena.start||id-p.arena.start>=p.arena.pages {p.arena.mu.Unlock();return ErrInvalidPageSet}
@@ -231,9 +240,6 @@ func (p *PersistentArena) CommitPagesAndPublishWithImages(reservation *Reservati
  stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
  sb:=p.store.Superblock();stateOff,_,err:=lifecycleOffsets(sb);if err!=nil{p.arena.mu.Unlock();return err}
  extras:=append([]PageImage(nil),extra...)
- for _,image:=range extras {
-  if image.Offset%PageSize!=0||len(image.Data)!=int(PageSize) {p.arena.mu.Unlock();return errors.New("extra WAL images must be aligned 4KiB pages")}
- }
  extras=append(extras,PageImage{Offset:stateOff,Data:stateImage})
  for i,image:=range queueImages { extras=append(extras,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
  if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{p.arena.mu.Unlock();return err}

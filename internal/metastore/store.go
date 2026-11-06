@@ -484,11 +484,13 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 		inLifecycle := s.sb.LifecyclePages != 0 &&
 			image.Offset >= s.sb.LifecycleStart*PageSize &&
 			image.Offset < (s.sb.LifecycleStart+s.sb.LifecyclePages)*PageSize
+		inArena := image.Offset >= s.sb.ArenaStart*PageSize &&
+			image.Offset < (s.sb.ArenaStart+s.sb.ArenaPages)*PageSize
 		inPoolBitmap := s.poolBacked &&
 			image.Offset >= s.poolSB.BitmapOffset &&
 			image.Offset <= s.poolSB.BitmapOffset+s.poolSB.BitmapSize &&
 			PageSize <= s.poolSB.BitmapOffset+s.poolSB.BitmapSize-image.Offset
-		if !inLifecycle && !inPoolBitmap {
+		if !inLifecycle && !inPoolBitmap && !inArena {
 			return fmt.Errorf("extra metadata after-image %d is outside Volume lifecycle and Pool Data Bitmap regions", image.Offset)
 		}
 		pageID := image.Offset / PageSize
@@ -656,6 +658,10 @@ func decodeSuperblock(b []byte) (Superblock, error) {
 	}
 	return s, nil
 }
+
+// EncodePageImage serializes an Arena page into a complete 4KiB after-image.
+// The caller must reserve p.ID and include the returned bytes in a WAL transaction.
+func EncodePageImage(p Page) ([]byte, error) { return encodePage(p) }
 
 func encodePage(p Page) ([]byte, error) {
 	if len(p.Payload) > PagePayloadMax {
