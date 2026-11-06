@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/volume"
 )
 
 type dynamicVolumeTestCommitter struct{dev Device}
@@ -187,4 +188,22 @@ func TestDynamicOwnerEpochReaderReadsAuthoritativeVolumeDescriptor(t *testing.T)
 	if epoch!=42{t.Fatalf("OwnerEpoch=%d want 42",epoch)}
 	wrong,err:=NewDynamicOwnerEpochReader(dev,sb,0,"wrong-volume");if err!=nil{t.Fatal(err)}
 	if _,err=wrong.ReadOwnerEpoch();err==nil{t.Fatal("expected mismatched Volume ID rejection")}
+}
+
+func TestDynamicVolumeSANOwnerRecordSurvivesArenaGrowth(t *testing.T){
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	d,err:=a.AllocateVolume(0,dynamicVolumeDescriptor(sb,"owner-record-volume"),dynamicArenaCommitter{dev});if err!=nil{t.Fatal(err)}
+	if d.OwnerRecordStart==0{t.Fatal("allocator did not reserve OwnerRecord pages")}
+	records,err:=NewDynamicSANOwnerRecordStore(dev,sb,0,d.VolumeID);if err!=nil{t.Fatal(err)}
+	ctx:=context.Background()
+	record:=volume.OwnerRecord{VolumeID:d.VolumeID,NodeID:"node-a",BootID:"boot-a",Epoch:1}
+	if err=records.CompareAndSwap(ctx,d.VolumeID,nil,record);err!=nil{t.Fatal(err)}
+	store,err:=OpenDynamicPoolVolume(dev,sb,0,d.VolumeID);if err!=nil{t.Fatal(err)}
+	if err=FormatLifecycle(store);err!=nil{t.Fatal(err)}
+	if err=store.ExpandDynamicArenaBy(8,dynamicArenaCommitter{dev});err!=nil{t.Fatal(err)}
+	recordsAfter,err:=NewDynamicSANOwnerRecordStore(dev,sb,0,d.VolumeID);if err!=nil{t.Fatal(err)}
+	got,exists,err:=recordsAfter.Load(ctx,d.VolumeID);if err!=nil{t.Fatal(err)}
+	if !exists||got!=record{t.Fatalf("OwnerRecord lost after Arena growth: exists=%v record=%+v",exists,got)}
 }
