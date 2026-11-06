@@ -111,7 +111,7 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	if err!=nil{t.Fatal(err)}
 	growCommitter,err:=wal.NewDynamicSharedCommitter(metaExpanded,sb,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
-	if err=PublishDynamicGeometry(metaExpanded,sb,next,growCommitter);err!=nil{t.Fatal(err)}
+	if err=PublishDynamicGeometryUnderLease(context.Background(),metaExpanded,sb,next,lease,locks,growCommitter);err!=nil{t.Fatal(err)}
 	opened,err:=OpenDynamicSuperblockPair(metaExpanded);if err!=nil{t.Fatal(err)}
 	if opened!=next{t.Fatalf("expanded geometry not published: %+v",opened)}
 	store3,err:=metastore.OpenDynamicPoolVolume(metaExpanded,next,0,desc.VolumeID);if err!=nil{t.Fatal(err)}

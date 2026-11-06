@@ -11,6 +11,8 @@ import (
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
+	"blockmesh/internal/lock"
+	"context"
 )
 
 var ErrDynamicGeometryRequiresMigration=errors.New("BMPOOL03 growth exceeds reserved AG geometry; metadata layout migration is required")
@@ -107,6 +109,27 @@ func PublishDynamicGeometry(dev device.Device,current,next format.DynamicSuperbl
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync first BMPOOL03 superblock copy: %w",err)}
 	if err=writeDynamicDeviceFull(dev,encoded,int64(slot*format.PageSize));err!=nil{return fmt.Errorf("publish second BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync second BMPOOL03 superblock copy: %w",err)}
+	return nil
+}
+
+
+// PublishDynamicGeometryUnderLease is the shared-SAN entry point. It holds the
+// final AG lock across bitmap-tail WAL commit and both superblock publications,
+// and refuses to proceed without a live Owner lease and distributed locker.
+func PublishDynamicGeometryUnderLease(ctx context.Context,dev device.Device,current,next format.DynamicSuperblock,
+	ownerLease lock.Lease,locks lock.DistributedLocker,bitmapCommitter metastore.Committer)error{
+	if ctx==nil||ownerLease==nil||!ownerLease.Valid()||ownerLease.Resource()==""||locks==nil||!locks.Distributed(){
+		return errors.New("live Pool Owner lease and distributed AG locker are required")
+	}
+	if current.Geometry.AGCount==0{return format.ErrInvalidDynamicGeometry}
+	ag:=current.Geometry.AGCount-1
+	unlock,err:=locks.Lock(ctx,fmt.Sprintf("ag:%03d",ag));if err!=nil{return fmt.Errorf("lock final AG %d for geometry growth: %w",ag,err)}
+	defer unlock()
+	if err=ctx.Err();err!=nil{return err}
+	if !ownerLease.Valid(){return errors.New("Pool Owner lease lost before geometry publication")}
+	err=PublishDynamicGeometry(dev,current,next,bitmapCommitter)
+	if err!=nil{return err}
+	if !ownerLease.Valid(){return errors.New("Pool Owner lease lost during geometry publication; fence and inspect both superblock copies")}
 	return nil
 }
 
