@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
 )
 
 const (
@@ -142,4 +143,46 @@ func IdempotencyHash(key [16]byte) uint64 {
 	// Mix both halves and keep the namespace bit set.
 	v := uint64(h)<<32 | uint64(crc32.ChecksumIEEE(key[:]))
 	return (uint64(1)<<63) | (v & ((uint64(1)<<63)-1))
+}
+
+// IdempotencyPageReader is the minimal metadata reader needed to resolve a
+// hash-chain head from the Volume B+Tree index.
+type IdempotencyPageReader interface {
+	ReadPage(id uint64) (metastore.Page, error)
+}
+
+// BuildIdempotencyRecordPage constructs an immutable Arena page for a record.
+// The caller must reserve id from PersistentArena and include this page in the
+// same WAL/root transaction as the index and Mapping updates.
+func BuildIdempotencyRecordPage(id, generation uint64, record IdempotencyRecord) (metastore.Page, error) {
+	if id == 0 || id == metastore.NoPage || generation == 0 {
+		return metastore.Page{}, ErrIdempotencyRecord
+	}
+	payload, err := record.EncodePayload()
+	if err != nil { return metastore.Page{}, err }
+	return metastore.Page{ID:id, Type:IdempotencyRecordPageType, Generation:generation, Payload:payload}, nil
+}
+
+// LookupIdempotencyRecord resolves hash collisions by comparing the complete
+// 128-bit key. A matching key with a different fingerprint is a hard conflict;
+// a missing key in the chain is a safe first-use result.
+func LookupIdempotencyRecord(reader IdempotencyPageReader, headPage uint64, key [16]byte, fingerprint [32]byte) (IdempotencyRecord, bool, error) {
+	if reader == nil { return IdempotencyRecord{}, false, ErrIdempotencyRecord }
+	seen := make(map[uint64]struct{})
+	for pageID := headPage; pageID != 0; {
+		if pageID == metastore.NoPage { return IdempotencyRecord{}, false, ErrIdempotencyRecord }
+		if _, ok := seen[pageID]; ok { return IdempotencyRecord{}, false, ErrIdempotencyRecord }
+		seen[pageID] = struct{}{}
+		page, err := reader.ReadPage(pageID)
+		if err != nil { return IdempotencyRecord{}, false, err }
+		if page.Type != IdempotencyRecordPageType { return IdempotencyRecord{}, false, ErrIdempotencyRecord }
+		record, err := DecodeIdempotencyRecordPayload(page.Payload)
+		if err != nil { return IdempotencyRecord{}, false, err }
+		if record.Key == key {
+			if record.Fingerprint != fingerprint { return IdempotencyRecord{}, false, ErrIdempotencyConflict }
+			return record, true, nil
+		}
+		pageID = record.NextPage
+	}
+	return IdempotencyRecord{}, false, nil
 }

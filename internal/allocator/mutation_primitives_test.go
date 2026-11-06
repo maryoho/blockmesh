@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
 )
 
 func TestIdempotencyRecordRoundTrip(t *testing.T) {
@@ -31,6 +32,40 @@ func TestIdempotencyRecordPagePayloadRoundTrip(t *testing.T) {
 	payload[30] ^= 1
 	if _, err := DecodeIdempotencyRecordPayload(payload); !errors.Is(err, ErrIdempotencyRecord) {
 		t.Fatalf("corrupt payload error=%v", err)
+	}
+}
+
+
+type idempotencyPageReader map[uint64]metastore.Page
+func (r idempotencyPageReader) ReadPage(id uint64) (metastore.Page, error) {
+	p, ok := r[id]
+	if !ok { return metastore.Page{}, errors.New("page not found") }
+	return p, nil
+}
+
+func TestLookupIdempotencyRecordCollisionChain(t *testing.T) {
+	var keyA, keyB [16]byte
+	var fpA, fpB [32]byte
+	keyA[0], keyB[0], fpA[0], fpB[0] = 1, 2, 3, 4
+	first := IdempotencyRecord{Key:keyA, Fingerprint:fpA, LogicalStart:1, PhysicalStart:11, BlockCount:1, OwnerEpoch:5, NextPage:8}
+	second := IdempotencyRecord{Key:keyB, Fingerprint:fpB, LogicalStart:2, PhysicalStart:22, BlockCount:1, OwnerEpoch:5}
+	p1, err := BuildIdempotencyRecordPage(9, 7, first); if err != nil { t.Fatal(err) }
+	p2, err := BuildIdempotencyRecordPage(8, 7, second); if err != nil { t.Fatal(err) }
+	reader := idempotencyPageReader{9:p1, 8:p2}
+	got, found, err := LookupIdempotencyRecord(reader, 9, keyB, fpB)
+	if err != nil || !found || got.PhysicalStart != 22 { t.Fatalf("lookup got=%+v found=%v err=%v", got, found, err) }
+	if _, found, err = LookupIdempotencyRecord(reader, 9, keyA, [32]byte{99}); found || !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("fingerprint mismatch found=%v err=%v", found, err)
+	}
+	if _, found, err = LookupIdempotencyRecord(reader, 9, [16]byte{99}, fpB); err != nil || found {
+		t.Fatalf("missing key found=%v err=%v", found, err)
+	}
+	// A corrupt chain must fail closed instead of looping forever.
+	cycle := first; cycle.NextPage = 9
+	cyclePage, err := BuildIdempotencyRecordPage(9, 7, cycle); if err != nil { t.Fatal(err) }
+	reader[9] = cyclePage
+	if _, _, err = LookupIdempotencyRecord(reader, 9, keyB, fpB); !errors.Is(err, ErrIdempotencyRecord) {
+		t.Fatalf("cycle error=%v", err)
 	}
 }
 
