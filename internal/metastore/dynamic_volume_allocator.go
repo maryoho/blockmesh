@@ -14,6 +14,7 @@ import (
 
 const (
 	dynamicReservedMagic uint64 = 0x424D525341303031 // BMRSA001
+	dynamicReservedFormatMagic uint64 = 0x424D525346303031 // BMRSF001
 	dynamicReservedVersion uint32 = 1
 	dynamicReservedHeaderCRC = int(format.PageSize)-4
 )
@@ -100,13 +101,29 @@ func FormatDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) error 
 	h,bitmapPages,err:=dynamicReservedGeometry(sb);if err!=nil{return err}
 	if devSize,ok:=dev.(interface{Size()int64});ok&&(devSize.Size()<0||uint64(devSize.Size())<sb.Geometry.MetadataBytes){return ErrGeometry}
 	off:=h.RegionStart*format.PageSize
-	length:=h.RegionPages*format.PageSize
-	buf:=make([]byte,1<<20)
-	for done:=uint64(0);done<length; {
-		n:=uint64(len(buf));if length-done<n{n=length-done}
-		if err=readFullAt(dev,buf[:n],int64(off+done));err!=nil{return err}
-		for _,v:=range buf[:n]{if v!=0{return errors.New("refusing to format non-empty BMPOOL03 Reserved region")}}
-		done+=n
+	first:=make([]byte,format.PageSize)
+	if err=readFullAt(dev,first,int64(off));err!=nil{return err}
+	resume:=false
+	if existing,e:=decodeDynamicReservedHeader(first);e==nil&&existing.PoolUUID==sb.PoolUUID {
+		return errors.New("BMPOOL03 Reserved allocator is already formatted")
+	}
+	if dynamicReservedFormatMarkerMatches(first,h) {
+		resume=true
+	} else if !dynamicVolumeAllZero(first) {
+		return errors.New("BMPOOL03 Reserved allocator header is occupied or corrupt")
+	}
+	if !resume {
+		length:=h.RegionPages*format.PageSize
+		buf:=make([]byte,1<<20)
+		for done:=uint64(0);done<length; {
+			n:=uint64(len(buf));if length-done<n{n=length-done}
+			if err=readFullAt(dev,buf[:n],int64(off+done));err!=nil{return err}
+			for _,v:=range buf[:n]{if v!=0{return errors.New("refusing to format non-empty BMPOOL03 Reserved region")}}
+			done+=n
+		}
+		marker:=encodeDynamicReservedFormatMarker(h)
+		if err=writeFullAt(dev,marker,int64(off));err!=nil{return err}
+		if err=dev.Sync();err!=nil{return fmt.Errorf("persist Reserved allocator format marker: %w",err)}
 	}
 	bitmap:=make([]byte,bitmapPages*format.PageSize)
 	for bit:=uint64(0);bit<h.AllocStart;bit++{bitmap[bit/8]|=1<<uint(bit%8)}
@@ -114,9 +131,44 @@ func FormatDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) error 
 	h.BitmapCRC=crc32.Checksum(bitmap,crcTable)
 	header,err:=h.encode();if err!=nil{return err}
 	if err=writeFullAt(dev,bitmap,int64((h.RegionStart+2)*format.PageSize));err!=nil{return err}
+	if err=dev.Sync();err!=nil{return fmt.Errorf("sync Reserved allocator bitmap: %w",err)}
 	if err=writeFullAt(dev,header,int64(h.RegionStart*format.PageSize));err!=nil{return err}
+	if err=dev.Sync();err!=nil{return fmt.Errorf("publish first Reserved allocator header: %w",err)}
 	if err=writeFullAt(dev,header,int64((h.RegionStart+1)*format.PageSize));err!=nil{return err}
-	return dev.Sync()
+	if err=dev.Sync();err!=nil{return fmt.Errorf("publish second Reserved allocator header: %w",err)}
+	return nil
+}
+
+// RecoverDynamicVolumeAllocatorFormat resumes only a format whose matching
+// durable marker was written before any Reserved-region initialization.
+func RecoverDynamicVolumeAllocatorFormat(dev Device,sb format.DynamicSuperblock) error {
+	if dev==nil{return errors.New("nil BMPOOL03 MetadataView")}
+	h,_,err:=dynamicReservedGeometry(sb);if err!=nil{return err}
+	marker:=make([]byte,format.PageSize)
+	if err=readFullAt(dev,marker,int64(h.RegionStart*format.PageSize));err!=nil{return err}
+	if !dynamicReservedFormatMarkerMatches(marker,h){return errors.New("no matching interrupted Reserved allocator format")}
+	return FormatDynamicVolumeAllocator(dev,sb)
+}
+
+func encodeDynamicReservedFormatMarker(h dynamicReservedHeader) []byte {
+	b:=make([]byte,format.PageSize)
+	binary.LittleEndian.PutUint64(b[:8],dynamicReservedFormatMagic)
+	binary.LittleEndian.PutUint32(b[8:12],dynamicReservedVersion)
+	copy(b[16:32],h.PoolUUID[:])
+	binary.LittleEndian.PutUint64(b[32:40],h.RegionStart)
+	binary.LittleEndian.PutUint64(b[40:48],h.RegionPages)
+	binary.LittleEndian.PutUint64(b[48:56],h.BitmapPages)
+	binary.LittleEndian.PutUint64(b[56:64],h.AllocStart)
+	binary.LittleEndian.PutUint32(b[dynamicReservedHeaderCRC:],crc32.Checksum(b[:dynamicReservedHeaderCRC],crcTable))
+	return b
+}
+func dynamicReservedFormatMarkerMatches(b []byte,h dynamicReservedHeader) bool {
+	if len(b)!=int(format.PageSize)||binary.LittleEndian.Uint64(b[:8])!=dynamicReservedFormatMagic||
+		binary.LittleEndian.Uint32(b[8:12])!=dynamicReservedVersion||
+		crc32.Checksum(b[:dynamicReservedHeaderCRC],crcTable)!=binary.LittleEndian.Uint32(b[dynamicReservedHeaderCRC:]){return false}
+	return string(b[16:32])==string(h.PoolUUID[:])&&binary.LittleEndian.Uint64(b[32:40])==h.RegionStart&&
+		binary.LittleEndian.Uint64(b[40:48])==h.RegionPages&&binary.LittleEndian.Uint64(b[48:56])==h.BitmapPages&&
+		binary.LittleEndian.Uint64(b[56:64])==h.AllocStart
 }
 
 func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) {
