@@ -108,3 +108,41 @@ func TestDynamicVolumeAllocatorFormatCanResumeAfterMarker(t *testing.T){
 	if err:=RecoverDynamicVolumeAllocatorFormat(dev,sb);err!=nil{t.Fatal(err)}
 	if _,err:=OpenDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
 }
+
+func TestDynamicVolumeAllocatorGrowVolumeRelocatesLifecycle(t *testing.T){
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	committer:=dynamicVolumeTestCommitter{dev}
+	d,err:=a.AllocateVolume(0,dynamicVolumeDescriptor(sb,"grow-volume"),committer);if err!=nil{t.Fatal(err)}
+	lifecycle:=make([]byte,d.LifecyclePages*format.PageSize)
+	for i:=range lifecycle{lifecycle[i]=byte(i*13+5)}
+	if _,err=dev.WriteAt(lifecycle,int64(d.LifecycleStart*format.PageSize));err!=nil{t.Fatal(err)}
+	if err=dev.Sync();err!=nil{t.Fatal(err)}
+	next,_,err:=a.GrowVolume(0,16,committer);if err!=nil{t.Fatal(err)}
+	if next.ArenaPages!=d.ArenaPages+16||next.LifecycleStart!=d.LifecycleStart+16{t.Fatalf("unexpected grown descriptor: %+v",next)}
+	got:=make([]byte,len(lifecycle))
+	if _,err=dev.ReadAt(got,int64(next.LifecycleStart*format.PageSize));err!=nil{t.Fatal(err)}
+	if string(got)!=string(lifecycle){t.Fatal("Lifecycle pages changed during Arena growth")}
+	if _,err=OpenDynamicPoolVolume(dev,sb,0,"grow-volume");err!=nil{t.Fatalf("reopen grown Volume: %v",err)}
+}
+
+func TestDynamicVolumeAllocatorExpandRegionKeepsExistingAllocations(t *testing.T){
+	oldDev,oldSB:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(oldDev,oldSB);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(oldDev,oldSB);if err!=nil{t.Fatal(err)}
+	oldVolume,err:=a.AllocateVolume(0,dynamicVolumeDescriptor(oldSB,"expand-region-volume"),dynamicVolumeTestCommitter{oldDev});if err!=nil{t.Fatal(err)}
+	newMeta:=oldSB.Geometry.MetadataBytes+1<<20
+	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:oldSB.Geometry.DataBytes,MetadataBytes:newMeta,
+		AGSizeBytes:oldSB.Geometry.AGSizeBlocks*format.BlockSize,WALSegmentBytes:oldSB.Geometry.WALSegmentBytes,
+		MappingBytes:oldSB.Geometry.MappingSize,CheckpointBytes:oldSB.Geometry.CheckpointSize,AGCapacity:oldSB.Geometry.AGCapacity})
+	if err!=nil{t.Fatal(err)}
+	nextSB,err:=format.NewDynamicSuperblock(g,oldSB.PoolUUID,oldSB.Generation+1,oldSB.ViewGeneration+1);if err!=nil{t.Fatal(err)}
+	newDev:=newMemdev(newMeta/PageSize)
+	copy(newDev.b,oldDev.b)
+	committer:=dynamicVolumeTestCommitter{newDev}
+	if err=a.ExpandRegion(newDev,nextSB,committer);err!=nil{t.Fatal(err)}
+	reopened,err:=OpenDynamicVolumeAllocator(newDev,nextSB);if err!=nil{t.Fatal(err)}
+	nextVolume,err:=reopened.AllocateVolume(1,dynamicVolumeDescriptor(nextSB,"after-expand"),committer);if err!=nil{t.Fatal(err)}
+	if nextVolume.ArenaStart<oldVolume.ArenaStart+oldVolume.ArenaPages+oldVolume.LifecyclePages{t.Fatalf("existing allocation overlapped: old=%+v new=%+v",oldVolume,nextVolume)}
+}
