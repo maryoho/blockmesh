@@ -46,11 +46,12 @@ func TestPublishDynamicGeometryExpandsLastAGBitmapAndDualSuperblock(t *testing.T
 	for bit:=uint64(6);bit<8;bit++{if bitmap[bit/8]&(1<<uint(bit%8))==0{t.Fatalf("still-invalid padding bit %d became free",bit)}}
 }
 
-func TestPublishDynamicGeometryRejectsNewAGWithoutMigration(t *testing.T){
-	dev,old:=dynamicGeometryUpdateFixture(t)
-	next,err:=BuildDynamicGeometryUpdate(old,old.Geometry.MetadataBytes,9*format.BlockSize,2)
-	if err!=ErrDynamicGeometryRequiresMigration{t.Fatalf("expected migration requirement, got %v",err)}
-	if err=PublishDynamicGeometry(dev,old,next,nil);err==nil{t.Fatal("invalid geometry published")}
+func TestBuildDynamicGeometryUpdateRejectsAGBeyondReservedCapacity(t *testing.T){
+	_,old:=dynamicGeometryUpdateFixture(t)
+	// The fixture reserves four AG slots. Activating a fifth AG must fail
+	// before any metadata is modified.
+	_,err:=BuildDynamicGeometryUpdate(old,old.Geometry.MetadataBytes,33*format.BlockSize,2)
+	if err==nil{t.Fatal("expected growth beyond AGCapacity to be rejected")}
 }
 
 type dynamicPageImageCommitter struct{dev *dynamicFormatMem}
