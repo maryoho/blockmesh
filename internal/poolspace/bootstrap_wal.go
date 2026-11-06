@@ -79,8 +79,9 @@ func recoverBootstrapWAL(dev device.Device)(uint64,error){
 	if err=readFull(dev,recordPage,int64(in.TargetSlot));err!=nil{return 0,err}
 	if crc32.Checksum(recordPage,crc32.MakeTable(crc32.Castagnoli))!=in.RecordCRC{return 0,ErrBootstrapWALCorrupt}
 	r,err:=decodeBootstrap(recordPage,in.TargetSlot)
-	if err!=nil||r.Generation!=in.TxID{return 0,ErrBootstrapWALCorrupt}
-	return math.MaxUint64,nil
+ if err!=nil||r.Generation!=in.TxID{return 0,ErrBootstrapWALCorrupt}
+ if _,err=loadExtentMap(dev,r);err!=nil{return 0,ErrBootstrapWALCorrupt}
+ return math.MaxUint64,nil
 }
 
 func allZero(b []byte) bool { for _, v := range b { if v != 0 { return false } }; return true }
