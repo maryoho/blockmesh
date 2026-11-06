@@ -175,7 +175,7 @@ func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*Dynami
 		page:=make([]byte,format.PageSize)
 		if err=readFullAt(dev,page,int64((expected.RegionStart+slot)*format.PageSize));err!=nil{return nil,err}
 		h,e:=decodeDynamicReservedHeader(page);if e==nil&&h.PoolUUID==sb.PoolUUID&&h.RegionStart==expected.RegionStart&&
-			h.RegionPages==expected.RegionPages&&h.BitmapPages==bitmapPages&&h.AllocStart==expected.AllocStart{valid=append(valid,struct{h dynamicReservedHeader;slot uint64}{h,slot})}
+			h.RegionPages<=expected.RegionPages&&h.RegionPages>=h.AllocStart&&h.BitmapPages==bitmapPages&&h.AllocStart==expected.AllocStart{valid=append(valid,struct{h dynamicReservedHeader;slot uint64}{h,slot})}
 	}
 	if len(valid)==0{return nil,ErrDynamicVolumeAllocatorUnformatted}
 	best:=valid[0]
@@ -237,7 +237,7 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 	if a==nil{return errors.New("nil Reserved allocator")}
 	a.mu.Lock();defer a.mu.Unlock()
 	if err:=nextSB.Validate();err!=nil{return err}
-	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation!=a.sb.Generation+1||
+	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation<a.sb.Generation||nextSB.Generation>a.sb.Generation+1||
 		nextSB.Geometry.ReservedOffset!=a.sb.Geometry.ReservedOffset||
 		nextSB.Geometry.MetadataBytes<a.sb.Geometry.MetadataBytes{return ErrGeometry}
 	expected,bitmapPages,err:=dynamicReservedGeometry(nextSB);if err!=nil{return err}
@@ -276,6 +276,13 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 	a.dev=dev;a.sb=nextSB;a.bitmap=nextBitmap;a.header=nextHeader;a.headerSlot=1-a.headerSlot
 	return nil
 }
+
+ // ReconcileRegion finishes a Reserved-region expansion after a crash between
+ // Superblock publication and allocator bitmap/header publication.
+ func(a *DynamicVolumeAllocator) ReconcileRegion(committer ClusterSafeCommitter) error {
+	if a==nil{return errors.New("nil Reserved allocator")}
+	return a.ExpandRegion(a.dev,a.sb,committer)
+ }
 
 // GrowVolume expands one contiguous Arena into immediately adjacent free
 // Reserved pages. Existing Lifecycle pages are copied to their new tail
