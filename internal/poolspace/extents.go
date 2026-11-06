@@ -11,7 +11,7 @@ type Extent struct { Start uint64 `json:"start"`; Length uint64 `json:"length"`;
 type Allocator struct { deviceBytes uint64; extents []Extent }
 
 func NewAllocator(deviceBytes,bootstrapBytes,metadataBytes uint64)(*Allocator,error){
- if deviceBytes==0||bootstrapBytes%ExtentSize!=0||metadataBytes%ExtentSize!=0||bootstrapBytes>deviceBytes||metadataBytes>deviceBytes-bootstrapBytes{return nil,ErrInvalidGeometry}
+ if deviceBytes==0||bootstrapBytes%PageSize!=0||metadataBytes%ExtentSize!=0||bootstrapBytes>deviceBytes||metadataBytes>deviceBytes-bootstrapBytes{return nil,ErrInvalidGeometry}
  a:=&Allocator{deviceBytes:deviceBytes,extents:[]Extent{{0,bootstrapBytes,Metadata},{bootstrapBytes,metadataBytes,Metadata}}}
  if tail:=deviceBytes-bootstrapBytes-metadataBytes;tail>0{a.extents=append(a.extents,Extent{bootstrapBytes+metadataBytes,tail,Free})}
  return a,nil
