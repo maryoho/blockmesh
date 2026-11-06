@@ -46,3 +46,9 @@ func TestQueueManagerServiceRestartFencesGenerations(t *testing.T) {
     if err := m.Destroy(q1.QueueID, "target-a"); err != nil { t.Fatal(err) }
     if _, ok := m.Get(q1.QueueID); ok { t.Fatal("destroyed queue remains visible") }
 }
+
+func TestMmapQueueOffsetFitsSignedOffT(t *testing.T) {
+    off, err := EncodeMmapOffsetChecked(MaxQueueID, MappingPayloadOffset)
+    if err != nil { t.Fatal(err) }
+    if off > uint64(^uint64(0)>>1) { t.Fatalf("mmap offset %#x exceeds signed off_t", off) }
+}

@@ -19,7 +19,7 @@ func EncodeMmapOffset(queueID uint32, localOffset uint64) uint64 {
     return v
 }
 func EncodeMmapOffsetChecked(queueID uint32, localOffset uint64) (uint64, error) {
-    if queueID == 0 || queueID > MaxQueueID { return 0, errors.New("queue ID outside non-zero 20-bit range") }
+    if queueID == 0 || queueID > MaxQueueID { return 0, errors.New("queue ID outside non-zero 19-bit range") }
     if localOffset > MmapLocalMask || localOffset%PageSize != 0 { return 0, errors.New("queue-local mmap offset is unaligned or out of range") }
     return (uint64(queueID) << MmapQueueShift) | localOffset, nil
 }

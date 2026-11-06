@@ -213,7 +213,7 @@ static int bm_open(struct inode *inode, struct file *file)
 	session->id = atomic64_inc_return(&bm_session_generation);
 	if (!session->id)
 		session->id = atomic64_inc_return(&bm_session_generation);
-	session->registry_seen = atomic64_read(&bm_registry_generation);
+	WRITE_ONCE(session->registry_seen, atomic64_read(&bm_registry_generation));
 	file->private_data = session;
 	return 0;
 }
@@ -281,7 +281,7 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 		if (!query.after_queue_id) {
 			struct bm_service_session *session = file->private_data;
-			session->registry_seen = atomic64_read(&bm_registry_generation);
+			WRITE_ONCE(session->registry_seen, atomic64_read(&bm_registry_generation));
 		}
 		index = (unsigned long)query.after_queue_id + 1;
 		mutex_lock(&bm_queues_lock);
@@ -462,7 +462,7 @@ static __poll_t bm_poll(struct file *file, poll_table *wait)
 	if (!file->private_data)
 		return EPOLLERR;
 	poll_wait(file, &bm_poll_wait, wait);
-	if (atomic64_read(&bm_registry_generation) != session->registry_seen)
+	if (atomic64_read(&bm_registry_generation) != READ_ONCE(session->registry_seen))
 		mask |= EPOLLPRI;
 	mutex_lock(&bm_queues_lock);
 	xa_for_each(&bm_queues, id, q) {
@@ -477,7 +477,7 @@ static __poll_t bm_poll(struct file *file, poll_table *wait)
 				mask |= EPOLLIN | EPOLLRDNORM;
 		}
 		mutex_unlock(&q->lock);
-		if (mask)
+		if (mask & (EPOLLIN | EPOLLRDNORM))
 			break;
 	}
 	mutex_unlock(&bm_queues_lock);
