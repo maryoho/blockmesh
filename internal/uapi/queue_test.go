@@ -1,6 +1,6 @@
 package uapi
 import("encoding/binary";"testing")
-func setupFixture()SetupQueue{return SetupQueue{RingOrder:10,QueueGeneration:99,RequestControlOffset:RequestControlOffset,RequestRingOffset:RequestRingOffset,CompletionControlOffset:CompletionControlOffset,CompletionRingOffset:CompletionRingOffset,PayloadOffset:MappingPayloadOffset,MaxBatch:MaxBatch}}
+func setupFixture()SetupQueue{return SetupQueue{RingOrder:10,QueueGeneration:99,RequestControlOffset:RequestControlOffset,RequestRingOffset:RequestRingOffset,CompletionControlOffset:CompletionControlOffset,CompletionRingOffset:CompletionRingOffset,PayloadOffset:EncodeMmapOffset(7,MappingPayloadOffset),QueueID:7,MaxBatch:MaxBatch}}
 func TestQueueLayoutsDoNotOverlapAtEveryOrder(t *testing.T){
  for order:=uint32(MinRingOrder);order<=MaxRingOrder;order++{l,e:=Layout(order);if e!=nil{t.Fatal(e)};if RequestRingOffset+uint64(l.Entries)*RequestSize>CompletionControlOffset{t.Fatalf("request overlap order %d",order)};if CompletionRingOffset+uint64(l.Entries)*CompletionSize>MappingPayloadOffset{t.Fatalf("completion overlap order %d",order)};if l.TotalBytes%PageSize!=0||l.PayloadBytes!=uint64(l.Entries)*MaxBatch*MappingSize{t.Fatalf("bad layout %+v",l)}}
  if _,e:=Layout(MaxRingOrder+1);e==nil{t.Fatal("accepted excessive order")}
@@ -13,4 +13,36 @@ func TestCorrelatorCancelLateCompletionAndReset(t *testing.T){
  if !c.Cancel(1,10)||c.Cancel(1,10){t.Fatal("cancel idempotency violated")};if c.Complete(Completion{RequestID:1,QueueGeneration:10}){t.Fatal("accepted cancelled completion")}
  if e=c.Register(2,10);e!=nil{t.Fatal(e)};if e=c.Reset(11);e!=nil{t.Fatal(e)};if c.Complete(Completion{RequestID:2,QueueGeneration:10}){t.Fatal("accepted stale completion")};if e=c.Register(2,10);e==nil{t.Fatal("accepted stale request")}
  if e=c.Register(2,11);e!=nil{t.Fatal(e)};if !c.Complete(Completion{RequestID:2,QueueGeneration:11})||c.Complete(Completion{RequestID:2,QueueGeneration:11}){t.Fatal("completion not exactly once")}
+}
+
+func TestMmapOffsetsAreQueueScoped(t *testing.T) {
+    a, err := EncodeMmapOffsetChecked(11, RequestRingOffset)
+    if err != nil { t.Fatal(err) }
+    b, err := EncodeMmapOffsetChecked(12, RequestRingOffset)
+    if err != nil { t.Fatal(err) }
+    if a == b { t.Fatal("different queues aliased the same mmap offset") }
+    id, off, err := DecodeMmapOffset(a)
+    if err != nil { t.Fatal(err) }
+    if id != 11 || off != RequestRingOffset { t.Fatalf("decoded (%d,%x)", id, off) }
+    if _, err := EncodeMmapOffsetChecked(0, 0); err == nil { t.Fatal("accepted zero queue ID") }
+    if _, err := EncodeMmapOffsetChecked(1, 1); err == nil { t.Fatal("accepted unaligned offset") }
+}
+func TestQueueManagerServiceRestartFencesGenerations(t *testing.T) {
+    m := NewQueueManager()
+    q1, err := m.Create("target-a", 4); if err != nil { t.Fatal(err) }
+    q2, err := m.Create("target-b", 5); if err != nil { t.Fatal(err) }
+    if q1.QueueID == q2.QueueID { t.Fatal("queue IDs reused") }
+    if err := m.OpenService(100); err != nil { t.Fatal(err) }
+    a, _ := m.Get(q1.QueueID); b, _ := m.Get(q2.QueueID)
+    if !a.Attached || !b.Attached || a.Generation <= q1.Generation || b.Generation <= q2.Generation { t.Fatal("service attach did not advance queue generations") }
+    if err := m.OpenService(101); err == nil { t.Fatal("allowed a second service session") }
+    if err := m.CloseService(100); err != nil { t.Fatal(err) }
+    stale, _ := m.Get(q1.QueueID)
+    if stale.Attached || stale.Generation <= a.Generation { t.Fatal("close did not detach and fence queue") }
+    if err := m.OpenService(101); err != nil { t.Fatal(err) }
+    fresh, _ := m.Get(q1.QueueID)
+    if !fresh.Attached || fresh.Generation <= stale.Generation { t.Fatal("restart did not create a fresh generation") }
+    if err := m.Destroy(q1.QueueID, "target-b"); err == nil { t.Fatal("destroy accepted wrong target owner") }
+    if err := m.Destroy(q1.QueueID, "target-a"); err != nil { t.Fatal(err) }
+    if _, ok := m.Get(q1.QueueID); ok { t.Fatal("destroyed queue remains visible") }
 }

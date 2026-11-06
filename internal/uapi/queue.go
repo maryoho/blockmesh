@@ -47,35 +47,36 @@ type SetupQueue struct {
 	QueueGeneration uint64
 	RequestControlOffset, RequestRingOffset uint64
 	CompletionControlOffset, CompletionRingOffset, PayloadOffset uint64
+	QueueID uint32
 	MaxBatch uint32
 }
 func (s SetupQueue) Validate() error {
 	l,err:=Layout(s.RingOrder); if err!=nil{return err}
-	if s.QueueGeneration==0{return errors.New("queue generation must be non-zero")}
-	if s.RequestControlOffset!=l.RequestControl || s.RequestRingOffset!=l.RequestRing || s.CompletionControlOffset!=l.CompletionControl || s.CompletionRingOffset!=l.CompletionRing || s.PayloadOffset!=l.Payload{return errors.New("kernel returned unexpected mmap offsets")}
+	if s.QueueGeneration==0{return errors.New("queue generation must be non-zero")}; if s.QueueID==0{return errors.New("queue ID must be non-zero")}
+	if s.RequestControlOffset!=EncodeMmapOffset(s.QueueID,l.RequestControl) || s.RequestRingOffset!=EncodeMmapOffset(s.QueueID,l.RequestRing) || s.CompletionControlOffset!=EncodeMmapOffset(s.QueueID,l.CompletionControl) || s.CompletionRingOffset!=EncodeMmapOffset(s.QueueID,l.CompletionRing) || s.PayloadOffset!=EncodeMmapOffset(s.QueueID,l.Payload){return errors.New("kernel returned unexpected mmap offsets")}
 	if s.MaxBatch!=MaxBatch{return errors.New("kernel max batch mismatch")}
 	return nil
 }
 func (s SetupQueue) MarshalBinary() ([]byte,error) {
 	if err:=s.Validate();err!=nil{return nil,err}
 	b:=make([]byte,SetupSize)
-	binary.LittleEndian.PutUint32(b[0:4],SetupSize);binary.LittleEndian.PutUint32(b[4:8],Version)
+	binary.LittleEndian.PutUint32(b[0:4],SetupSize);binary.LittleEndian.PutUint32(b[4:8],uint32(Version))
 	binary.LittleEndian.PutUint32(b[8:12],s.RingOrder);binary.LittleEndian.PutUint32(b[12:16],s.Flags)
 	binary.LittleEndian.PutUint64(b[16:24],s.QueueGeneration)
 	binary.LittleEndian.PutUint64(b[24:32],s.RequestControlOffset);binary.LittleEndian.PutUint64(b[32:40],s.RequestRingOffset)
 	binary.LittleEndian.PutUint64(b[40:48],s.CompletionControlOffset);binary.LittleEndian.PutUint64(b[48:56],s.CompletionRingOffset)
-	binary.LittleEndian.PutUint64(b[56:64],s.PayloadOffset);binary.LittleEndian.PutUint32(b[64:68],s.MaxBatch)
+	binary.LittleEndian.PutUint64(b[56:64],s.PayloadOffset);binary.LittleEndian.PutUint32(b[64:68],s.MaxBatch); binary.LittleEndian.PutUint32(b[68:72],s.QueueID)
 	return b,nil
 }
 func UnmarshalSetupQueue(b []byte)(SetupQueue,error){
 	var s SetupQueue
 	if len(b)!=SetupSize{return s,fmt.Errorf("setup size %d, want %d",len(b),SetupSize)}
-	if binary.LittleEndian.Uint32(b[:4])!=SetupSize||binary.LittleEndian.Uint32(b[4:8])!=Version{return s,errors.New("setup ABI size or version mismatch")}
-	for _,v:=range b[68:80]{if v!=0{return s,errors.New("setup reserved bytes are non-zero")}}
+	if binary.LittleEndian.Uint32(b[:4])!=SetupSize||binary.LittleEndian.Uint32(b[4:8])!=uint32(Version){return s,errors.New("setup ABI size or version mismatch")}
+	for _,v:=range b[72:80]{if v!=0{return s,errors.New("setup reserved bytes are non-zero")}}
 	s.RingOrder=binary.LittleEndian.Uint32(b[8:12]);s.Flags=binary.LittleEndian.Uint32(b[12:16]);s.QueueGeneration=binary.LittleEndian.Uint64(b[16:24])
 	s.RequestControlOffset=binary.LittleEndian.Uint64(b[24:32]);s.RequestRingOffset=binary.LittleEndian.Uint64(b[32:40])
 	s.CompletionControlOffset=binary.LittleEndian.Uint64(b[40:48]);s.CompletionRingOffset=binary.LittleEndian.Uint64(b[48:56])
-	s.PayloadOffset=binary.LittleEndian.Uint64(b[56:64]);s.MaxBatch=binary.LittleEndian.Uint32(b[64:68])
+	s.PayloadOffset=binary.LittleEndian.Uint64(b[56:64]);s.MaxBatch=binary.LittleEndian.Uint32(b[64:68]);s.QueueID=binary.LittleEndian.Uint32(b[68:72])
 	return s,s.Validate()
 }
 
@@ -95,13 +96,13 @@ func UnmarshalCancelRequest(b []byte)(CancelRequest,error){
 type ABIInfo struct{Features uint64}
 func(a ABIInfo)MarshalBinary()[]byte{
 	b:=make([]byte,ABIInfoSize)
-	for i,v:=range []uint32{ABIInfoSize,Version,RequestSize,CompletionSize,MappingSize,RingControlSize,MaxBatch,MaxRingOrder}{binary.LittleEndian.PutUint32(b[i*4:i*4+4],v)}
+	for i,v:=range []uint32{ABIInfoSize,uint32(Version),RequestSize,CompletionSize,MappingSize,RingControlSize,MaxBatch,MaxRingOrder}{binary.LittleEndian.PutUint32(b[i*4:i*4+4],v)}
 	binary.LittleEndian.PutUint64(b[32:40],a.Features);return b
 }
 func UnmarshalABIInfo(b []byte)(ABIInfo,error){
 	var a ABIInfo
 	if len(b)!=ABIInfoSize||binary.LittleEndian.Uint32(b[:4])!=ABIInfoSize{return a,errors.New("ABI info size mismatch")}
-	for i,v:=range []uint32{Version,RequestSize,CompletionSize,MappingSize,RingControlSize,MaxBatch,MaxRingOrder}{if binary.LittleEndian.Uint32(b[(i+1)*4:(i+2)*4])!=v{return a,fmt.Errorf("ABI field %d mismatch",i+1)}}
+	for i,v:=range []uint32{uint32(Version),RequestSize,CompletionSize,MappingSize,RingControlSize,MaxBatch,MaxRingOrder}{if binary.LittleEndian.Uint32(b[(i+1)*4:(i+2)*4])!=v{return a,fmt.Errorf("ABI field %d mismatch",i+1)}}
 	a.Features=binary.LittleEndian.Uint64(b[32:40]);for _,v:=range b[40:64]{if v!=0{return a,errors.New("ABI info reserved bytes are non-zero")}};return a,nil
 }
 
