@@ -257,21 +257,28 @@ func dynamicRecoverPool(id string,c poolConfig)error{
 	if err!=nil{return err}
 	locker:=newSanlock(c)
 	for ag:=uint32(0);ag<sb.Geometry.AGCount;ag++{
-		if _,err=wal.OpenDynamicJournal(metadata,sb,ag);err!=nil{return fmt.Errorf("recover AG %d WAL: %w",ag,err)}
+		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",sb.PoolUUID,ag)
+		committer,e:=wal.NewDynamicSharedCommitter(metadata,sb,ag,locker,resource);if e!=nil{return e}
+		if e=committer.Recover();e!=nil{return fmt.Errorf("recover AG %d WAL: %w",ag,e)}
 	}
 	if metastore.DynamicVolumeAllocatorPresent(metadata,sb){
-		if _,err=metastore.OpenDynamicVolumeAllocator(metadata,sb);errors.Is(err,metastore.ErrDynamicVolumeAllocatorUnformatted){
-			if err=metastore.RecoverDynamicVolumeAllocatorFormat(metadata,sb);err!=nil{return err}
-		}else if err!=nil{return err}
+		volumeAllocator,e:=metastore.OpenDynamicVolumeAllocator(metadata,sb)
+		if errors.Is(e,metastore.ErrDynamicVolumeAllocatorUnformatted){
+			if e=metastore.RecoverDynamicVolumeAllocatorFormat(metadata,sb);e!=nil{return e}
+			volumeAllocator,e=metastore.OpenDynamicVolumeAllocator(metadata,sb)
+		}
+		if e!=nil{return e}
+		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",sb.PoolUUID,0)
+		committer,e:=wal.NewDynamicSharedCommitter(metadata,sb,0,locker,resource);if e!=nil{return e}
+		if e=volumeAllocator.ReconcileRegion(committer);e!=nil{return fmt.Errorf("reconcile Reserved allocator geometry: %w",e)}
 	}
-	_ = locker
+	if !owner.Valid(){return errors.New("Owner lease lost during Pool recovery")}
 	out:=dynamicPoolStatus{PoolID:id,PoolUUID:fmt.Sprintf("%x",sb.PoolUUID),ViewGeneration:viewGeneration,
 		SuperblockGeneration:sb.Generation,MetadataBytes:sb.Geometry.MetadataBytes,DataBytes:sb.Geometry.DataBytes,
 		AGCount:sb.Geometry.AGCount,AGCapacity:sb.Geometry.AGCapacity,WALSegmentBytes:sb.Geometry.WALSegmentBytes,
 		ReservedAllocator:metastore.DynamicVolumeAllocatorPresent(metadata,sb)}
 	return json.NewEncoder(os.Stdout).Encode(out)
 }
-
 func rescanPool(id string,c poolConfig)error{
 	dev,store,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
 	actual,err:=store.Rescan();if err!=nil{return err}
