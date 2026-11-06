@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Node-wide /dev/blockmesh endpoint and per-DM-Target queue registry. */
 #include <linux/atomic.h>
+#include <linux/bio.h>
+#include <linux/blkdev.h>
+#include <linux/list.h>
 #include <linux/byteorder/generic.h>
 #include <linux/mm.h>
 #include <linux/compat.h>
@@ -32,6 +35,13 @@ struct bm_service_session {
 	u64 id;
 	u64 registry_seen;
 };
+struct bm_pending {
+	struct list_head list;
+	struct bio *bio;
+	struct block_device *bdev;
+	u64 request_id, generation, logical_start, base_sector, sector_offset, owner_epoch;
+	u32 block_count;
+};
 struct bm_queue_mem {
 	struct kref ref;
 	void *area;
@@ -40,6 +50,8 @@ struct bm_queue_mem {
 struct bm_queue {
 	struct kref ref; /* registry reference plus transient ioctl/mmap lookups */
 	struct mutex lock;
+	struct list_head pending;
+	u32 pending_count;
 	wait_queue_head_t wait;
 	u32 id;
 	u32 ring_order;
@@ -56,6 +68,7 @@ static DECLARE_WAIT_QUEUE_HEAD(bm_poll_wait);
 static atomic_t bm_service_open = ATOMIC_INIT(0);
 static atomic64_t bm_session_generation = ATOMIC64_INIT(0);
 static atomic64_t bm_registry_generation = ATOMIC64_INIT(1);
+static atomic64_t bm_next_request_id = ATOMIC64_INIT(0);
 static u32 bm_next_queue_id = 1; /* monotonic; removed IDs are never reused */
 
 static void bm_mem_release(struct kref *ref)
@@ -109,6 +122,281 @@ static void bm_init_ring_ctrl(struct bm_queue *q, u64 offset, u32 entries)
 	WRITE_ONCE(ctrl->generation, cpu_to_le64(q->generation));
 }
 
+
+static void bm_abort_pending_list(struct list_head *list)
+{
+	struct bm_pending *p, *tmp;
+	list_for_each_entry_safe(p, tmp, list, list) {
+		list_del(&p->list);
+		bio_io_error(p->bio);
+		kfree(p);
+	}
+}
+static void bm_abort_queue_pending(struct bm_queue *q)
+{
+	LIST_HEAD(aborted);
+	mutex_lock(&q->lock);
+	list_splice_init(&q->pending, &aborted);
+	q->pending_count = 0;
+	mutex_unlock(&q->lock);
+	bm_abort_pending_list(&aborted);
+}
+int bm_queue_submit(u32 queue_id, u64 target_cookie,
+		    struct bm_uapi_request *request, struct bio *bio,
+		    struct block_device *bdev, u64 base_sector, u64 sector_offset,
+		    u32 block_count)
+{
+	struct bm_queue *q;
+	struct bm_uapi_ring_ctrl *ctrl;
+	struct bm_uapi_request *slot;
+	struct bm_pending *pending;
+	u32 head, tail, entries;
+	u64 request_id;
+	int ret = 0;
+
+	if (!request || !bio || !bdev)
+		return -EINVAL;
+	pending = kzalloc(sizeof(*pending), GFP_NOIO);
+	if (!pending)
+		return -ENOMEM;
+	request_id = atomic64_inc_return(&bm_next_request_id);
+	if (!request_id) {
+		kfree(pending);
+		return -EOVERFLOW;
+	}
+	q = bm_queue_lookup(queue_id);
+	if (!q) {
+		kfree(pending);
+		return -ENODEV;
+	}
+	mutex_lock(&q->lock);
+	if (q->dead || q->target_cookie != target_cookie)
+		ret = -ESTALE;
+	else if (!q->attached || !q->mem)
+		ret = -ENOTCONN;
+	else {
+		entries = 1U << q->ring_order;
+		ctrl = q->mem->area + BM_UAPI_MMAP_REQUEST_CTRL;
+		head = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->head));
+		tail = le32_to_cpu((__force __le32)READ_ONCE(ctrl->tail));
+		if ((u32)(tail - head) > entries)
+			ret = -EPROTO;
+		else if ((u32)(tail - head) == entries || q->pending_count >= entries)
+			ret = -EAGAIN;
+		else {
+			request->version = cpu_to_le16(BM_UAPI_VERSION);
+			request->size = cpu_to_le16(BM_UAPI_REQUEST_SIZE);
+			request->request_id = cpu_to_le64(request_id);
+			request->queue_generation = cpu_to_le64(q->generation);
+			pending->bio = bio;
+			pending->bdev = bdev;
+			pending->request_id = request_id;
+			pending->generation = q->generation;
+			pending->logical_start = le64_to_cpu(request->logical_start);
+			pending->base_sector = base_sector;
+			pending->sector_offset = sector_offset;
+			pending->owner_epoch = le64_to_cpu(request->owner_epoch);
+			pending->block_count = block_count;
+			list_add_tail(&pending->list, &q->pending);
+			q->pending_count++;
+			slot = q->mem->area + BM_UAPI_MMAP_REQUEST_RING +
+				(tail & (entries - 1)) * BM_UAPI_REQUEST_SIZE;
+			memcpy(slot, request, sizeof(*request));
+			smp_store_release((u32 *)&ctrl->tail,
+					  (__force u32)cpu_to_le32(tail + 1));
+			pending = NULL;
+		}
+	}
+	mutex_unlock(&q->lock);
+	if (ret == -EPROTO)
+		bm_abort_queue_pending(q);
+	kref_put(&q->ref, bm_queue_release);
+	kfree(pending);
+	if (!ret)
+		wake_up_all(&bm_poll_wait);
+	return ret;
+}
+static struct bm_pending *bm_take_pending(struct bm_queue *q, u64 request_id,
+					 u64 generation)
+{
+	struct bm_pending *p;
+	list_for_each_entry(p, &q->pending, list) {
+		if (p->request_id == request_id && p->generation == generation) {
+			list_del(&p->list);
+			if (q->pending_count)
+				q->pending_count--;
+			return p;
+		}
+	}
+	return NULL;
+}
+static void bm_finish_pending(struct bm_pending *p,
+			      const struct bm_uapi_completion *completion,
+			      const struct bm_uapi_mapping *mapping)
+{
+	struct bio *bio = p->bio;
+	u16 code = le16_to_cpu(completion->code);
+	u64 phys_sector, phys_block, map_logical, map_physical;
+	u32 map_count;
+
+	if (code != BM_UAPI_C_OK ||
+	    le64_to_cpu(completion->owner_epoch) != p->owner_epoch)
+		goto io_error;
+	if (!p->block_count) {
+		if (le32_to_cpu(completion->mapping_count) ||
+		    le32_to_cpu(completion->payload_bytes))
+			goto io_error;
+		bio_set_dev(bio, p->bdev);
+		bio->bi_iter.bi_sector = p->base_sector;
+		submit_bio_noacct(bio);
+		kfree(p);
+		return;
+	}
+	if (!mapping || le32_to_cpu(completion->mapping_count) != 1 ||
+	    le32_to_cpu(completion->payload_bytes) != BM_UAPI_MAPPING_SIZE)
+		goto io_error;
+	map_logical = le64_to_cpu(mapping->logical_block);
+	map_physical = le64_to_cpu(mapping->physical_block);
+	map_count = le32_to_cpu(mapping->block_count);
+	if (le32_to_cpu(mapping->reserved) || !map_count ||
+	    map_logical > U64_MAX - map_count ||
+	    map_physical > U64_MAX - map_count ||
+	    p->logical_start < map_logical ||
+	    p->logical_start > U64_MAX - p->block_count ||
+	    p->logical_start + p->block_count > map_logical + map_count)
+		goto io_error;
+	phys_block = map_physical + (p->logical_start - map_logical);
+	if (phys_block > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS))
+		goto io_error;
+	if (p->base_sector > U64_MAX - p->sector_offset ||
+	    phys_block > div_u64(U64_MAX - p->base_sector - p->sector_offset, BM_UAPI_BLOCK_SECTORS))
+		goto io_error;
+	phys_sector = p->base_sector + phys_block * BM_UAPI_BLOCK_SECTORS + p->sector_offset;
+	if (phys_sector > bdev_nr_sectors(p->bdev) ||
+	    bio_sectors(bio) > bdev_nr_sectors(p->bdev) - phys_sector)
+		goto io_error;
+	bio_set_dev(bio, p->bdev);
+	bio->bi_iter.bi_sector = phys_sector;
+	submit_bio_noacct(bio);
+	kfree(p);
+	return;
+io_error:
+	bio_io_error(bio);
+	kfree(p);
+}
+static int bm_consume_completions(struct bm_queue *q)
+{
+	struct bm_uapi_ring_ctrl *ctrl;
+	u32 head, tail, entries, mask;
+	u64 generation;
+	int consumed = 0;
+
+	mutex_lock(&q->lock);
+	if (!q->attached || !q->mem || q->dead) {
+		mutex_unlock(&q->lock);
+		return -ENOTCONN;
+	}
+	entries = 1U << q->ring_order;
+	mask = entries - 1;
+	generation = q->generation;
+	ctrl = q->mem->area + BM_UAPI_MMAP_COMP_CTRL;
+	head = le32_to_cpu((__force __le32)READ_ONCE(ctrl->head));
+	tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
+	if ((u32)(tail - head) > entries) {
+		mutex_unlock(&q->lock);
+		bm_abort_queue_pending(q);
+		return -EPROTO;
+	}
+	while (head != tail) {
+		struct bm_uapi_completion c;
+		struct bm_uapi_mapping mapping_copy, *mapping = NULL;
+		struct bm_pending *p;
+		u32 slot = head & mask, payload_offset, payload_bytes;
+		struct bm_uapi_completion *src;
+
+		src = q->mem->area + BM_UAPI_MMAP_COMP_RING +
+			slot * BM_UAPI_COMPLETION_SIZE;
+		memcpy(&c, src, sizeof(c));
+		payload_offset = le32_to_cpu(c.payload_offset);
+		payload_bytes = le32_to_cpu(c.payload_bytes);
+		if (le16_to_cpu(c.version) != BM_UAPI_VERSION ||
+		    le16_to_cpu(c.size) != BM_UAPI_COMPLETION_SIZE ||
+		    le64_to_cpu(c.queue_generation) != generation ||
+		    !le64_to_cpu(c.request_id) ||
+		    le32_to_cpu(c.reserved[0]) || le32_to_cpu(c.reserved[1]) ||
+		    le32_to_cpu(c.reserved[2]) || le16_to_cpu(c.flags) ||
+		    le16_to_cpu(c.code) > BM_UAPI_C_INTERNAL) {
+			p = bm_take_pending(q, le64_to_cpu(c.request_id), generation);
+			head++;
+			smp_store_release((u32 *)&ctrl->head,
+					  (__force u32)cpu_to_le32(head));
+			mutex_unlock(&q->lock);
+			if (p) { bio_io_error(p->bio); kfree(p); }
+			consumed++;
+			mutex_lock(&q->lock);
+			if (!q->attached || !q->mem || q->generation != generation)
+				break;
+			ctrl = q->mem->area + BM_UAPI_MMAP_COMP_CTRL;
+			tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
+			continue;
+		}
+		if (payload_bytes) {
+			u32 expected = slot * BM_UAPI_MAX_BATCH * BM_UAPI_MAPPING_SIZE;
+			u64 end = (u64)payload_offset + payload_bytes;
+			if (payload_offset != expected ||
+			    le32_to_cpu(c.mapping_count) != 1 ||
+			    payload_bytes != BM_UAPI_MAPPING_SIZE ||
+			    end > (u64)entries * BM_UAPI_MAX_BATCH * BM_UAPI_MAPPING_SIZE) {
+				p = bm_take_pending(q, le64_to_cpu(c.request_id), generation);
+				head++;
+				smp_store_release((u32 *)&ctrl->head,
+						  (__force u32)cpu_to_le32(head));
+				mutex_unlock(&q->lock);
+				if (p) { bio_io_error(p->bio); kfree(p); }
+				consumed++;
+				mutex_lock(&q->lock);
+				if (!q->attached || !q->mem || q->generation != generation)
+					break;
+				ctrl = q->mem->area + BM_UAPI_MMAP_COMP_CTRL;
+				tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
+				continue;
+			}
+			memcpy(&mapping_copy, q->mem->area + BM_UAPI_MMAP_PAYLOAD +
+			       payload_offset, sizeof(mapping_copy));
+			mapping = &mapping_copy;
+		} else if (le32_to_cpu(c.mapping_count) != 0 || payload_offset != 0) {
+			p = bm_take_pending(q, le64_to_cpu(c.request_id), generation);
+			head++;
+			smp_store_release((u32 *)&ctrl->head,
+					  (__force u32)cpu_to_le32(head));
+			mutex_unlock(&q->lock);
+			if (p) { bio_io_error(p->bio); kfree(p); }
+			consumed++;
+			mutex_lock(&q->lock);
+			if (!q->attached || !q->mem || q->generation != generation)
+				break;
+			ctrl = q->mem->area + BM_UAPI_MMAP_COMP_CTRL;
+			tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
+			continue;
+		}
+		p = bm_take_pending(q, le64_to_cpu(c.request_id), generation);
+		head++;
+		smp_store_release((u32 *)&ctrl->head,
+				  (__force u32)cpu_to_le32(head));
+		mutex_unlock(&q->lock);
+		if (p)
+			bm_finish_pending(p, &c, mapping);
+		consumed++;
+		mutex_lock(&q->lock);
+		if (!q->attached || !q->mem || q->generation != generation)
+			break;
+		ctrl = q->mem->area + BM_UAPI_MMAP_COMP_CTRL;
+		tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
+	}
+	mutex_unlock(&q->lock);
+	return consumed;
+}
+
 int bm_queue_create(u32 *queue_id, u64 *target_cookie)
 {
 	struct bm_queue *q;
@@ -120,6 +408,7 @@ int bm_queue_create(u32 *queue_id, u64 *target_cookie)
 		return -ENOMEM;
 	kref_init(&q->ref); /* xarray owns this reference */
 	mutex_init(&q->lock);
+	INIT_LIST_HEAD(&q->pending);
 	init_waitqueue_head(&q->wait);
 	q->generation = 1;
 	do {
@@ -165,6 +454,7 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 	q->mem = NULL;
 	mutex_unlock(&q->lock);
 	mutex_unlock(&bm_queues_lock);
+	bm_abort_queue_pending(q);
 	bm_mem_put(old_mem);
 	wake_up_all(&q->wait);
 	atomic64_inc(&bm_registry_generation);
@@ -236,6 +526,7 @@ static int bm_release_file(struct inode *inode, struct file *file)
 		q->mem = NULL;
 		mutex_unlock(&q->lock);
 		bm_mem_put(old_mem);
+		bm_abort_queue_pending(q);
 		wake_up_all(&q->wait);
 	}
 	mutex_unlock(&bm_queues_lock);
@@ -266,7 +557,7 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		info.ring_ctrl_size = BM_UAPI_RING_CTRL_SIZE;
 		info.max_batch = BM_UAPI_MAX_BATCH;
 		info.max_ring_order = BM_UAPI_MAX_RING_ORDER;
-		info.features = 0; /* No request submission/cancellation feature yet. */
+		info.features = BM_UAPI_FEATURE_REQUEST_RING | BM_UAPI_FEATURE_COMPLETION_KICK;
 		memset(info.reserved, 0, sizeof(info.reserved));
 		return copy_to_user(up, &info, sizeof(info)) ? -EFAULT : 0;
 	}
@@ -363,6 +654,7 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 	case BM_IOC_RESET_QUEUE: {
 		u64 raw;
+		LIST_HEAD(aborted);
 		struct bm_queue *q;
 		if (copy_from_user(&raw, up, sizeof(raw)))
 			return -EFAULT;
@@ -383,17 +675,36 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EOVERFLOW;
 		}
 		q->generation++;
+		list_splice_init(&q->pending, &aborted);
+		q->pending_count = 0;
 		memset(q->mem->area, 0, q->mem->bytes);
 		bm_init_ring_ctrl(q, BM_UAPI_MMAP_REQUEST_CTRL, 1U << q->ring_order);
 		bm_init_ring_ctrl(q, BM_UAPI_MMAP_COMP_CTRL, 1U << q->ring_order);
 		mutex_unlock(&q->lock);
+		bm_abort_pending_list(&aborted);
 		wake_up_all(&q->wait);
 		wake_up_all(&bm_poll_wait);
 		kref_put(&q->ref, bm_queue_release);
 		return 0;
 	}
+
+	case BM_IOC_KICK: {
+		u32 queue_id;
+		struct bm_queue *q;
+		int ret;
+		if (copy_from_user(&queue_id, up, sizeof(queue_id)))
+			return -EFAULT;
+		if (!queue_id || queue_id > BM_UAPI_MAX_QUEUE_ID)
+			return -EINVAL;
+		q = bm_queue_lookup(queue_id);
+		if (!q)
+			return -ENOENT;
+		ret = bm_consume_completions(q);
+		kref_put(&q->ref, bm_queue_release);
+		return ret < 0 ? ret : 0;
+	}
 	case BM_IOC_CANCEL:
-		return -EOPNOTSUPP; /* Request registry is introduced with ring submission. */
+		return -EOPNOTSUPP; /* Cancellation state machine is a later increment. */
 	default:
 		return -ENOTTY;
 	}
@@ -471,7 +782,7 @@ static __poll_t bm_poll(struct file *file, poll_table *wait)
 		mutex_lock(&q->lock);
 		if (q->attached && !q->dead && q->mem) {
 			ctrl = q->mem->area + BM_UAPI_MMAP_REQUEST_CTRL;
-			head = le32_to_cpu((__force __le32)READ_ONCE(ctrl->head));
+			head = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->head));
 			tail = le32_to_cpu((__force __le32)READ_ONCE(ctrl->tail));
 			if (head != tail)
 				mask |= EPOLLIN | EPOLLRDNORM;

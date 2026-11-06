@@ -24,6 +24,9 @@
 #define BM_UAPI_C_FENCED 6U
 #define BM_UAPI_C_INVALID 7U
 #define BM_UAPI_C_INTERNAL 8U
+#define BM_UAPI_BLOCK_SECTORS 8192U /* 4MiB allocator block */
+#define BM_UAPI_FEATURE_REQUEST_RING (1ULL << 0)
+#define BM_UAPI_FEATURE_COMPLETION_KICK (1ULL << 1)
 #define BM_UAPI_MMAP_REQUEST_CTRL 0x00000000ULL
 #define BM_UAPI_MMAP_REQUEST_RING 0x00010000ULL
 #define BM_UAPI_MMAP_COMP_CTRL 0x00040000ULL
@@ -84,4 +87,5 @@ struct bm_uapi_abi_info {
 #define BM_IOC_RESET_QUEUE _IOW(BM_IOC_MAGIC, 0x02, __u64)
 #define BM_IOC_CANCEL _IOW(BM_IOC_MAGIC, 0x03, struct bm_uapi_cancel)
 #define BM_IOC_NEXT_QUEUE _IOWR(BM_IOC_MAGIC, 0x04, struct bm_uapi_queue_query)
+#define BM_IOC_KICK _IOW(BM_IOC_MAGIC, 0x05, __u32)
 #endif

@@ -16,6 +16,8 @@ const (
 	CompletionSize = 64
 	MappingSize = 24
 	RingControlSize = 64
+	FeatureRequestRing uint64 = 1 << 0
+	FeatureCompletionKick uint64 = 1 << 1
 )
 type Operation uint16
 const (
@@ -24,6 +26,9 @@ const (
 	OpDiscard Operation = 3
 	OpFlush Operation = 4
 )
+// Linux _IOW('B', 0x05, uint32) for BM_IOC_KICK.
+const IoctlKick uint32 = (1 << 30) | (4 << 16) | ('B' << 8) | 0x05
+
 type ResultCode uint16
 const (
 	CodeOK ResultCode = iota
