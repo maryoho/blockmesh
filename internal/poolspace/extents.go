@@ -1,7 +1,6 @@
 package poolspace
 
 import (
- "errors"
  "fmt"
  "sort"
 )
