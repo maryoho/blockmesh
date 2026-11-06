@@ -81,15 +81,15 @@ type DynamicVolumeAllocator struct {
 }
 
 func dynamicReservedGeometry(sb format.DynamicSuperblock) (dynamicReservedHeader,uint64,error) {
-	if err:=sb.Validate();err!=nil{return dynamicReservedHeader{},0,err}
+	if err:=sb.Validate();err!=nil{return dynamicReservedHeader{},0,fmt.Errorf("invalid BMPOOL03 geometry for Reserved allocator: %w",err)}
 	g:=sb.Geometry
 	start:=g.ReservedOffset/format.PageSize
 	pages:=(g.MetadataBytes-g.ReservedOffset)/format.PageSize
 	bitmapPages:=(pages+uint64(format.PageSize)*8-1)/(uint64(format.PageSize)*8)
 	h:=dynamicReservedHeader{Generation:1,PoolUUID:sb.PoolUUID,RegionStart:start,RegionPages:pages,
 		BitmapPages:bitmapPages,AllocStart:2+bitmapPages}
-	if _,err:=h.encode();err!=nil{return h,0,err}
-	if h.AllocStart>=pages{return h,0,ErrGeometry}
+	if _,err:=h.encode();err!=nil{return h,0,fmt.Errorf("invalid Reserved allocator header: regionPages=%d bitmapPages=%d allocStart=%d: %w",pages,bitmapPages,h.AllocStart,err)}
+	if h.AllocStart>=pages{return h,0,fmt.Errorf("Reserved region has %d pages, allocator needs at least %d: %w",pages,h.AllocStart+1,ErrGeometry)}
 	return h,bitmapPages,nil
 }
 
@@ -99,7 +99,7 @@ func dynamicReservedGeometry(sb format.DynamicSuperblock) (dynamicReservedHeader
 func FormatDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) error {
 	if dev==nil{return errors.New("nil BMPOOL03 MetadataView")}
 	h,bitmapPages,err:=dynamicReservedGeometry(sb);if err!=nil{return err}
-	if devSize,ok:=dev.(interface{Size()int64});ok&&(devSize.Size()<0||uint64(devSize.Size())<sb.Geometry.MetadataBytes){return ErrGeometry}
+	if devSize,ok:=dev.(interface{Size()int64});ok&&(devSize.Size()<0||uint64(devSize.Size())<sb.Geometry.MetadataBytes){return fmt.Errorf("MetadataView size %d is smaller than geometry %d: %w",devSize.Size(),sb.Geometry.MetadataBytes,ErrGeometry)}
 	off:=h.RegionStart*format.PageSize
 	first:=make([]byte,format.PageSize)
 	if err=readFullAt(dev,first,int64(off));err!=nil{return err}
