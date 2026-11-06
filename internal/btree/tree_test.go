@@ -562,6 +562,10 @@ func TestPersistentTreePublishesExternalArenaPageWithIndexAtomically(t *testing.
 	if stats:=tree.ArenaStats();stats.ReservedPages!=0||stats.LivePages!=2 {
 		t.Fatalf("external page and COW page not transitioned to Live: %+v",stats)
 	}
+	if got,readErr:=tree.store.ReadPage(recordID);readErr!=nil||got.Type!=0x100||string(got.Payload)!="external-record" {
+		raw:=make([]byte,metastore.PageSize);_,_=dev.ReadAt(raw,int64(recordID*metastore.PageSize))
+		t.Fatalf("external page unreadable immediately after commit: page=%+v err=%v raw=%x",got,readErr,raw[:48])
+	}
 	// A later COW update must retain the external page as Live.
 	if err=tree.Put(7,70);err!=nil {t.Fatal(err)}
 	if stats:=tree.ArenaStats();stats.LivePages<3 {t.Fatalf("external page was lost during later COW: %+v",stats)}
