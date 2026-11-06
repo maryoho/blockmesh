@@ -85,7 +85,6 @@ func loadConfig(dir,id string)(poolConfig,error){
 	b,err:=os.ReadFile(path);if err!=nil{return c,fmt.Errorf("read Pool config %s: %w",path,err)}
 	if err=json.Unmarshal(b,&c);err!=nil{return c,fmt.Errorf("decode Pool config: %w",err)}
 	if c.DevicePath==""||c.Lockspace==""||c.LockDevice==""||c.LockOffsetBytes==0{return c,errors.New("Pool config requires device_path, lockspace, lock_device and non-zero lock_offset_bytes")}
-	if c.LogicalSectorBytes==0{c.LogicalSectorBytes=512}
 	if c.MetadataUsageMaxAgeSeconds<=0{c.MetadataUsageMaxAgeSeconds=3600}
 	return c,nil
 }

@@ -127,6 +127,29 @@ func TestCommittedBootstrapMapCorruptionFailsClosed(t *testing.T){
 	if _,err:=OpenBootstrap(f);!errors.Is(err,ErrBootstrapWALCorrupt){t.Fatalf("expected committed root corruption to fail closed, got %v",err)}
 }
 
+func TestBootstrapOwnerEpochAdvances(t *testing.T){
+ f,s:=newSparsePool(t);defer f.Close()
+ attachBootstrapGuards(t,s,&testBootstrapOwner{epoch:1})
+ if _,err:=s.ExpandMetadata(1<<30,1<<30);err!=nil{t.Fatal(err)}
+ next,err:=OpenBootstrap(f);if err!=nil{t.Fatal(err)}
+ attachBootstrapGuards(t,next,&testBootstrapOwner{epoch:2})
+ if _,err=next.ExpandMetadata(1<<30,1<<30);err!=nil{t.Fatal(err)}
+ final,err:=OpenBootstrap(f);if err!=nil{t.Fatal(err)}
+ if final.Record().OwnerEpoch!=2||final.Record().Generation!=3{t.Fatalf("Owner epoch/generation not advanced: %+v",final.Record())}
+}
+
+type logicalSectorDevice struct{device.Device;sector int}
+func(d logicalSectorDevice)LogicalSectorSize()int{return d.sector}
+func TestBootstrapValidatesLogicalSectorGeometry(t *testing.T){
+ f,err:=device.OpenFile(t.TempDir()+"/sector.img");if err!=nil{t.Fatal(err)};defer f.Close()
+ if _,err=f.WriteAt([]byte{0},(2<<40)-1);err!=nil{t.Fatal(err)}
+ d:=logicalSectorDevice{Device:f,sector:4096}
+ if _,err=FormatBootstrap(d,64,512);err==nil{t.Fatal("expected configured sector mismatch")}
+ s,err:=FormatBootstrap(d,64,4096);if err!=nil{t.Fatal(err)}
+ if s.Record().LogicalSectorBytes!=4096{t.Fatalf("sector size=%d",s.Record().LogicalSectorBytes)}
+ if _,err=OpenBootstrap(logicalSectorDevice{Device:f,sector:512});err==nil{t.Fatal("expected persisted sector mismatch")}
+}
+
 func TestBootstrapRejectsLegacyFormat(t *testing.T){
 	d,err:=device.OpenFile(t.TempDir()+"/legacy.img");if err!=nil{t.Fatal(err)};defer d.Close()
 	page:=make([]byte,PageSize);binaryPutUint64(page,0x424D504F4F4C3032)

@@ -71,7 +71,7 @@ func (r BootstrapRecord) encode() ([]byte,error) {
 		(r.ExtentMapOffset!=extentMapSlotA && r.ExtentMapOffset!=extentMapSlotA+extentMapSlotSize) ||
 		r.ExtentMapBytes==0 || r.ExtentMapBytes>extentMapSlotSize ||
 		r.LogicalSectorBytes<512 || r.LogicalSectorBytes>65536 ||
-		r.LogicalSectorBytes&(r.LogicalSectorBytes-1)!=0 {
+		r.LogicalSectorBytes&(r.LogicalSectorBytes-1)!=0 || r.DeviceBytes%uint64(r.LogicalSectorBytes)!=0 {
 		return nil,ErrInvalidGeometry
 	}
 	b:=make([]byte,PageSize)
@@ -87,6 +87,7 @@ func (r BootstrapRecord) encode() ([]byte,error) {
 	binary.LittleEndian.PutUint64(b[72:80],r.ExtentMapBytes)
 	binary.LittleEndian.PutUint64(b[80:88],r.ExtentMapGeneration)
 	binary.LittleEndian.PutUint32(b[88:92],r.LogicalSectorBytes)
+	binary.LittleEndian.PutUint64(b[96:104],r.OwnerEpoch)
 	binary.LittleEndian.PutUint64(b[96:104],r.OwnerEpoch)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],0)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],crc32.Checksum(b,crc32.MakeTable(crc32.Castagnoli)))
@@ -110,6 +111,7 @@ func decodeBootstrap(b []byte,slot uint64)(BootstrapRecord,error){
 	r.ExtentMapBytes=binary.LittleEndian.Uint64(b[72:80])
 	r.ExtentMapGeneration=binary.LittleEndian.Uint64(b[80:88])
 	r.LogicalSectorBytes=binary.LittleEndian.Uint32(b[88:92])
+	r.OwnerEpoch=binary.LittleEndian.Uint64(b[96:104])
 	r.OwnerEpoch=binary.LittleEndian.Uint64(b[96:104])
 	r.Slot=slot
  for _,v:=range b[92:96]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
@@ -147,7 +149,13 @@ func loadExtentMap(dev device.Device,r BootstrapRecord)(ExtentMap,error){
 func FormatBootstrap(dev device.Device,volumeSlots uint32,logicalSectorBytes uint32)(*BootstrapStore,error){
 	if dev==nil||dev.Size()<=0{return nil,ErrInvalidGeometry}
 	deviceBytes:=uint64(dev.Size())
-	if logicalSectorBytes==0{logicalSectorBytes=512}
+ if block,ok:=dev.(interface{LogicalSectorSize()int});ok{
+  actual:=block.LogicalSectorSize()
+  if actual<=0{return nil,ErrInvalidGeometry}
+  if logicalSectorBytes!=0&&logicalSectorBytes!=uint32(actual){return nil,fmt.Errorf("configured logical sector size %d differs from device %d",logicalSectorBytes,actual)}
+  logicalSectorBytes=uint32(actual)
+ }
+ if logicalSectorBytes==0{logicalSectorBytes=512}
 	if logicalSectorBytes<512||logicalSectorBytes>65536||logicalSectorBytes&(logicalSectorBytes-1)!=0||deviceBytes%uint64(logicalSectorBytes)!=0{return nil,ErrInvalidGeometry}
 	for _,off:=range []uint64{BootstrapSlotA,BootstrapSlotB}{
 		p:=make([]byte,PageSize)
@@ -199,6 +207,7 @@ func OpenBootstrap(dev device.Device)(*BootstrapStore,error){
 		if c.r.Generation>best.r.Generation{best=c}
 	}
 	if uint64(dev.Size())<best.r.DeviceBytes{return nil,errors.New("backing device is smaller than persisted Pool geometry; refusing shrink")}
+ if block,ok:=dev.(interface{LogicalSectorSize()int});ok&&uint32(block.LogicalSectorSize())!=best.r.LogicalSectorBytes{return nil,errors.New("backing device logical sector size differs from persisted Pool geometry")}
 	a,err:=allocatorFromMap(best.m);if err!=nil{return nil,err}
 	return &BootstrapStore{dev:dev,record:best.r,allocator:a},nil
 }
@@ -226,6 +235,15 @@ func(s *BootstrapStore)OpenExtentView(index int)(*device.Range,error){
 func(s *BootstrapStore)SetCommitLocker(l BootstrapLocker)error{
 	if s==nil||l==nil||!l.Distributed(){return errors.New("a distributed SAN Bootstrap locker is required")}
 	s.mu.Lock();defer s.mu.Unlock();s.locker=l;return nil
+}
+
+// SetOwnerLease binds metadata publication to the current fenced SAN Owner.
+func(s *BootstrapStore)SetOwnerLease(owner BootstrapOwnerLease)error{
+ if s==nil||owner==nil||!owner.Valid()||owner.Epoch()==0{return errors.New("a live fenced Pool Owner lease with non-zero epoch is required")}
+ s.mu.Lock();defer s.mu.Unlock()
+ if owner.Epoch()<s.record.OwnerEpoch{return errors.New("Pool Owner lease epoch is older than Bootstrap OwnerEpoch")}
+ s.owner=owner
+ return nil
 }
 
 // SetOwnerLease binds metadata publication to the current fenced SAN Owner.
@@ -304,6 +322,7 @@ func(s *BootstrapStore)Rescan()(uint64,error){
 	actual:=uint64(s.dev.Size())
 	if r,ok:=s.dev.(interface{Rescan()(uint64,error)});ok{var err error;actual,err=r.Rescan();if err!=nil{return s.record.DeviceBytes,err}}
 	if actual<s.record.DeviceBytes{return s.record.DeviceBytes,fmt.Errorf("device shrink from %d to %d is not supported",s.record.DeviceBytes,actual)}
+ if block,ok:=s.dev.(interface{LogicalSectorSize()int});ok&&uint32(block.LogicalSectorSize())!=s.record.LogicalSectorBytes{return s.record.DeviceBytes,errors.New("logical sector size changed; refusing Pool rescan")}
 	if actual==s.record.DeviceBytes{return actual,nil}
 	next:=&Allocator{deviceBytes:s.allocator.deviceBytes,extents:s.allocator.Extents()}
 	if err:=next.Rescan(actual);err!=nil{return s.record.DeviceBytes,err}
