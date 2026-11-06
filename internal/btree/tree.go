@@ -322,7 +322,7 @@ func (t *Tree) putBatchWithArenaPages(updates []Item, arenaPages []metastore.Pag
 			root=&cowNode{level:roots[0].level+1,dirty:true,children:children}
 		}
 	}
-	if !changed && len(extra)==0 { return nil }
+	if !changed && len(extra)==0 && len(arenaPages)==0 { return nil }
 	if root==nil && len(extra)>0 { root=nil }
 	return t.publishCOWWithReservedPages(root,next,arenaPages,extra,reservation)
 }

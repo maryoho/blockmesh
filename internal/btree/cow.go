@@ -486,6 +486,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   rootID:=metastore.NoPage;if root!=nil {rootID=root.id}
   var newPages []uint64;if root!=nil {newPages=collectCowPages(root)}
   newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
+  newPages=append(newPages,t.externalPages...)
   var err error
   reservation:=supplied
   if len(arenaPages)>0 {
@@ -499,8 +500,10 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
     if len(ids)!=len(arenaPages) {return metastore.ErrInvalidPageSet}
     for i:=range arenaPages {if arenaPages[i].ID!=ids[i] {return metastore.ErrInvalidPageSet}}
    }
+   committed:=false
+   defer func(){if !committed {_=reservation.Abort()}}()
    for _,page:=range arenaPages {
-    image,e:=metastore.EncodePageImage(page);if e!=nil {if supplied==nil {_=reservation.Abort()};return e}
+    image,e:=metastore.EncodePageImage(page);if e!=nil {return e}
     extra=append(extra,metastore.PageImage{Offset:page.ID*metastore.PageSize,Data:image})
     newPages=append(newPages,page.ID)
    }
@@ -508,8 +511,8 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   if t.persistentArena!=nil {
    err=t.persistentArena.CommitPagesAndPublishWithImages(reservation,nil,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages),extra)
   } else {err=t.store.CommitPagesAndPublishWithImages(nil,extra,rootID,sequence,t.journal)}
-  if err!=nil && reservation!=nil && !errors.Is(err,wal.ErrJournalFull) && !errors.Is(err,metastore.ErrRetireQueueFull) && !errors.Is(err,metastore.ErrMetadataTransactionTooLarge) {reservation=nil}
-  if err==nil && reservation!=nil {reservation=nil}
+  if err!=nil && reservation!=nil && !errors.Is(err,wal.ErrJournalFull) && !errors.Is(err,metastore.ErrRetireQueueFull) && !errors.Is(err,metastore.ErrMetadataTransactionTooLarge) {committed=true}
+  if err==nil && reservation!=nil {committed=true}
   if err!=nil{return fmt.Errorf("WAL commit root descriptor and lifecycle: %w",err)}
   if t.persistentArena==nil {
    if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages: %w",err)}
@@ -534,7 +537,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  }
  if err!=nil{return err}
  committed:=false
- defer func(){if !committed && supplied==nil {_=reservation.Abort()}}()
+ defer func(){if !committed {_=reservation.Abort()}}()
  ids:=reservation.Pages()
  var cowIDs []uint64
  if supplied!=nil {cowIDs=ids[len(arenaPages):]} else {cowIDs=ids[:pageCount]}
