@@ -47,7 +47,7 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	data,err:=poolspace.NewDataView(parent,[]poolspace.Extent{{Start:oldDataBase,Length:oldData,Kind:poolspace.Data}})
 	if err!=nil{t.Fatal(err)}
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:oldData,MetadataBytes:oldMetadata,
-		AGSizeBytes:8*format.BlockSize,WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10})
+		AGSizeBytes:8*format.BlockSize,WALSegmentBytes:1<<20,MappingBytes:8<<20,CheckpointBytes:64<<10})
 	if err!=nil{t.Fatal(err)}
 	var uuid [16]byte;copy(uuid[:],"bm03-acceptance")
 	sb,err:=format.NewDynamicSuperblock(g,uuid,1,1);if err!=nil{t.Fatal(err)}

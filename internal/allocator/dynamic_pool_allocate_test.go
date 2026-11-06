@@ -14,7 +14,7 @@ import (
 
 func TestBMPOOL03AllocateZeroPublishUsesDataViewBlockIDs(t *testing.T){
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:8*format.BlockSize,MetadataBytes:64<<20,
-		AGSizeBytes:4*format.BlockSize,WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10})
+		AGSizeBytes:4*format.BlockSize,WALSegmentBytes:1<<20,MappingBytes:8<<20,CheckpointBytes:64<<10})
 	if err!=nil{t.Fatal(err)}
 	parentBytes:=poolspace.BootstrapSize+g.MetadataBytes+g.DataBytes
 	parent:=newDynamicFormatMem(parentBytes)
