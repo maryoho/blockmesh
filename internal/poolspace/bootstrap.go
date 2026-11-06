@@ -246,15 +246,6 @@ func(s *BootstrapStore)SetOwnerLease(owner BootstrapOwnerLease)error{
  return nil
 }
 
-// SetOwnerLease binds metadata publication to the current fenced SAN Owner.
-func(s *BootstrapStore)SetOwnerLease(owner BootstrapOwnerLease)error{
- if s==nil||owner==nil||!owner.Valid()||owner.Epoch()==0{return errors.New("a live fenced Pool Owner lease with non-zero epoch is required")}
- s.mu.Lock();defer s.mu.Unlock()
- if owner.Epoch()<s.record.OwnerEpoch{return errors.New("Pool Owner lease epoch is older than Bootstrap OwnerEpoch")}
- s.owner=owner
- return nil
-}
-
 func metadataExtentBytes(extents []Extent)uint64{
 	var n uint64
 	for _,e:=range extents{if e.Kind==Metadata{n+=e.Length}}
