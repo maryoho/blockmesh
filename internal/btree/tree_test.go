@@ -147,11 +147,10 @@ func TestPersistentArenaLifecycleReplaysAtomicallyWithWAL(t *testing.T) {
 }
 func TestPutBatchWithImagesCommitsExtrasAndRootTogether(t *testing.T) {
 	dev:=newMemoryDevice(128)
-	store,err:=metastore.Format(dev,metastore.Layout{VolumeID:"batch-images",TotalPages:128,ArenaStart:2,ArenaPages:124,LifecycleStart:126,LifecyclePages:2})
+	store,err:=metastore.Format(dev,metastore.Layout{VolumeID:"batch-images",TotalPages:128,ArenaStart:2,ArenaPages:126})
 	if err!=nil { t.Fatal(err) }
-	if err=metastore.FormatLifecycle(store);err!=nil { t.Fatal(err) }
 	committer:=memoryCommitter{dev:dev}
-	tree,err:=OpenPersistent(store,committer);if err!=nil { t.Fatal(err) }
+	tree,err:=Open(store,committer);if err!=nil { t.Fatal(err) }
 	extraOffset:=uint64(127)*metastore.PageSize
 	extra:=make([]byte,metastore.PageSize);copy(extra[:8],"BMEXTRA1")
 	if err=tree.PutBatchWithImages([]Item{{Key:10,Value:100},{Key:20,Value:200}},[]metastore.PageImage{{Offset:extraOffset,Data:extra}});err!=nil { t.Fatal(err) }
@@ -161,7 +160,7 @@ func TestPutBatchWithImagesCommitsExtrasAndRootTogether(t *testing.T) {
 	if n,err:=dev.ReadAt(read,int64(extraOffset));err!=nil||n!=len(read) { t.Fatalf("read extra image n=%d err=%v",n,err) }
 	if string(read[:8])!="BMEXTRA1" { t.Fatalf("extra image not committed: %q",read[:8]) }
 	reopenedStore,err:=metastore.Open(dev,"batch-images");if err!=nil { t.Fatal(err) }
-	reopened,err:=OpenPersistent(reopenedStore,committer);if err!=nil { t.Fatal(err) }
+	reopened,err:=Open(reopenedStore);if err!=nil { t.Fatal(err) }
 	if got,err:=reopened.Get(20);err!=nil||got!=200 { t.Fatalf("reopen Get(20)=%d err=%v",got,err) }
 }
 
