@@ -8,13 +8,9 @@ import (
 )
 
 func TestBootstrapFormatOpenAndExpand(t *testing.T) {
-	d,err:=device.OpenFile(t.TempDir()+"/pool.img");if err!=nil{t.Fatal(err)};defer d.Close()
-	if err=d.WriteAt(make([]byte,0),0);err!=nil{t.Fatal(err)}
-	// A sparse file is sufficient to test metadata ordering; avoid allocating a full 2TiB image.
-	if err=d.Close();err!=nil{t.Fatal(err)}
 	f,err:=device.OpenFile(t.TempDir()+"/pool.img");if err!=nil{t.Fatal(err)};defer f.Close()
 	// The planner requires >=2TiB. Use a sparse regular file with that logical size.
-	if err=f.WriteAt([]byte{0},(2<<40)-1);err!=nil{t.Fatal(err)}
+	if _,err=f.WriteAt([]byte{0},(2<<40)-1);err!=nil{t.Fatal(err)}
 	s,err:=FormatBootstrap(f,64,512);if err!=nil{t.Fatal(err)}
 	if s.Record().Generation!=1{t.Fatalf("generation=%d",s.Record().Generation)}
 	reopened,err:=OpenBootstrap(f);if err!=nil{t.Fatal(err)}
