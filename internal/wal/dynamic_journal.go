@@ -96,7 +96,7 @@ func(j *DynamicJournal)Commit(updates []PageUpdate)error{
 	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}
 	cp:=make([]byte,4);binary.LittleEndian.PutUint32(cp,crc32.Checksum(payload,journalCRC))
 	commit,err:=encodeJournalRecord(journalCommit,tx,cp);if err!=nil{j.poisoned=true;return err}
-	if err=j.append(commit);err!=nil{j.poisoned=true;return err}
+	if err=j.append(commit);err!=nil{if !errors.Is(err,ErrJournalFull){j.poisoned=true};return err}
 	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}
 	for _,u:=range updates{if err=j.apply(u);err!=nil{j.poisoned=true;return fmt.Errorf("apply BMPOOL03 WAL tx %d: %w",tx,err)}}
 	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}

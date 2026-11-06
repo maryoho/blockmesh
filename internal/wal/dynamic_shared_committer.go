@@ -45,7 +45,16 @@ func(c *DynamicSharedCommitter)withJournal(fn func(*DynamicJournal)error)error{
 	if opErr!=nil{return opErr};return releaseErr
 }
 func(c *DynamicSharedCommitter)CommitImages(images []metastore.PageImage)error{
-	return c.withJournal(func(j *DynamicJournal)error{return j.CommitImages(images)})
+	return c.withJournal(func(j *DynamicJournal)error{
+		err:=j.CommitImages(images)
+		if !errors.Is(err,ErrJournalFull){return err}
+		// ErrJournalFull is returned only when append could not write a
+		// complete record. The durable tail may contain an unmatched Intent;
+		// Checkpoint safely retires it because its Commit record is absent.
+		if err=j.Checkpoint();err!=nil{return fmt.Errorf("automatic BMPOOL03 WAL checkpoint after JournalFull: %w",err)}
+		if err=j.CommitImages(images);err!=nil{return fmt.Errorf("retry BMPOOL03 transaction after checkpoint: %w",err)}
+		return nil
+	})
 }
 func(c *DynamicSharedCommitter)Recover()error{
 	return c.withJournal(func(j *DynamicJournal)error{_,err:=j.Recover();return err})
