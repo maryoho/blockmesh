@@ -685,8 +685,11 @@ func decodePage(id uint64, b []byte) (Page, error) {
 		return Page{}, ErrCorrupt
 	}
 	want := binary.LittleEndian.Uint32(b[28:32])
-	binary.LittleEndian.PutUint32(b[28:32], 0)
-	if crc32.Checksum(b, crcTable) != want {
+	// Decode must not mutate caller-owned buffers: WAL validation passes the
+	// same after-image slice that is subsequently committed to the device.
+	check := append([]byte(nil), b...)
+	binary.LittleEndian.PutUint32(check[28:32], 0)
+	if crc32.Checksum(check, crcTable) != want {
 		return Page{}, ErrCorrupt
 	}
 	if binary.LittleEndian.Uint64(b[8:16]) != id {
