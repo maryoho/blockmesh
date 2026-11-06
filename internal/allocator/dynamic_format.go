@@ -108,6 +108,7 @@ func OpenDynamicSuperblockPair(dev device.Device)(format.DynamicSuperblock,error
 
 func initializeDynamicBitmaps(dev device.Device,sb format.DynamicSuperblock)error{
 	g:=sb.Geometry
+	var err error
 	for ag:=uint32(0);ag<g.AGCapacity;ag++{
 		var valid uint64
 		if ag<g.AGCount { var err error; valid,err=g.AGBlocks(ag);if err!=nil{return err} }
