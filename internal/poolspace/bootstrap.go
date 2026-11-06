@@ -42,12 +42,17 @@ type BootstrapRecord struct {
 	ExtentMapBytes uint64
 	ExtentMapGeneration uint64
 	LogicalSectorBytes uint32
+	OwnerEpoch uint64
 	Slot uint64
 }
 
 type BootstrapLocker interface {
-	Distributed() bool
-	Lock(context.Context, string) (func() error, error)
+ Distributed() bool
+ Lock(context.Context,string)(func()error,error)
+}
+type BootstrapOwnerLease interface {
+ Epoch() uint64
+ Valid() bool
 }
 
 type BootstrapStore struct {
@@ -56,6 +61,7 @@ type BootstrapStore struct {
 	record BootstrapRecord
 	allocator *Allocator
 	locker BootstrapLocker
+	owner BootstrapOwnerLease
 }
 
 func (r BootstrapRecord) encode() ([]byte,error) {
@@ -81,6 +87,7 @@ func (r BootstrapRecord) encode() ([]byte,error) {
 	binary.LittleEndian.PutUint64(b[72:80],r.ExtentMapBytes)
 	binary.LittleEndian.PutUint64(b[80:88],r.ExtentMapGeneration)
 	binary.LittleEndian.PutUint32(b[88:92],r.LogicalSectorBytes)
+	binary.LittleEndian.PutUint64(b[96:104],r.OwnerEpoch)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],0)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],crc32.Checksum(b,crc32.MakeTable(crc32.Castagnoli)))
 	return b,nil
@@ -103,8 +110,12 @@ func decodeBootstrap(b []byte,slot uint64)(BootstrapRecord,error){
 	r.ExtentMapBytes=binary.LittleEndian.Uint64(b[72:80])
 	r.ExtentMapGeneration=binary.LittleEndian.Uint64(b[80:88])
 	r.LogicalSectorBytes=binary.LittleEndian.Uint32(b[88:92])
+	r.OwnerEpoch=binary.LittleEndian.Uint64(b[96:104])
 	r.Slot=slot
-	if _,err:=r.encode();err!=nil{return BootstrapRecord{},err}
+ for _,v:=range b[92:96]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
+ for _,v:=range b[104:bootstrapCRCOffset]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
+ for _,v:=range b[bootstrapCRCOffset+4:]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
+ if _,err:=r.encode();err!=nil{return BootstrapRecord{},err}
 	return r,nil
 }
 
@@ -217,6 +228,15 @@ func(s *BootstrapStore)SetCommitLocker(l BootstrapLocker)error{
 	s.mu.Lock();defer s.mu.Unlock();s.locker=l;return nil
 }
 
+// SetOwnerLease binds metadata publication to the current fenced SAN Owner.
+func(s *BootstrapStore)SetOwnerLease(owner BootstrapOwnerLease)error{
+ if s==nil||owner==nil||!owner.Valid()||owner.Epoch()==0{return errors.New("a live fenced Pool Owner lease with non-zero epoch is required")}
+ s.mu.Lock();defer s.mu.Unlock()
+ if owner.Epoch()<s.record.OwnerEpoch{return errors.New("Pool Owner lease epoch is older than Bootstrap OwnerEpoch")}
+ s.owner=owner
+ return nil
+}
+
 func metadataExtentBytes(extents []Extent)uint64{
 	var n uint64
 	for _,e:=range extents{if e.Kind==Metadata{n+=e.Length}}
@@ -226,43 +246,54 @@ func metadataExtentBytes(extents []Extent)uint64{
 // persist writes the new ExtentMap, WAL Intent, inactive Bootstrap after-image,
 // then the WAL Commit. Recovery ignores an inactive after-image without Commit.
 func(s *BootstrapStore)persist(next *Allocator,deviceBytes uint64)error{
-	if s==nil||s.dev==nil||next==nil{return ErrInvalidGeometry}
-	if s.locker==nil||!s.locker.Distributed(){return errors.New("distributed SAN Bootstrap lock is required")}
-	ctx,cancel:=context.WithTimeout(context.Background(),30*time.Second);defer cancel()
-	resource:=fmt.Sprintf("blockmesh:pool:%x:bootstrap",s.record.PoolUUID)
-	release,err:=s.locker.Lock(ctx,resource);if err!=nil{return fmt.Errorf("acquire Pool Bootstrap lock: %w",err)}
-	current,openErr:=OpenBootstrap(s.dev)
-	if openErr!=nil{_ = release();return openErr}
-	if current.record.Generation!=s.record.Generation||current.record.PoolUUID!=s.record.PoolUUID{_ = release();return ErrStaleBootstrap}
-	if s.record.Generation==math.MaxUint64||s.record.ExtentMapGeneration==math.MaxUint64{_ = release();return errors.New("Bootstrap generation exhausted")}
-	mapSlot:=extentMapSlotA
-	if s.record.ExtentMapOffset==extentMapSlotA{mapSlot=extentMapSlotA+extentMapSlotSize}
-	m:=ExtentMap{Generation:s.record.ExtentMapGeneration+1,DeviceBytes:deviceBytes,Extents:next.Extents()}
-	encoded,err:=m.Encode();if err==nil&&uint64(len(encoded))>extentMapSlotSize{err=ErrExtentMapTooLarge}
-	if err==nil{err=writeFull(s.dev,encoded,int64(mapSlot))}
-	if err==nil{err=s.dev.Sync()}
-	r:=s.record
-	inactive:=BootstrapSlotA;if s.record.Slot==BootstrapSlotA{inactive=BootstrapSlotB}
-	if err==nil{
-		r.Generation++;r.DeviceBytes=deviceBytes;r.MetadataBytes=metadataExtentBytes(next.Extents())
-		r.ExtentMapOffset=mapSlot;r.ExtentMapBytes=uint64(len(encoded));r.ExtentMapGeneration=m.Generation
-		var sb []byte
-		sb,err=r.encode()
-		if err==nil{
-			intent,in,intentErr:=encodeBootstrapIntent(r.Generation,inactive,sb);err=intentErr
-			if err==nil{err=writeFull(s.dev,intent,int64(bootstrapWALIntentOffset))}
-			if err==nil{err=s.dev.Sync()}
-			if err==nil{err=writeFull(s.dev,sb,int64(inactive))}
-			if err==nil{err=s.dev.Sync()}
-			if err==nil{err=writeFull(s.dev,encodeBootstrapCommit(in),int64(bootstrapWALCommitOffset))}
-			if err==nil{err=s.dev.Sync()}
-		}
-	}
-	releaseErr:=release()
-	if err!=nil{return err}
-	if releaseErr!=nil{return releaseErr}
-	r.Slot=inactive;s.record,s.allocator=r,next
-	return nil
+ if s==nil||s.dev==nil||next==nil{return ErrInvalidGeometry}
+ if s.locker==nil||!s.locker.Distributed(){return errors.New("distributed SAN Bootstrap lock is required")}
+ if s.owner==nil||!s.owner.Valid()||s.owner.Epoch()==0||s.owner.Epoch()<s.record.OwnerEpoch{return errors.New("live fenced Pool Owner lease/Epoch is required")}
+ ownerEpoch:=s.owner.Epoch()
+ ctx,cancel:=context.WithTimeout(context.Background(),30*time.Second);defer cancel()
+ resource:=fmt.Sprintf("blockmesh:pool:%x:bootstrap",s.record.PoolUUID)
+ release,err:=s.locker.Lock(ctx,resource);if err!=nil{return fmt.Errorf("acquire Pool Bootstrap lock: %w",err)}
+ current,openErr:=OpenBootstrap(s.dev)
+ if openErr!=nil{_ = release();return openErr}
+ if current.record.Generation!=s.record.Generation||current.record.PoolUUID!=s.record.PoolUUID{_ = release();return ErrStaleBootstrap}
+ if !s.owner.Valid()||s.owner.Epoch()!=ownerEpoch||ownerEpoch<s.record.OwnerEpoch{_ = release();return errors.New("Pool Owner lease lost before Bootstrap update")}
+ if s.record.Generation==math.MaxUint64||s.record.ExtentMapGeneration==math.MaxUint64{_ = release();return errors.New("Bootstrap generation exhausted")}
+ mapSlot:=extentMapSlotA
+ if s.record.ExtentMapOffset==extentMapSlotA{mapSlot=extentMapSlotA+extentMapSlotSize}
+ m:=ExtentMap{Generation:s.record.ExtentMapGeneration+1,DeviceBytes:deviceBytes,Extents:next.Extents()}
+ encoded,err:=m.Encode()
+ if err==nil&&uint64(len(encoded))>extentMapSlotSize{err=ErrExtentMapTooLarge}
+ if err==nil{err=writeFull(s.dev,encoded,int64(mapSlot))}
+ if err==nil{err=s.dev.Sync()}
+ if err==nil&&(!s.owner.Valid()||s.owner.Epoch()!=ownerEpoch){err=errors.New("Pool Owner lease lost before Bootstrap Intent")}
+ r:=s.record
+ inactive:=BootstrapSlotA
+ if s.record.Slot==BootstrapSlotA{inactive=BootstrapSlotB}
+ var sb []byte
+ var intent bootstrapIntent
+ if err==nil{
+  r.Generation++;r.DeviceBytes=deviceBytes;r.MetadataBytes=metadataExtentBytes(next.Extents())
+  r.ExtentMapOffset=mapSlot;r.ExtentMapBytes=uint64(len(encoded));r.ExtentMapGeneration=m.Generation
+  r.OwnerEpoch=ownerEpoch
+  sb,err=r.encode()
+ }
+ if err==nil{
+  var intentPage []byte
+  intentPage,intent,err=encodeBootstrapIntent(r.Generation,inactive,sb)
+  if err==nil{err=writeFull(s.dev,intentPage,int64(bootstrapWALIntentOffset))}
+  if err==nil{err=s.dev.Sync()}
+ }
+ if err==nil&&(!s.owner.Valid()||s.owner.Epoch()!=ownerEpoch){err=errors.New("Pool Owner lease lost before Bootstrap after-image")}
+ if err==nil{err=writeFull(s.dev,sb,int64(inactive))}
+ if err==nil{err=s.dev.Sync()}
+ if err==nil&&(!s.owner.Valid()||s.owner.Epoch()!=ownerEpoch){err=errors.New("Pool Owner lease lost before Bootstrap Commit")}
+ if err==nil{err=writeFull(s.dev,encodeBootstrapCommit(intent),int64(bootstrapWALCommitOffset))}
+ if err==nil{err=s.dev.Sync()}
+ if err==nil{r.Slot=inactive;s.record,s.allocator=r,next}
+ releaseErr:=release()
+ if err!=nil{return err}
+ if releaseErr!=nil{return releaseErr}
+ return nil
 }
 
 // Rescan adds newly visible capacity as Free extents only. It never grows
