@@ -1,0 +1,36 @@
+package poolspace
+
+import (
+	"bytes"
+	"testing"
+)
+
+func TestPlanDeviceScalesAndAligns(t *testing.T){
+	small,err:=PlanDevice(2<<40,64);if err!=nil{t.Fatal(err)}
+	large,err:=PlanDevice(20<<40,64);if err!=nil{t.Fatal(err)}
+	if small.InitialMetadata%ExtentSize!=0||large.InitialMetadata%ExtentSize!=0{t.Fatal("metadata plan is not extent aligned")}
+	if large.InitialMetadata<=small.InitialMetadata||large.DataCapacity<=small.DataCapacity{t.Fatalf("capacity did not scale: small=%+v large=%+v",small,large)}
+	if small.InitialMetadata>=small.DeviceBytes||small.DataCapacity==0{t.Fatal("invalid plan")}
+}
+func TestMetadataExpansionTargetIsAutomatic(t *testing.T){
+	got,err:=MetadataExpansionTarget(2*ExtentSize,1500<<20,2<<30,ExtentSize);if err!=nil{t.Fatal(err)}
+	if got<=2*ExtentSize||got%ExtentSize!=0{t.Fatalf("unexpected target %d",got)}
+}
+func TestAllocatorRescanAndMetadataExpansionNeverOverlapData(t *testing.T){
+	a,err:=NewAllocator(8*ExtentSize,ExtentSize,2*ExtentSize);if err!=nil{t.Fatal(err)}
+	data,err:=a.AllocateData(2*ExtentSize);if err!=nil{t.Fatal(err)}
+	if err=a.Rescan(12*ExtentSize);err!=nil{t.Fatal(err)}
+	meta,err:=a.AllocateMetadata(2*ExtentSize);if err!=nil{t.Fatal(err)}
+	for _,m:=range meta{for _,d:=range data{if m.Start<d.Start+d.Length&&d.Start<m.Start+m.Length{t.Fatal("metadata overlaps existing data")}}}
+	if got:=a.DeviceBytes();got!=12*ExtentSize{t.Fatalf("device bytes=%d",got)}
+}
+func TestExtentMapRoundTripAndCorruption(t *testing.T){
+	m:=ExtentMap{Generation:3,DeviceBytes:4*ExtentSize,Extents:[]Extent{{0,ExtentSize,Metadata},{ExtentSize,2*ExtentSize,Data},{3*ExtentSize,ExtentSize,Free}}}
+	b,err:=m.Encode();if err!=nil{t.Fatal(err)}
+	got,err:=DecodeExtentMap(b);if err!=nil{t.Fatal(err)}
+	if got.Generation!=m.Generation||len(got.Extents)!=len(m.Extents){t.Fatalf("round trip mismatch: %+v",got)}
+	b[len(b)-1]^=1
+	if _,err:=DecodeExtentMap(b);err==nil{t.Fatal("expected checksum failure")}
+	if _,err:=m.Encode();err!=nil||bytes.Equal(b,mustEncode(t,m)){t.Fatal("test corruption setup invalid")}
+}
+func mustEncode(t *testing.T,m ExtentMap)[]byte{t.Helper();b,e:=m.Encode();if e!=nil{t.Fatal(e)};return b}
