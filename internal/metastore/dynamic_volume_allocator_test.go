@@ -18,7 +18,15 @@ func(c dynamicVolumeTestCommitter)CommitImages(images []PageImage)error{
 func(dynamicVolumeTestCommitter)ClusterSafe()bool{return true}
 
 type dynamicVolumeTestFence struct{err error}
-func(f dynamicVolumeTestFence)ProveVolumeFenced(_ context.Context,_ string,_ uint64)error{return f.err}
+type dynamicVolumeTestFenceLease struct{volumeID string;epoch uint64;valid bool}
+func(l *dynamicVolumeTestFenceLease)Valid()bool{return l.valid}
+func(l *dynamicVolumeTestFenceLease)VolumeID()string{return l.volumeID}
+func(l *dynamicVolumeTestFenceLease)Epoch()uint64{return l.epoch}
+func(l *dynamicVolumeTestFenceLease)Close()error{l.valid=false;return nil}
+func(f dynamicVolumeTestFence)AcquireVolumeFencing(_ context.Context,volumeID string,epoch uint64)(DynamicVolumeFencingLease,error){
+	if f.err!=nil{return nil,f.err}
+	return &dynamicVolumeTestFenceLease{volumeID:volumeID,epoch:epoch,valid:true},nil
+}
 
 type dynamicVolumeFailDevice struct{Device; failOffset int64; failed bool}
 func(d *dynamicVolumeFailDevice)WriteAt(p []byte,off int64)(int,error){
