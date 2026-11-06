@@ -86,7 +86,14 @@ func validatePoolStoreGeometry(sb Superblock, pool format.Superblock, index uint
 	// The returned pages are private to this Volume and excluded from Arena,
 	// Lifecycle and Reader Table geometry.
 func (s *Store) OwnerRecordRange() (uint64, uint64, error) {
-		if s == nil || !s.poolBacked { return 0, 0, ErrGeometry }
+		if s==nil{return 0,0,ErrGeometry}
+		if s.dynamicPool{
+			s.mu.Lock();defer s.mu.Unlock()
+			if s.dynamicDescriptor.OwnerRecordStart==0{return 0,0,ErrGeometry}
+			start:=s.dynamicDescriptor.OwnerRecordStart*PageSize
+			return start,start+PageSize,nil
+		}
+		if !s.poolBacked { return 0, 0, ErrGeometry }
 		reservedBytes := s.poolSB.MetadataSize - s.poolSB.ReservedOffset
 		slotBytes := (reservedBytes / uint64(format.MaxVolumeDescriptors)) / PageSize * PageSize
 		slotPages := slotBytes / PageSize
