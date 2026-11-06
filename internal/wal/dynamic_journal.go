@@ -106,7 +106,7 @@ func(j *DynamicJournal)Commit(updates []PageUpdate)error{
 
 func(j *DynamicJournal)append(record []byte)error{
 	if uint64(len(record))>j.bankSize-j.end{return ErrJournalFull}
-	if err:=writeAtFull(j.dev,record,int64(j.base+j.end));err!=nil{return err}
+	if err:=writeDynamicAtFull(j.dev,record,int64(j.base+j.end));err!=nil{return err}
 	j.end+=uint64(len(record));return nil
 }
 
@@ -123,7 +123,7 @@ func(j *DynamicJournal)validateUpdates(updates []PageUpdate)error{
 	}
 	return nil
 }
-func(j *DynamicJournal)apply(u PageUpdate)error{return writeAtFull(j.dev,u.Image,int64(u.Offset))}
+func(j *DynamicJournal)apply(u PageUpdate)error{return writeDynamicAtFull(j.dev,u.Image,int64(u.Offset))}
 
 
 // CommitImages adapts DynamicJournal to the metastore transaction interface.
@@ -143,16 +143,16 @@ func(j *DynamicJournal)Checkpoint()error{
 	nextBank:=uint32(1)-j.activeBank
 	nextBase:=j.segmentBase+uint64(nextBank)*j.bankSize
 	zero:=make([]byte,int(j.bankSize))
-	if err:=writeAtFull(j.dev,zero,int64(nextBase));err!=nil{return fmt.Errorf("clear inactive BMPOOL03 WAL bank: %w",err)}
+	if err:=writeDynamicAtFull(j.dev,zero,int64(nextBase));err!=nil{return fmt.Errorf("clear inactive BMPOOL03 WAL bank: %w",err)}
 	if err:=j.dev.Sync();err!=nil{return fmt.Errorf("sync cleared BMPOOL03 WAL bank: %w",err)}
 	cp:=format.DynamicCheckpoint{AG:j.ag,Generation:j.checkpointGeneration+1,CheckpointTxID:j.lastTx,ActiveBank:nextBank}
 	page,err:=cp.Encode();if err!=nil{return err}
 	nextSlot:=uint32(1)-j.checkpointSlot
 	off,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,nextSlot);if err!=nil{return err}
-	if err=writeAtFull(j.dev,page,int64(off));err!=nil{j.poisoned=true;return err}
+	if err=writeDynamicAtFull(j.dev,page,int64(off));err!=nil{j.poisoned=true;return err}
 	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}
 	mirrorOff,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,j.checkpointSlot);if err!=nil{j.poisoned=true;return err}
-	if err=writeAtFull(j.dev,page,int64(mirrorOff));err!=nil{j.poisoned=true;return err}
+	if err=writeDynamicAtFull(j.dev,page,int64(mirrorOff));err!=nil{j.poisoned=true;return err}
 	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}
 	j.activeBank,j.checkpointSlot=nextBank,nextSlot
 	j.checkpointGeneration,j.checkpointTxID=cp.Generation,cp.CheckpointTxID
