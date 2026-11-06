@@ -105,6 +105,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	var ownerEpoch,generation,mappingSequence uint64
 	var ag uint32
 	var dynamicSB format.DynamicSuperblock
+	var err error
 	if a.dynamic {
 		dynamicSB,err=a.store.DynamicPoolSuperblock();if err!=nil{return result,err}
 		desc,e:=a.store.DynamicPoolDescriptor();if e!=nil{return result,e}
@@ -123,7 +124,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	if req.LogicalStart+uint64(req.BlockCount)>totalBlocks{return result,errors.New("logical allocation range exceeds Pool capacity")}
 	if generation==math.MaxUint64||mappingSequence==math.MaxUint64{return result,errors.New("Volume metadata generation exhausted")}
 	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", ag))
-	if err != nil { return result, fmt.Errorf("acquire AG %d lock: %w", desc.AG, err) }
+	if err != nil { return result, fmt.Errorf("acquire AG %d lock: %w", ag, err) }
 	defer unlock()
 	if err = ctx.Err(); err != nil { return result, err }
 	if !ownerLease.Valid() { return result, errors.New("Volume Owner lease lost before allocation") }
@@ -174,8 +175,8 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		return result, cause
 	}
 
-	// Check the data LUN geometry before touching it. DataStartSector is
-	// relative to the underlying device; Pool logical block zero starts there.
+	// BMPOOL02 adds DataStartSector through poolDataView. BMPOOL03 receives a
+	// DataView whose offset zero is already the first logical Data block.
 	var view DataDevice
 	if a.dynamic { view=a.data } else {
 		pool,_:=a.store.PoolSuperblock();view,err=newPoolDataView(a.data,pool);if err!=nil{return abortReservation(err)}
