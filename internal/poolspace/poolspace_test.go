@@ -34,3 +34,12 @@ func TestExtentMapRoundTripAndCorruption(t *testing.T){
 	if _,err:=m.Encode();err!=nil||bytes.Equal(b,mustEncode(t,m)){t.Fatal("test corruption setup invalid")}
 }
 func mustEncode(t *testing.T,m ExtentMap)[]byte{t.Helper();b,e:=m.Encode();if e!=nil{t.Fatal(e)};return b}
+
+func TestFailedAllocationDoesNotConsumePartialFreeSpace(t *testing.T) {
+ a,err:=NewAllocator(3*ExtentSize,ExtentSize,ExtentSize);if err!=nil{t.Fatal(err)}
+ before:=a.Extents()
+ if _,err=a.AllocateMetadata(2*ExtentSize);err==nil{t.Fatal("expected insufficient space")}
+ after:=a.Extents()
+ if len(before)!=len(after){t.Fatalf("extent count changed on failed allocation: before=%v after=%v",before,after)}
+ for i:=range before{if before[i]!=after[i]{t.Fatalf("allocator mutated on failed request: before=%v after=%v",before,after)}}
+}
