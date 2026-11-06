@@ -58,6 +58,16 @@ func run(args []string) error {
 		eventExport.BootID!=e.NewOwnerBootID || eventExport.OwnerEpoch!=e.OwnerEpoch {
 		return errors.New("runtime event Volume/Node/Boot/Epoch does not match runtime evidence and durable SAN snapshot")
 	}
+	hasPreempt,hasDrain:=false,false
+	for _,record:=range records {
+		switch record.Event.EventType {
+		case "scsi_pr.preempt_and_abort": hasPreempt=true
+		case "old_owner.metadata_io_drain": hasDrain=true
+		}
+	}
+	if !hasPreempt || !hasDrain {
+		return errors.New("P3.15 takeover report requires both old-owner PREEMPT AND ABORT and metadata I/O drain runtime events")
+	}
 	if err=runtimeevents.WriteExport(*exportPath,eventExport);err!=nil{return fmt.Errorf("write verified runtime event export: %w",err)}
 	journalDigest,err:=fileSHA256(*journalPath);if err!=nil{return err}
 	exportDigest,err:=fileSHA256(*exportPath);if err!=nil{return err}
