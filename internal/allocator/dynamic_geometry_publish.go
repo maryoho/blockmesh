@@ -128,6 +128,7 @@ func PublishDynamicGeometryUnderLease(ctx context.Context,dev device.Device,curr
 	if ctx==nil||ownerLease==nil||!ownerLease.Valid()||ownerLease.Resource()==""||locks==nil||!locks.Distributed(){
 		return errors.New("live Pool Owner lease and distributed AG locker are required")
 	}
+	if view,ok:=dev.(interface{Generation()uint64});ok&&view.Generation()!=0&&view.Generation()!=next.ViewGeneration{return errors.New("MetadataView Extent Map generation does not match new BMPOOL03 geometry")}
 	if current.Geometry.AGCount==0{return format.ErrInvalidDynamicGeometry}
 	ag:=current.Geometry.AGCount-1
 	unlock,err:=locks.Lock(ctx,fmt.Sprintf("ag:%03d",ag));if err!=nil{return fmt.Errorf("lock final AG %d for geometry growth: %w",ag,err)}

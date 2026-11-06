@@ -224,7 +224,7 @@ func(s *BootstrapStore)Extents()[]Extent{if s==nil||s.allocator==nil{return nil}
 // OpenDataView returns a logical Data-only view over the Pool's fragmented
 // Data extents. Metadata and Data still share the same parent LUN.
 func(s *BootstrapStore)OpenDataView()(*DataView,error){
- if s==nil||s.dev==nil{return nil,ErrInvalidGeometry}
+ if s==nil||s.dev==nil||s.allocator==nil{return nil,ErrInvalidGeometry}
  s.mu.Lock();defer s.mu.Unlock()
  var dataExtents []Extent
  for _,e:=range s.allocator.extents{if e.Kind==Data{dataExtents=append(dataExtents,e)}}
