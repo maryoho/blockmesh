@@ -82,3 +82,5 @@ func recoverBootstrapWAL(dev device.Device)(uint64,error){
 	if err!=nil||r.Generation!=in.TxID{return 0,ErrBootstrapWALCorrupt}
 	return math.MaxUint64,nil
 }
+
+func allZero(b []byte) bool { for _, v := range b { if v != 0 { return false } }; return true }
