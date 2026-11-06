@@ -111,6 +111,9 @@ func DecodeDynamicSuperblock(b []byte) (DynamicSuperblock,error) {
 		MappingOffset:binary.LittleEndian.Uint64(b[184:192]),MappingSize:binary.LittleEndian.Uint64(b[192:200]),
 		CheckpointOffset:binary.LittleEndian.Uint64(b[200:208]),CheckpointSize:binary.LittleEndian.Uint64(b[208:216]),
 		ReservedOffset:binary.LittleEndian.Uint64(b[216:224]),AGCapacity:binary.LittleEndian.Uint32(b[224:228]),}
+	// BMPOOL03 v3 superblocks created before AG slot reservation left this
+	// formerly reserved field zero. Interpret them as capacity == AGCount.
+	if g.AGCapacity==0 { g.AGCapacity=g.AGCount }
 	s.Geometry=g
 	if err:=s.Validate();err!=nil{return DynamicSuperblock{},err}
 	return s,nil

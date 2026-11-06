@@ -54,13 +54,12 @@ func BuildDynamicGeometryUpdate(current format.DynamicSuperblock,metadataBytes,d
 func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,newSB format.DynamicSuperblock)([]metastore.PageImage,error){
 	if r==nil||oldSB.Validate()!=nil||newSB.Validate()!=nil{return nil,errors.New("invalid BMPOOL03 bitmap growth request")}
 	oldG,newG:=oldSB.Geometry,newSB.Geometry
-	if newG.AGCount<oldG.AGCount||oldG.BitmapOffset!=newG.BitmapOffset||oldG.BitmapStride!=newG.BitmapStride||
-		oldG.BitmapPaddedBytes!=newG.BitmapPaddedBytes||newG.LastAGBlocks<oldG.LastAGBlocks{
-		return nil,ErrDynamicGeometryRequiresMigration
-	}
-	if newValid==oldG.LastAGBlocks{return nil,nil}
+	if newG.AGCount<oldG.AGCount||oldG.AGCapacity!=newG.AGCapacity||oldG.BitmapOffset!=newG.BitmapOffset||oldG.BitmapStride!=newG.BitmapStride||
+		oldG.BitmapPaddedBytes!=newG.BitmapPaddedBytes{return nil,ErrDynamicGeometryRequiresMigration}
 	ag:=oldG.AGCount-1
 	newValid,err:=newG.AGBlocks(ag);if err!=nil{return nil,err}
+	if newValid<oldG.LastAGBlocks{return nil,ErrDynamicGeometryRequiresMigration}
+	if newValid==oldG.LastAGBlocks{return nil,nil}
 	base:=oldG.BitmapOffset+uint64(ag)*oldG.BitmapStride
 	desc:=make([]byte,format.PageSize)
 	if err:=readAtFull(r,desc,int64(base));err!=nil{return nil,err}
