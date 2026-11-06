@@ -54,12 +54,12 @@ func TestDynamicJournalRejectsCrossSegmentAndUnalignedUpdates(t *testing.T){
 	if e=j.Commit([]PageUpdate{{Offset:sb.Geometry.MappingOffset+1,Image:make([]byte,format.PageSize)}});e==nil{t.Fatal("expected unaligned update rejection")}
 }
 
-func TestDynamicJournalIgnoresTornFinalIntent(t *testing.T){
+func TestDynamicJournalLeavesUncommittedIntentUnapplied(t *testing.T){
 	dev,sb:=dynamicWALFixture(t)
 	j,e:=OpenDynamicJournal(dev,sb,1);if e!=nil{t.Fatal(e)}
 	payload,_:=encodeUpdates([]PageUpdate{{Offset:sb.Geometry.MappingOffset,Image:make([]byte,format.PageSize)}})
 	record,_:=encodeJournalRecord(journalIntent,1,payload)
 	copy(dev.b[j.base:],record[:len(record)-5])
 	j2,e:=OpenDynamicJournal(dev,sb,1);if e!=nil{t.Fatal(e)}
-	if j2.UsedBytes()!=0{t.Fatalf("torn tail consumed %d bytes",j2.UsedBytes())}
+	if j2.UsedBytes()==0{t.Fatal("expected durable Intent to remain in append-only log")}; page:=make([]byte,format.PageSize);if _,e=dev.ReadAt(page,int64(sb.Geometry.MappingOffset));e!=nil{t.Fatal(e)};if !allZero(page){t.Fatal("uncommitted Intent was incorrectly applied")}
 }
