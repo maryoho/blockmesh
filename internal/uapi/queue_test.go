@@ -1,6 +1,6 @@
 package uapi
 import("encoding/binary";"testing")
-func setupFixture()SetupQueue{return SetupQueue{RingOrder:10,QueueGeneration:99,RequestControlOffset:RequestControlOffset,RequestRingOffset:RequestRingOffset,CompletionControlOffset:CompletionControlOffset,CompletionRingOffset:CompletionRingOffset,PayloadOffset:EncodeMmapOffset(7,MappingPayloadOffset),QueueID:7,MaxBatch:MaxBatch}}
+func setupFixture()SetupQueue{return SetupQueue{RingOrder:10,QueueGeneration:99,RequestControlOffset:EncodeMmapOffset(7,RequestControlOffset),RequestRingOffset:EncodeMmapOffset(7,RequestRingOffset),CompletionControlOffset:EncodeMmapOffset(7,CompletionControlOffset),CompletionRingOffset:EncodeMmapOffset(7,CompletionRingOffset),PayloadOffset:EncodeMmapOffset(7,MappingPayloadOffset),QueueID:7,MaxBatch:MaxBatch}}
 func TestQueueLayoutsDoNotOverlapAtEveryOrder(t *testing.T){
  for order:=uint32(MinRingOrder);order<=MaxRingOrder;order++{l,e:=Layout(order);if e!=nil{t.Fatal(e)};if RequestRingOffset+uint64(l.Entries)*RequestSize>CompletionControlOffset{t.Fatalf("request overlap order %d",order)};if CompletionRingOffset+uint64(l.Entries)*CompletionSize>MappingPayloadOffset{t.Fatalf("completion overlap order %d",order)};if l.TotalBytes%PageSize!=0||l.PayloadBytes!=uint64(l.Entries)*MaxBatch*MappingSize{t.Fatalf("bad layout %+v",l)}}
  if _,e:=Layout(MaxRingOrder+1);e==nil{t.Fatal("accepted excessive order")}
