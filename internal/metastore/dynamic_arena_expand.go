@@ -98,7 +98,11 @@ func(s *Store)ExpandDynamicArenaUnderLease(ctx context.Context,ownerLease lock.L
 		return errors.New("live Volume Owner lease and distributed AG locker are required")
 	}
 	d,err:=s.DynamicPoolDescriptor();if err!=nil{return err}
-	if ownerLease.Resource()!="volume:"+d.VolumeID{return errors.New("Owner lease does not match BMPOOL03 Volume Descriptor")}
+	if identity,ok:=ownerLease.(interface{VolumeID()string});ok {
+		if identity.VolumeID()!=d.VolumeID{return errors.New("Owner lease Volume ID does not match BMPOOL03 Volume Descriptor")}
+	} else if ownerLease.Resource()!="volume:"+d.VolumeID {
+		return errors.New("Owner lease does not match BMPOOL03 Volume Descriptor")
+	}
 	unlock,err:=locks.Lock(ctx,fmt.Sprintf("ag:%03d",d.AG));if err!=nil{return fmt.Errorf("lock Volume AG %d for Arena expansion: %w",d.AG,err)}
 	defer unlock()
 	if err=ctx.Err();err!=nil{return err}
