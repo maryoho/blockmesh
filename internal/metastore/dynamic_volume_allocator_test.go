@@ -100,6 +100,9 @@ func TestDynamicVolumeAllocatorFormatCanResumeAfterMarker(t *testing.T){
 	start:=sb.Geometry.ReservedOffset/format.PageSize
 	failed:=&dynamicVolumeFailDevice{Device:dev,failOffset:int64((start+2)*format.PageSize)}
 	if err:=FormatDynamicVolumeAllocator(failed,sb);err==nil{t.Fatal("expected injected bitmap write failure")}
+	if got:=binary.LittleEndian.Uint64(dev.b[start*format.PageSize:start*format.PageSize+8]);got!=dynamicReservedFormatMagic{
+		t.Fatalf("format marker was not persisted: got=%x want=%x",got,dynamicReservedFormatMagic)
+	}
 	if _,err:=OpenDynamicVolumeAllocator(dev,sb);!errors.Is(err,ErrDynamicVolumeAllocatorUnformatted){t.Fatalf("expected unformatted allocator while marker is present, got %v",err)}
 	if err:=RecoverDynamicVolumeAllocatorFormat(dev,sb);err!=nil{t.Fatal(err)}
 	if _,err:=OpenDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
