@@ -14,7 +14,7 @@ func dynamicGeometryUpdateFixture(t *testing.T)(*dynamicFormatMem,format.Dynamic
 	if err!=nil{t.Fatal(err)}
 	var id [16]byte;copy(id[:],"geometry-grow03")
 	sb,err:=format.NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
-	dev:=newDynamicFormatMem(g.MetadataBytes)
+	dev:=newDynamicFormatMem(g.MetadataBytes+16<<20)
 	if err=FormatDynamicPool(dev,sb);err!=nil{t.Fatal(err)}
 	return dev,sb
 }

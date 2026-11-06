@@ -48,7 +48,7 @@ func TestBMPOOL03AllocateZeroPublishUsesDataViewBlockIDs(t *testing.T){
 	allocator,err:=NewDynamicPoolAllocator(store,tree,locks,data);if err!=nil{t.Fatal(err)}
 	lease:=&crashOwnerLease{resource:"volume:"+desc.VolumeID,epoch:desc.OwnerEpoch}
 	var key [16]byte;var fingerprint [32]byte;key[0]=0x91;fingerprint[0]=0x27
-	req:=AllocateRequest{IdempotencyKey:key,Fingerprint:fingerprint,LogicalStart:123,BlockCount:1,Operation:1}
+	req:=AllocateRequest{IdempotencyKey:key,Fingerprint:fingerprint,LogicalStart:3,BlockCount:1,Operation:1}
 	result,err:=allocator.AllocateZeroPublishTxn(context.Background(),lease,req)
 	if err!=nil{t.Fatal(err)}
 	if result.PhysicalStart!=0||result.OwnerEpoch!=desc.OwnerEpoch{t.Fatalf("unexpected allocation result: %+v",result)}
