@@ -255,7 +255,7 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 	if a==nil||dev==nil||committer==nil||!committer.ClusterSafe(){return ErrClusterSafeCommitterRequired}
 	a.mu.Lock();defer a.mu.Unlock()
 	if err:=nextSB.Validate();err!=nil{return err}
-	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation!=a.sb.Generation+1||
+	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation<a.sb.Generation||nextSB.Generation>a.sb.Generation+1||
 		nextSB.Geometry.ReservedOffset!=a.sb.Geometry.ReservedOffset||
 		nextSB.Geometry.MetadataBytes<a.sb.Geometry.MetadataBytes{return ErrGeometry}
 	expected,bitmapPages,err:=dynamicReservedGeometry(nextSB);if err!=nil{return err}
