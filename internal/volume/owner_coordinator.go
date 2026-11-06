@@ -224,6 +224,7 @@ func newOwnerLease(lease lock.Lease, record OwnerRecord, poll time.Duration) *Ow
 	return l
 }
 func (l *OwnerLease) Epoch() uint64 { if l==nil{return 0};return l.epoch }
+func (l *OwnerLease) VolumeID() string { if l==nil{return ""};return l.record.VolumeID }
 // Valid reports the current sanlock helper lease state synchronously.
 func (l *OwnerLease) Valid() bool { return l!=nil && l.lease!=nil && l.lease.Valid() }
 // OwnerRecord returns the durable identity published before PR RESERVE.

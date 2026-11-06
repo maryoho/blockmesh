@@ -151,6 +151,7 @@ func acquireOwnerLease(c poolConfig,poolID string)(*helperOwnerLease,error){
 }
 func(l *helperOwnerLease)Epoch()uint64{if l==nil{return 0};return l.epoch}
 func(l *helperOwnerLease)Resource()string{if l==nil{return ""};return l.resource}
+func(l *helperOwnerLease)VolumeID()string{if l==nil{return ""};return strings.TrimPrefix(l.resource,"volume:")}
 func(l *helperOwnerLease)Valid()bool{if l==nil{return false};select{case <-l.done:return false;default:return true}}
 func(l *helperOwnerLease)Close()error{
  if l==nil{return nil}
