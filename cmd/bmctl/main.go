@@ -275,7 +275,9 @@ func dynamicRecoverPool(id string,c poolConfig)error{
 		if e!=nil{return e}
 		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",sb.PoolUUID,0)
 		committer,e:=wal.NewDynamicSharedCommitter(metadata,sb,0,locker,resource);if e!=nil{return e}
-		if e=wal.GuardDynamicSharedCommitter(committer,owner,id,nil);e!=nil{return e}
+		volume,e:=metastore.OpenDynamicPoolVolume(metadata,sb,0,id);if e!=nil{return fmt.Errorf("open Volume after WAL recovery: %w",e)}
+		epochReader,e:=metastore.NewDynamicOwnerEpochReader(metadata,sb,0,id);if e!=nil{return e}
+		if e=wal.GuardDynamicSharedCommitter(committer,owner,id,epochReader.ReadOwnerEpoch);e!=nil{return e}
 		if e=volumeAllocator.ReconcileRegion(committer);e!=nil{return fmt.Errorf("reconcile Reserved allocator geometry: %w",e)}
 	}
 	if !owner.Valid(){return errors.New("Owner lease lost during Pool recovery")}
