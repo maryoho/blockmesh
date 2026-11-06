@@ -180,40 +180,56 @@ func (c *OwnerCoordinator) AcquireOwner(ctx context.Context, volumeID, nodeID, b
 	return out,nil
 }
 
- // ProveVolumeFenced is the destructive-operation proof used before a
- // BMPOOL03 Reserved Arena can be reclaimed. It serializes with normal Owner
- // acquisition, fences the last durable initiator on every configured SAN
- // path, and waits for the old-owner I/O barrier before returning success.
- func(c *OwnerCoordinator) ProveVolumeFenced(ctx context.Context,volumeID string,ownerEpoch uint64)error{
-	if c==nil||ctx==nil||strings.TrimSpace(volumeID)==""||ownerEpoch==0{return errors.New("OwnerCoordinator, context, Volume ID and OwnerEpoch are required")}
-	resource:=c.cfg.ResourceFor(volumeID);if strings.TrimSpace(resource)==""{return errors.New("Owner sanlock resource is empty")}
-	lease,err:=c.cfg.Locker.Acquire(ctx,resource);if err!=nil{return fmt.Errorf("acquire exclusive Owner resource for Volume fencing: %w",err)}
-	if lease==nil{return errors.New("distributed locker returned nil Owner lease")}
-	record,exists,err:=c.cfg.Records.Load(ctx,volumeID)
-	if err!=nil{return errors.Join(err,lease.Close())}
+// OwnerFencingLease holds the exclusive Owner sanlock resource after the
+// previous initiator has been PR-fenced and its metadata I/O drained.
+type OwnerFencingLease struct {
+	lease lock.Lease
+	volumeID string
+	epoch uint64
+}
+func(l *OwnerFencingLease)Resource()string{if l==nil||l.lease==nil{return ""};return l.lease.Resource()}
+func(l *OwnerFencingLease)VolumeID()string{if l==nil{return ""};return l.volumeID}
+func(l *OwnerFencingLease)Epoch()uint64{if l==nil{return 0};return l.epoch}
+func(l *OwnerFencingLease)Valid()bool{return l!=nil&&l.lease!=nil&&l.lease.Valid()}
+func(l *OwnerFencingLease)Close()error{if l==nil||l.lease==nil{return nil};return l.lease.Close()}
+
+// AcquireVolumeFencing returns a lease that remains held until the caller
+// commits the descriptor/allocator release transaction and closes it.
+func(c *OwnerCoordinator)AcquireVolumeFencing(ctx context.Context,volumeID string,ownerEpoch uint64)(*OwnerFencingLease,error){
+	if c==nil||ctx==nil||strings.TrimSpace(volumeID)==""||ownerEpoch==0{return nil,errors.New("OwnerCoordinator, context, Volume ID and OwnerEpoch are required")}
+	resource:=c.cfg.ResourceFor(volumeID);if strings.TrimSpace(resource)==""{return nil,errors.New("Owner sanlock resource is empty")}
+	lease,err:=c.cfg.Locker.Acquire(ctx,resource);if err!=nil{return nil,fmt.Errorf("acquire exclusive Owner resource for Volume fencing: %w",err)}
+	if lease==nil{return nil,errors.New("distributed locker returned nil Owner lease")}
+	fail:=func(e error)(*OwnerFencingLease,error){return nil,errors.Join(e,lease.Close())}
+	if !lease.Valid(){return fail(errors.New("Owner sanlock lease lost before Volume fencing"))}
+	record,exists,err:=c.cfg.Records.Load(ctx,volumeID);if err!=nil{return fail(err)}
+	descriptorEpoch,err:=c.cfg.ReadEpoch(ctx,volumeID);if err!=nil{return fail(err)}
+	if descriptorEpoch!=ownerEpoch{return fail(fmt.Errorf("descriptor OwnerEpoch %d does not match requested fencing epoch %d",descriptorEpoch,ownerEpoch))}
 	if !exists{
-		epoch,readErr:=c.cfg.ReadEpoch(ctx,volumeID)
-		if readErr!=nil{return errors.Join(readErr,lease.Close())}
-		if epoch>1||epoch!=ownerEpoch{return errors.Join(errors.New("cannot prove Volume fenced: OwnerRecord is absent while descriptor indicates prior ownership"),lease.Close())}
-		if !lease.Valid(){return errors.Join(errors.New("Owner sanlock lease lost during empty-owner fencing proof"),lease.Close())}
-		return lease.Close()
+		if descriptorEpoch>1{return fail(errors.New("cannot prove Volume fenced: OwnerRecord is absent while descriptor indicates prior ownership"))}
+		return &OwnerFencingLease{lease:lease,volumeID:volumeID,epoch:ownerEpoch},nil
 	}
 	if record.VolumeID!=volumeID||record.Epoch!=ownerEpoch||record.NodeID==""||record.BootID==""{
-		return errors.Join(errors.New("durable OwnerRecord does not match requested Volume/OwnerEpoch"),lease.Close())
+		return fail(errors.New("durable OwnerRecord does not match requested Volume/OwnerEpoch"))
 	}
-	if !lease.Valid(){return errors.Join(errors.New("Owner sanlock lease lost before PR fencing"),lease.Close())}
 	if err=c.cfg.Fencer.FenceNode(ctx,record.NodeID,record.BootID);err!=nil{
 		_ = c.recordEvent(volumeID,"reclaimer","reclaimer",ownerEpoch,"scsi_pr.preempt_and_abort","fence_volume_owner","failure","fencer-error",err.Error())
-		return errors.Join(fmt.Errorf("fence last Volume Owner on every SAN path: %w",err),lease.Close())
+		return fail(fmt.Errorf("fence last Volume Owner on every SAN path: %w",err))
 	}
 	if err=c.cfg.DrainOldOwner(ctx,volumeID,record);err!=nil{
 		_ = c.recordEvent(volumeID,"reclaimer","reclaimer",ownerEpoch,"old_owner.metadata_io_drain","drain_volume_owner","failure","io-barrier-error",err.Error())
-		return errors.Join(fmt.Errorf("old Volume Owner I/O is not drained: %w",err),lease.Close())
+		return fail(fmt.Errorf("old Volume Owner I/O is not drained: %w",err))
 	}
-	if !lease.Valid(){return errors.Join(errors.New("Owner sanlock lease lost after PR fencing and I/O drain"),lease.Close())}
-	if err=c.recordEvent(volumeID,"reclaimer","reclaimer",ownerEpoch,"volume.fencing.proven","prove_volume_fenced","success","all-path-fencer-and-io-barrier-returned","last durable Owner was fenced and its metadata I/O drained");err!=nil{
-		return errors.Join(err,lease.Close())
-	}
+	if !lease.Valid(){return fail(errors.New("Owner sanlock lease lost after PR fencing and I/O drain"))}
+	if err=c.recordEvent(volumeID,"reclaimer","reclaimer",ownerEpoch,"volume.fencing.proven","prove_volume_fenced","success","all-path-fencer-and-io-barrier-returned","last durable Owner was fenced and its metadata I/O drained");err!=nil{return fail(err)}
+	return &OwnerFencingLease{lease:lease,volumeID:volumeID,epoch:ownerEpoch},nil
+}
+
+// ProveVolumeFenced is a short-lived convenience proof. Destructive metadata
+// operations should prefer AcquireVolumeFencing and retain the returned lease
+// through their durable transaction.
+func(c *OwnerCoordinator)ProveVolumeFenced(ctx context.Context,volumeID string,ownerEpoch uint64)error{
+	lease,err:=c.AcquireVolumeFencing(ctx,volumeID,ownerEpoch);if err!=nil{return err}
 	return lease.Close()
 }
 
