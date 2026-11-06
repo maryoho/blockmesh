@@ -216,50 +216,52 @@ func (t *Tree) Get(key uint64) (uint64, error) {
 
 // Put inserts or replaces key. A successful update publishes a new root only
 // after every new page image has been written and synchronized.
+// Put inserts or replaces one key.
 func (t *Tree) Put(key, value uint64) error {
+	return t.PutBatchWithImages([]Item{{Key:key, Value:value}}, nil)
+}
+
+// PutBatchWithImages applies all key/value updates and caller-supplied fixed-LBA
+// after-images in one root publication/WAL transaction. It is intended for
+// Pool metadata transactions (e.g. mapping + idempotency index + Data Bitmap).
+// Every extra image must be a full aligned 4KiB page and must not overlap the
+// Volume Descriptor/root image or any COW page.
+func (t *Tree) PutBatchWithImages(updates []Item, extra []metastore.PageImage) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
-	next := append([]Item(nil), t.items...)
-	i := sort.Search(len(next), func(i int) bool { return next[i].Key >= key })
-	if i < len(next) && next[i].Key == key && next[i].Value == value {
-		return nil
-	}
-	if i < len(next) && next[i].Key == key {
-		next[i].Value = value
-	} else {
-		next = append(next, Item{})
-		copy(next[i+1:], next[i:])
-		next[i] = Item{Key: key, Value: value}
-	}
-
+	if len(updates)==0 && len(extra)==0 { return nil }
+	if len(extra)>0 && t.journal==nil { return errors.New("atomic extra images require a WAL-backed B+Tree") }
+	next:=append([]Item(nil),t.items...)
 	var root *cowNode
-	if t.root == metastore.NoPage {
-		root = &cowNode{level: 0, leaf: true, dirty: true, items: []Item{{Key: key, Value: value}}}
-	} else {
+	if t.root!=metastore.NoPage {
 		var err error
-		root, err = loadCowNode(t.store, t.root)
-		if err != nil {
-			return err
+		root,err=loadCowNode(t.store,t.root);if err!=nil{return err}
+	}
+	changed:=false
+	for _,u:=range updates {
+		i:=sort.Search(len(next),func(i int)bool{return next[i].Key>=u.Key})
+		if i<len(next)&&next[i].Key==u.Key&&next[i].Value==u.Value { continue }
+		if i<len(next)&&next[i].Key==u.Key { next[i].Value=u.Value } else {
+			next=append(next,Item{});copy(next[i+1:],next[i:]);next[i]=u
 		}
-		roots, changed, err := insertCOW(t.store, root, key, value)
-		if err != nil {
-			return err
+		if root==nil {
+			root=&cowNode{level:0,leaf:true,dirty:true,items:[]Item{{Key:u.Key,Value:u.Value}}}
+			changed=true
+			continue
 		}
-		if !changed {
-			return nil
-		}
-		if len(roots) == 1 {
-			root = roots[0]
-		} else {
-			children := make([]cowChild, len(roots))
-			for i, child := range roots {
-				children[i] = cowChild{id: child.id, minKey: child.minKey(), level: child.level, node: child}
-			}
-			root = &cowNode{level: roots[0].level + 1, dirty: true, children: children}
+		roots,didChange,err:=insertCOW(t.store,root,u.Key,u.Value)
+		if err!=nil{return err}
+		if !didChange {continue}
+		changed=true
+		if len(roots)==1 { root=roots[0] } else {
+			children:=make([]cowChild,len(roots))
+			for i,child:=range roots { children[i]=cowChild{id:child.id,minKey:child.minKey(),level:child.level,node:child} }
+			root=&cowNode{level:roots[0].level+1,dirty:true,children:children}
 		}
 	}
-	return t.publishCOW(root, next)
+	if !changed && len(extra)==0 { return nil }
+	if root==nil && len(extra)>0 { root=nil }
+	return t.publishCOWWithImages(root,next,extra)
 }
 
 // Delete removes key and returns ErrKeyNotFound when it does not exist.

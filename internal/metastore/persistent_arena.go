@@ -167,7 +167,14 @@ func (p *PersistentArena) Pending()[]RetireBatch{
 // goroutine cannot abort/reuse a page while its after-image is in flight.
 // A non-ErrJournalFull error may have an uncertain commit outcome; callers must
 // stop using this instance and reopen/recover rather than aborting the reservation.
-func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error{
+func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error {
+	return p.CommitPagesAndPublishWithImages(reservation,pages,newLivePages,rootPage,mappingSequence,retireGeneration,retired,nil)
+}
+
+// CommitPagesAndPublishWithImages includes caller-owned fixed-LBA pages (such
+// as AG bitmap descriptor/data and persistent idempotency records) in the same
+// redo-WAL transaction as COW pages, lifecycle state and root publication.
+func (p *PersistentArena) CommitPagesAndPublishWithImages(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64,extra []PageImage)error{
  if p==nil{return errors.New("nil persistent arena")}
  if p.coordinator!=nil {
   unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
@@ -223,7 +230,11 @@ func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages [
  queueImages,err:=encodeRetireQueuePages(nextBatches,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{p.arena.mu.Unlock();return err}
  stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
  sb:=p.store.Superblock();stateOff,_,err:=lifecycleOffsets(sb);if err!=nil{p.arena.mu.Unlock();return err}
- extras:=[]PageImage{{Offset:stateOff,Data:stateImage}}
+ extras:=append([]PageImage(nil),extra...)
+ for _,image:=range extras {
+  if image.Offset%PageSize!=0||len(image.Data)!=int(PageSize) {p.arena.mu.Unlock();return errors.New("extra WAL images must be aligned 4KiB pages")}
+ }
+ extras=append(extras,PageImage{Offset:stateOff,Data:stateImage})
  for i,image:=range queueImages { extras=append(extras,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
  if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{p.arena.mu.Unlock();return err}
  // The durable root is now visible. Convert this transaction's reservations

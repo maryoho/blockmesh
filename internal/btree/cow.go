@@ -480,7 +480,7 @@ func retiredPageIDs(oldPages,newPages []uint64) []uint64 {
  return retired
 }
 
-func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64) error {
+func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64, extra []metastore.PageImage) error {
  pageCount:=countDirty(root)
  if pageCount==0 {
   rootID:=metastore.NoPage;if root!=nil {rootID=root.id}
@@ -488,9 +488,9 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
   var err error
   if t.persistentArena!=nil {
-   err=t.persistentArena.CommitPagesAndPublish(nil,nil,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
+   err=t.persistentArena.CommitPagesAndPublishWithImages(nil,nil,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages),extra)
   } else {
-   err=t.store.CommitPagesAndPublish(nil,rootID,sequence,t.journal)
+   err=t.store.CommitPagesAndPublishWithImages(nil,extra,rootID,sequence,t.journal)
   }
   if err!=nil{return fmt.Errorf("WAL commit root descriptor and lifecycle: %w",err)}
   if t.persistentArena==nil {
@@ -510,9 +510,9 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  if cursor!=len(ids){return fmt.Errorf("internal error: used %d of %d reserved COW pages",cursor,len(ids))}
  newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
  if t.persistentArena!=nil {
-  err=t.persistentArena.CommitPagesAndPublish(reservation,pages,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages))
+  err=t.persistentArena.CommitPagesAndPublishWithImages(reservation,pages,newPages,rootID,sequence,oldGeneration,retiredPageIDs(oldPages,newPages),extra)
  } else {
-  err=t.store.CommitPagesAndPublish(pages,rootID,sequence,t.journal)
+  err=t.store.CommitPagesAndPublishWithImages(pages,extra,rootID,sequence,t.journal)
  }
  if err!=nil {
   // WAL-full is a guaranteed pre-commit failure. Other errors may follow a
@@ -533,6 +533,10 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  return nil
 }
 func (t *Tree) publishCOW(root *cowNode, items []Item) error {
+	return t.publishCOWWithImages(root,items,nil)
+}
+
+func (t *Tree) publishCOWWithImages(root *cowNode, items []Item, extra []metastore.PageImage) error {
 	sb := t.store.Superblock()
 	if sb.MappingSequence == ^uint64(0) {
 		return fmt.Errorf("B+Tree mapping sequence exhausted")
@@ -540,7 +544,7 @@ func (t *Tree) publishCOW(root *cowNode, items []Item) error {
 	sequence := sb.MappingSequence + 1
 	oldPages := append([]uint64(nil), t.pages...)
 	if t.journal != nil {
-		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence)
+		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence, extra)
 	}
 	var newPages []uint64
 	if root != nil {
