@@ -360,19 +360,38 @@ func DynamicVolumeAllocatorPresent(dev Device,sb format.DynamicSuperblock)bool{
 	return magic==dynamicReservedMagic||magic==dynamicReservedFormatMagic
 }
 
-// ReleaseVolume never trusts a timeout or a caller-provided boolean. A platform
-// fencing verifier must prove that every initiator for the Volume is fenced
-// before its Arena pages can be returned to the shared Reserved region.
+// DynamicVolumeFencingLease is held for the entire descriptor/bitmap release
+// transaction. The Owner sanlock resource must not be released between PR
+// fencing proof and metadata publication.
+type DynamicVolumeFencingLease interface {
+	Valid() bool
+	VolumeID() string
+	Epoch() uint64
+	Close() error
+}
 type DynamicVolumeFencingProof interface {
-	ProveVolumeFenced(context.Context,string,uint64) error
+	AcquireVolumeFencing(context.Context,string,uint64)(DynamicVolumeFencingLease,error)
 }
 
-func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,proof DynamicVolumeFencingProof,committer ClusterSafeCommitter) error {
+func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,proof DynamicVolumeFencingProof,committer ClusterSafeCommitter)(retErr error) {
 	if a==nil||ctx==nil||proof==nil||committer==nil||!committer.ClusterSafe(){return errors.New("allocator, context, fencing proof and cluster-safe committer are required")}
 	a.mu.Lock();defer a.mu.Unlock()
 	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index);if err!=nil{return err}
 	d,err:=a.readDescriptor(pair);if err!=nil{return err}
-	if err=proof.ProveVolumeFenced(ctx,d.VolumeID,d.OwnerEpoch);err!=nil{return fmt.Errorf("refuse Reserved-region reuse before Volume fencing: %w",err)}
+	fenceLease,err:=proof.AcquireVolumeFencing(ctx,d.VolumeID,d.OwnerEpoch);if err!=nil{return fmt.Errorf("refuse Reserved-region reuse before Volume fencing: %w",err)}
+	if fenceLease==nil{return errors.New("fencing proof returned a nil Volume fencing lease")}
+	defer func(){retErr=errors.Join(retErr,fenceLease.Close())}()
+	if !fenceLease.Valid()||fenceLease.VolumeID()!=d.VolumeID||fenceLease.Epoch()!=d.OwnerEpoch{
+		return errors.New("Volume fencing lease identity/epoch does not match descriptor")
+	}
+	if setter,ok:=committer.(interface{SetGuard(func()error)});ok{
+		setter.SetGuard(func()error{
+			if !fenceLease.Valid()||fenceLease.VolumeID()!=d.VolumeID||fenceLease.Epoch()!=d.OwnerEpoch{
+				return errors.New("Volume fencing lease lost during descriptor/bitmap release")
+			}
+			return nil
+		})
+	}
 	if a.header.Generation==math.MaxUint64{return errors.New("Reserved allocator generation exhausted")}
 	if d.ArenaStart<a.header.RegionStart{return ErrGeometry}
 	start:=d.ArenaStart-a.header.RegionStart
@@ -390,6 +409,7 @@ func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,p
 	bitmapImages,err:=a.bitmapHeaderImages(nextBitmap,nextHeader);if err!=nil{return err}
 	images=append(images,bitmapImages...)
 	if len(images)>MaxMetadataTransactionPages{return ErrMetadataTransactionTooLarge}
+	if !fenceLease.Valid(){return errors.New("Volume fencing lease lost before metadata release commit")}
 	if err=committer.CommitImages(images);err!=nil{return err}
 	a.bitmap,a.header=nextBitmap,nextHeader;a.headerSlot=1-a.headerSlot
 	return nil
