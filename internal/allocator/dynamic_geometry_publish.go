@@ -89,12 +89,17 @@ func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,ne
 // mirrors it to the previous active copy. A crash at any point leaves either
 // the old valid geometry or at least one complete new copy.
 func PublishDynamicGeometry(dev device.Device,current,next format.DynamicSuperblock,bitmapCommitter metastore.Committer)error{
+	return publishDynamicGeometryChecked(dev,current,next,bitmapCommitter,nil)
+}
+
+func publishDynamicGeometryChecked(dev device.Device,current,next format.DynamicSuperblock,bitmapCommitter metastore.Committer,guard func()error)error{
 	if dev==nil{return errors.New("nil BMPOOL03 MetadataView")}
 	if err:=current.Validate();err!=nil{return err};if err:=next.Validate();err!=nil{return err}
 	if next.PoolUUID!=current.PoolUUID||next.Generation!=current.Generation+1||
 		next.ViewGeneration<=current.ViewGeneration{return errors.New("BMPOOL03 geometry publication identity/generation mismatch")}
 	if uint64(dev.Size())<next.Geometry.MetadataBytes{return errors.New("expanded MetadataView is smaller than new geometry")}
 	if !sameDynamicMetadataLayout(current.Geometry,next.Geometry){return ErrDynamicGeometryRequiresMigration}
+	if guard!=nil{if err:=guard();err!=nil{return err}}
 	if next.Geometry.DataBytes>current.Geometry.DataBytes{
 		if bitmapCommitter==nil{return errors.New("bitmap WAL committer required before publishing Data growth")}
 		images,err:=PlanDynamicBitmapGrow(dev,current,next);if err!=nil{return err}
@@ -104,9 +109,11 @@ func PublishDynamicGeometry(dev device.Device,current,next format.DynamicSuperbl
 	selected,slot,err:=readDynamicSuperblockPairWithSlot(dev);if err!=nil{return err}
 	if selected!=current{return errors.New("stale BMPOOL03 geometry publisher: current on-disk superblock changed")}
 	encoded,err:=next.Encode();if err!=nil{return err}
+	if guard!=nil{if err=guard();err!=nil{return err}}
 	inactive:=uint64(1)-slot
 	if err=writeDynamicDeviceFull(dev,encoded,int64(inactive*format.PageSize));err!=nil{return fmt.Errorf("publish first BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync first BMPOOL03 superblock copy: %w",err)}
+	if guard!=nil{if err=guard();err!=nil{return err}}
 	if err=writeDynamicDeviceFull(dev,encoded,int64(slot*format.PageSize));err!=nil{return fmt.Errorf("publish second BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync second BMPOOL03 superblock copy: %w",err)}
 	return nil
@@ -127,7 +134,8 @@ func PublishDynamicGeometryUnderLease(ctx context.Context,dev device.Device,curr
 	defer unlock()
 	if err=ctx.Err();err!=nil{return err}
 	if !ownerLease.Valid(){return errors.New("Pool Owner lease lost before geometry publication")}
-	err=PublishDynamicGeometry(dev,current,next,bitmapCommitter)
+	guard:=func()error{if !ownerLease.Valid(){return errors.New("Pool Owner lease lost during geometry publication")};return nil}
+	err=publishDynamicGeometryChecked(dev,current,next,bitmapCommitter,guard)
 	if err!=nil{return err}
 	if !ownerLease.Valid(){return errors.New("Pool Owner lease lost during geometry publication; fence and inspect both superblock copies")}
 	return nil

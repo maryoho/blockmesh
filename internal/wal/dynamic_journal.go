@@ -142,8 +142,7 @@ func(j *DynamicJournal)Checkpoint()error{
 	if j.checkpointGeneration==math.MaxUint64{return errors.New("BMPOOL03 checkpoint generation exhausted")}
 	nextBank:=uint32(1)-j.activeBank
 	nextBase:=j.segmentBase+uint64(nextBank)*j.bankSize
-	zero:=make([]byte,int(j.bankSize))
-	if err:=writeDynamicAtFull(j.dev,zero,int64(nextBase));err!=nil{return fmt.Errorf("clear inactive BMPOOL03 WAL bank: %w",err)}
+	if err:=zeroDynamicRange(j.dev,nextBase,j.bankSize);err!=nil{return fmt.Errorf("clear inactive BMPOOL03 WAL bank: %w",err)}
 	if err:=j.dev.Sync();err!=nil{return fmt.Errorf("sync cleared BMPOOL03 WAL bank: %w",err)}
 	cp:=format.DynamicCheckpoint{AG:j.ag,Generation:j.checkpointGeneration+1,CheckpointTxID:j.lastTx,ActiveBank:nextBank}
 	page,err:=cp.Encode();if err!=nil{return err}
@@ -207,4 +206,14 @@ func(j *DynamicJournal)AG()uint32{return j.ag}
 
 func writeDynamicAtFull(dev DynamicMetadataDevice,b []byte,off int64)error{
 	n,err:=dev.WriteAt(b,off);if err!=nil{return err};if n!=len(b){return io.ErrShortWrite};return nil
+}
+
+func zeroDynamicRange(dev DynamicMetadataDevice,off,length uint64)error{
+	zero:=make([]byte,1<<20)
+	for done:=uint64(0);done<length;{
+		n:=uint64(len(zero));if length-done<n{n=length-done}
+		if err:=writeDynamicAtFull(dev,zero[:int(n)],int64(off+done));err!=nil{return err}
+		done+=n
+	}
+	return nil
 }
