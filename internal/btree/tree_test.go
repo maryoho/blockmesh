@@ -542,3 +542,42 @@ func TestPersistentTreeRefreshSeesCommittedRootFromAnotherStore(t *testing.T) {
 	got,err:=reader.Get(7);if err!=nil{t.Fatal(err)}
 	if got!=70{t.Fatalf("refreshed value=%d want 70",got)}
 }
+
+func TestPersistentTreePublishesExternalArenaPageWithIndexAtomically(t *testing.T) {
+	dev:=newMemoryDevice(128)
+	store,err:=metastore.Format(dev,metastore.Layout{
+		VolumeID:"external-arena-pages",TotalPages:128,ArenaStart:2,ArenaPages:124,
+		LifecycleStart:126,LifecyclePages:2,
+	})
+	if err!=nil {t.Fatal(err)}
+	if err=metastore.FormatLifecycle(store);err!=nil {t.Fatal(err)}
+	committer:=memoryCommitter{dev:dev}
+	tree,err:=OpenPersistent(store,committer);if err!=nil {t.Fatal(err)}
+	reservation,ids,err:=tree.ReserveExternalPages(1);if err!=nil {t.Fatal(err)}
+	recordID:=ids[0]
+	page:=metastore.Page{ID:recordID,Type:0x100,Generation:1,Payload:[]byte("external-record")}
+	if err=tree.PutBatchWithReservedArenaPages([]Item{{Key:(uint64(1)<<63)|123,Value:recordID}},reservation,[]metastore.Page{page},nil);err!=nil {
+		t.Fatalf("atomic external page publish: %v",err)
+	}
+	if stats:=tree.ArenaStats();stats.ReservedPages!=0||stats.LivePages!=2 {
+		t.Fatalf("external page and COW page not transitioned to Live: %+v",stats)
+	}
+	// A later COW update must retain the external page as Live.
+	if err=tree.Put(7,70);err!=nil {t.Fatal(err)}
+	if stats:=tree.ArenaStats();stats.LivePages<3 {t.Fatalf("external page was lost during later COW: %+v",stats)}
+
+	reopenedStore,err:=metastore.Open(dev,"external-arena-pages");if err!=nil {t.Fatal(err)}
+	resolver:=func(s *metastore.Store,items []Item)([]uint64,error){
+		var ids []uint64
+		for _,item:=range items {if item.Key>>63!=0 {ids=append(ids,item.Value)}}
+		return ids,nil
+	}
+	reopened,err:=OpenPersistentWithExternalPages(reopenedStore,committer,resolver);if err!=nil {t.Fatal(err)}
+	if got,err:=reopened.store.ReadPage(recordID);err!=nil||got.Type!=0x100||string(got.Payload)!="external-record" {
+		t.Fatalf("recovered external page=%+v err=%v",got,err)
+	}
+	if stats:=reopened.ArenaStats();stats.LivePages<3 {t.Fatalf("recovered Arena did not pin external page: %+v",stats)}
+	if _,err=OpenPersistent(reopenedStore,committer);err==nil {
+		t.Fatal("opening external-page index without resolver must fail closed")
+	}
+}

@@ -515,6 +515,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
    if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages: %w",err)}
   }
   t.items=append([]Item(nil),items...);t.pages,t.root=newPages,rootID
+  t.externalPages=append(t.externalPages,externalPageIDs(arenaPages)...)
   return nil
  }
  reservation:=supplied
@@ -541,6 +542,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  rootID,pages,err:=persistCOWImages(root,cowIDs,&cursor,sequence);if err!=nil{return err}
  if cursor!=len(cowIDs){return fmt.Errorf("internal error: used %d of %d reserved COW pages",cursor,len(cowIDs))}
  newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
+ newPages=append(newPages,t.externalPages...)
  for i:=range arenaPages {
   id:=ids[i]
   if supplied==nil {id=ids[pageCount+i];arenaPages[i].ID=id} else if arenaPages[i].ID!=id {return metastore.ErrInvalidPageSet}
@@ -569,6 +571,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w",err)}
  }
  t.items=append([]Item(nil),items...);t.root,t.pages=rootID,newPages
+ t.externalPages=append(t.externalPages,externalPageIDs(arenaPages)...)
  return nil
 }
 func (t *Tree) publishCOW(root *cowNode, items []Item) error {
@@ -675,4 +678,13 @@ func (t *Tree) retireSuperseded(oldPages, newPages []uint64, generation uint64) 
 		if _, ok := current[id]; !ok { retired = append(retired, id) }
 	}
 	return t.retire.Retire(generation, retired)
+}
+
+
+// externalPageIDs returns the IDs of caller-owned pages newly included in
+// the current publication. The input pages have already received reserved IDs.
+func externalPageIDs(pages []metastore.Page) []uint64 {
+ ids:=make([]uint64,len(pages))
+ for i,p:=range pages {ids[i]=p.ID}
+ return ids
 }
