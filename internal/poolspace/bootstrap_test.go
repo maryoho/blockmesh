@@ -157,6 +157,41 @@ func TestFormatBootstrapRejectsDirtyReservedRegion(t *testing.T){
  if _,err=FormatBootstrap(f,64,512);err==nil{t.Fatal("expected non-zero Bootstrap reservation to be rejected")}
 }
 
+func TestBootstrapAllocateDataExtentsPublishesConsistentViews(t *testing.T) {
+	f, s := newSparsePool(t)
+	defer f.Close()
+	attachBootstrapGuards(t, s, &testBootstrapOwner{epoch: 1})
+	allocated, err := s.AllocateDataExtents(8 << 20)
+	if err != nil { t.Fatal(err) }
+	if len(allocated) == 0 { t.Fatal("no Data extents allocated") }
+	metadata, data, generation, err := s.OpenViews()
+	if err != nil { t.Fatal(err) }
+	if metadata == nil || data == nil || generation != 2 { t.Fatalf("invalid views metadata=%v data=%v generation=%d", metadata, data, generation) }
+	if data.Size() != 8<<20 { t.Fatalf("Data view size=%d", data.Size()) }
+	payload := []byte("logical data view on the same LUN")
+	if n, err := data.WriteAt(payload, 0); err != nil || n != len(payload) { t.Fatalf("DataView write n=%d err=%v", n, err) }
+	physical := make([]byte, len(payload))
+	if _, err = f.ReadAt(physical, int64(allocated[0].Start)); err != nil { t.Fatal(err) }
+	if string(physical) != string(payload) { t.Fatalf("parent LUN data=%q", physical) }
+	reopened, err := OpenBootstrap(f)
+	if err != nil { t.Fatal(err) }
+	_, reopenedData, reopenedGeneration, err := reopened.OpenViews()
+	if err != nil { t.Fatal(err) }
+	if reopenedGeneration != generation || reopenedData == nil || reopenedData.Size() != data.Size() {
+		t.Fatalf("reopened view generation=%d size=%v", reopenedGeneration, reopenedData)
+	}
+}
+
+func TestBootstrapAllocateDataExtentsRequiresAllocationAlignment(t *testing.T) {
+	f, s := newSparsePool(t)
+	defer f.Close()
+	attachBootstrapGuards(t, s, &testBootstrapOwner{epoch: 1})
+	if _, err := s.AllocateDataExtents((4 << 20) + 1); err == nil {
+		t.Fatal("expected non-4MiB-aligned Data extent allocation to fail")
+	}
+	if s.Record().Generation != 1 { t.Fatal("invalid Data extent request changed Bootstrap generation") }
+}
+
 func TestBootstrapRejectsLegacyFormat(t *testing.T){
 	d,err:=device.OpenFile(t.TempDir()+"/legacy.img");if err!=nil{t.Fatal(err)};defer d.Close()
 	page:=make([]byte,PageSize);binaryPutUint64(page,0x424D504F4F4C3032)

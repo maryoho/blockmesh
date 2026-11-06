@@ -88,7 +88,6 @@ func (r BootstrapRecord) encode() ([]byte,error) {
 	binary.LittleEndian.PutUint64(b[80:88],r.ExtentMapGeneration)
 	binary.LittleEndian.PutUint32(b[88:92],r.LogicalSectorBytes)
 	binary.LittleEndian.PutUint64(b[96:104],r.OwnerEpoch)
-	binary.LittleEndian.PutUint64(b[96:104],r.OwnerEpoch)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],0)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],crc32.Checksum(b,crc32.MakeTable(crc32.Castagnoli)))
 	return b,nil
@@ -111,7 +110,6 @@ func decodeBootstrap(b []byte,slot uint64)(BootstrapRecord,error){
 	r.ExtentMapBytes=binary.LittleEndian.Uint64(b[72:80])
 	r.ExtentMapGeneration=binary.LittleEndian.Uint64(b[80:88])
 	r.LogicalSectorBytes=binary.LittleEndian.Uint32(b[88:92])
-	r.OwnerEpoch=binary.LittleEndian.Uint64(b[96:104])
 	r.OwnerEpoch=binary.LittleEndian.Uint64(b[96:104])
 	r.Slot=slot
  for _,v:=range b[92:96]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
@@ -231,6 +229,43 @@ func(s *BootstrapStore)OpenDataView()(*DataView,error){
  var dataExtents []Extent
  for _,e:=range s.allocator.extents{if e.Kind==Data{dataExtents=append(dataExtents,e)}}
  return NewDataView(s.dev,dataExtents)
+}
+
+// OpenMetadataView exposes Metadata extents as a logical device while keeping
+// the Bootstrap reservation addressable only through the parent Pool device.
+func(s *BootstrapStore)OpenMetadataView()(*MetadataView,error){
+ if s==nil||s.dev==nil||s.allocator==nil{return nil,ErrInvalidGeometry}
+ s.mu.Lock();defer s.mu.Unlock()
+ var extents []Extent
+ for _,e:=range s.allocator.extents{if e.Kind==Metadata{extents=append(extents,e)}}
+ return NewMetadataView(s.dev,extents)
+}
+
+// OpenViews snapshots both logical address spaces from one Extent Map
+// generation. Reopen these views after any Pool geometry update.
+func(s *BootstrapStore)OpenViews()(*MetadataView,*DataView,uint64,error){
+ if s==nil||s.dev==nil||s.allocator==nil{return nil,nil,0,ErrInvalidGeometry}
+ s.mu.Lock();defer s.mu.Unlock()
+ var metadataExtents,dataExtents []Extent
+ for _,e:=range s.allocator.extents{
+  switch e.Kind{case Metadata:metadataExtents=append(metadataExtents,e);case Data:dataExtents=append(dataExtents,e)}
+ }
+ metadata,err:=NewMetadataView(s.dev,metadataExtents);if err!=nil{return nil,nil,0,err}
+ var data *DataView
+ if len(dataExtents)>0{data,err=NewDataView(s.dev,dataExtents);if err!=nil{return nil,nil,0,err}}
+ return metadata,data,s.record.Generation,nil
+}
+
+// AllocateDataExtents reserves whole 4MiB-aligned physical ranges for the
+// Pool's logical Data address space. It publishes the Extent Map before
+// returning. Per-block allocation remains governed by the AG Bitmap WAL.
+func(s *BootstrapStore)AllocateDataExtents(bytes uint64)([]Extent,error){
+ if s==nil||s.allocator==nil||bytes==0||bytes%AllocationSize!=0{return nil,ErrInvalidGeometry}
+ s.mu.Lock();defer s.mu.Unlock()
+ next:=&Allocator{deviceBytes:s.allocator.deviceBytes,extents:s.allocator.Extents()}
+ allocated,err:=next.AllocateData(bytes);if err!=nil{return nil,err}
+ if err=s.persist(next,s.record.DeviceBytes);err!=nil{return nil,err}
+ return allocated,nil
 }
 
 
