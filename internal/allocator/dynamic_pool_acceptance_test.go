@@ -61,8 +61,9 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	store,err:=metastore.OpenDynamicPoolVolume(meta,sb,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
 	if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
 	locks:=&crashDistributedLocker{}
+	walLocks:=&crashDistributedLocker{}
 	fault:=&failArenaMetadataView{inner:meta,arenaStart:arenaStart}
-	committer,err:=wal.NewDynamicSharedCommitter(fault,sb,0,locks,"blockmesh:pool:bm03:ag:000:wal")
+	committer,err:=wal.NewDynamicSharedCommitter(fault,sb,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
 	tree,err:=btree.OpenPersistentWithExternalPages(store,committer,ResolveIdempotencyPages)
 	if err!=nil{t.Fatal(err)}
@@ -79,7 +80,7 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	recoveredJournal,err:=wal.OpenDynamicJournal(meta,sb,0);if err!=nil{t.Fatal(err)}
 	if _,err=recoveredJournal.Recover();err!=nil{t.Fatal(err)}
 	store2,err:=metastore.OpenDynamicPoolVolume(meta,sb,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
-	committer2,err:=wal.NewDynamicSharedCommitter(meta,sb,0,locks,"blockmesh:pool:bm03:ag:000:wal")
+	committer2,err:=wal.NewDynamicSharedCommitter(meta,sb,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
 	tree2,err:=btree.OpenPersistentWithExternalPages(store2,committer2,ResolveIdempotencyPages);if err!=nil{t.Fatal(err)}
 	alloc2,err:=NewDynamicPoolAllocator(store2,tree2,locks,data);if err!=nil{t.Fatal(err)}
@@ -108,13 +109,13 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	if err!=nil{t.Fatal(err)}
 	next,err:=BuildDynamicGeometryUpdate(sb,uint64(metaExpanded.Size()),uint64(dataExpanded.Size()),2)
 	if err!=nil{t.Fatal(err)}
-	growCommitter,err:=wal.NewDynamicSharedCommitter(metaExpanded,sb,0,locks,"blockmesh:pool:bm03:ag:000:wal")
+	growCommitter,err:=wal.NewDynamicSharedCommitter(metaExpanded,sb,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
 	if err=PublishDynamicGeometry(metaExpanded,sb,next,growCommitter);err!=nil{t.Fatal(err)}
 	opened,err:=OpenDynamicSuperblockPair(metaExpanded);if err!=nil{t.Fatal(err)}
 	if opened!=next{t.Fatalf("expanded geometry not published: %+v",opened)}
 	store3,err:=metastore.OpenDynamicPoolVolume(metaExpanded,next,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
-	committer3,err:=wal.NewDynamicSharedCommitter(metaExpanded,next,0,locks,"blockmesh:pool:bm03:ag:000:wal")
+	committer3,err:=wal.NewDynamicSharedCommitter(metaExpanded,next,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
 	tree3,err:=btree.OpenPersistentWithExternalPages(store3,committer3,ResolveIdempotencyPages);if err!=nil{t.Fatal(err)}
 	alloc3,err:=NewDynamicPoolAllocator(store3,tree3,locks,dataExpanded);if err!=nil{t.Fatal(err)}

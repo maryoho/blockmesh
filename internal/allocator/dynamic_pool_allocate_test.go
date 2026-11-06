@@ -41,7 +41,8 @@ func TestBMPOOL03AllocateZeroPublishUsesDataViewBlockIDs(t *testing.T){
 	store,err:=metastore.OpenDynamicPoolVolume(metadata,sb,0,desc.VolumeID);if err!=nil{t.Fatal(err)}
 	if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
 	locks:=&crashDistributedLocker{}
-	committer,err:=wal.NewDynamicSharedCommitter(metadata,sb,0,locks,"blockmesh:pool:bm03:ag:000:wal")
+	walLocks:=&crashDistributedLocker{}
+	committer,err:=wal.NewDynamicSharedCommitter(metadata,sb,0,walLocks,"blockmesh:pool:bm03:ag:000:wal")
 	if err!=nil{t.Fatal(err)}
 	tree,err:=btree.OpenPersistentWithExternalPages(store,committer,ResolveIdempotencyPages)
 	if err!=nil{t.Fatal(err)}
