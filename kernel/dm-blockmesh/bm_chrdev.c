@@ -26,8 +26,13 @@ static_assert(sizeof(struct bm_uapi_queue_query) == 40);
 static_assert(sizeof(struct bm_uapi_cancel) == 40);
 static_assert(sizeof(struct bm_uapi_abi_info) == 64);
 
-struct bm_queue {
+struct bm_queue_mem {
 	struct kref ref;
+	void *area;
+	size_t bytes;
+};
+struct bm_queue {
+	struct kref ref; /* registry reference plus transient ioctl/mmap lookups */
 	struct mutex lock;
 	wait_queue_head_t wait;
 	u32 id;
@@ -36,23 +41,33 @@ struct bm_queue {
 	u64 target_cookie;
 	bool attached;
 	bool dead;
-	void *area;
-	size_t area_bytes;
+	struct bm_queue_mem *mem; /* current service generation only */
 };
+
 static DEFINE_XARRAY(bm_queues);
 static DEFINE_MUTEX(bm_queues_lock);
 static DECLARE_WAIT_QUEUE_HEAD(bm_poll_wait);
 static atomic_t bm_service_open = ATOMIC_INIT(0);
-static u32 bm_next_queue_id = 1;
 static atomic64_t bm_session_generation = ATOMIC64_INIT(0);
+static u32 bm_next_queue_id = 1; /* monotonic; removed IDs are never reused */
 
+static void bm_mem_release(struct kref *ref)
+{
+	struct bm_queue_mem *mem = container_of(ref, struct bm_queue_mem, ref);
+	vfree(mem->area);
+	kfree(mem);
+}
+static void bm_mem_put(struct bm_queue_mem *mem)
+{
+	if (mem)
+		kref_put(&mem->ref, bm_mem_release);
+}
 static void bm_queue_release(struct kref *ref)
 {
 	struct bm_queue *q = container_of(ref, struct bm_queue, ref);
-	vfree(q->area);
+	bm_mem_put(q->mem);
 	kfree(q);
 }
-
 static struct bm_queue *bm_queue_lookup(u32 id)
 {
 	struct bm_queue *q;
@@ -78,10 +93,10 @@ static int bm_layout(u32 order, size_t *total)
 	*total = (size_t)bytes;
 	return 0;
 }
-
 static void bm_init_ring_ctrl(struct bm_queue *q, u64 offset, u32 entries)
 {
-	struct bm_uapi_ring_ctrl *ctrl = (void *)((char *)q->area + offset);
+	struct bm_uapi_ring_ctrl *ctrl;
+	ctrl = (void *)((char *)q->mem->area + offset);
 	memset(ctrl, 0, sizeof(*ctrl));
 	WRITE_ONCE(ctrl->ring_size, cpu_to_le32(entries));
 	WRITE_ONCE(ctrl->generation, cpu_to_le64(q->generation));
@@ -100,22 +115,24 @@ int bm_queue_create(u32 *queue_id, u64 *target_cookie)
 	mutex_init(&q->lock);
 	init_waitqueue_head(&q->wait);
 	q->generation = 1;
-	do { q->target_cookie = get_random_u64(); } while (!q->target_cookie);
+	do {
+		q->target_cookie = get_random_u64();
+	} while (!q->target_cookie);
 
 	mutex_lock(&bm_queues_lock);
 	if (!bm_next_queue_id || bm_next_queue_id > BM_UAPI_MAX_QUEUE_ID) {
-		ret = -ENOSPC; /* IDs are deliberately never reused. */
-		goto out_unlock;
+		ret = -ENOSPC;
+		goto err_unlock;
 	}
 	q->id = bm_next_queue_id++;
 	ret = xa_err(xa_store(&bm_queues, q->id, q, GFP_KERNEL));
 	if (ret)
-		goto out_unlock;
+		goto err_unlock;
 	*queue_id = q->id;
 	*target_cookie = q->target_cookie;
 	mutex_unlock(&bm_queues_lock);
 	return 0;
-out_unlock:
+err_unlock:
 	mutex_unlock(&bm_queues_lock);
 	kref_put(&q->ref, bm_queue_release);
 	return ret;
@@ -124,6 +141,7 @@ out_unlock:
 void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 {
 	struct bm_queue *q;
+	struct bm_queue_mem *old_mem;
 	mutex_lock(&bm_queues_lock);
 	q = xa_load(&bm_queues, queue_id);
 	if (!q || q->target_cookie != target_cookie) {
@@ -134,8 +152,11 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 	mutex_lock(&q->lock);
 	q->dead = true;
 	q->attached = false;
+	old_mem = q->mem;
+	q->mem = NULL;
 	mutex_unlock(&q->lock);
 	mutex_unlock(&bm_queues_lock);
+	bm_mem_put(old_mem);
 	wake_up_all(&q->wait);
 	wake_up_all(&bm_poll_wait);
 	kref_put(&q->ref, bm_queue_release);
@@ -145,9 +166,12 @@ static int bm_open(struct inode *inode, struct file *file)
 {
 	u32 id;
 	struct bm_queue *q;
+	u64 session;
 	(void)inode;
 	if (atomic_cmpxchg(&bm_service_open, 0, 1))
 		return -EBUSY;
+
+	/* Preflight first: do not partially advance generations on overflow. */
 	mutex_lock(&bm_queues_lock);
 	xa_for_each(&bm_queues, id, q) {
 		mutex_lock(&q->lock);
@@ -157,12 +181,23 @@ static int bm_open(struct inode *inode, struct file *file)
 			atomic_set(&bm_service_open, 0);
 			return -EOVERFLOW;
 		}
-		q->generation++;
-		q->attached = false;
 		mutex_unlock(&q->lock);
 	}
+	xa_for_each(&bm_queues, id, q) {
+		struct bm_queue_mem *old_mem;
+		mutex_lock(&q->lock);
+		q->generation++;
+		q->attached = false;
+		old_mem = q->mem;
+		q->mem = NULL; /* Never reuse pages mapped by a previous service FD. */
+		mutex_unlock(&q->lock);
+		bm_mem_put(old_mem); /* Old VMAs retain their own memory references. */
+	}
 	mutex_unlock(&bm_queues_lock);
-	file->private_data = (void *)(unsigned long)atomic64_inc_return(&bm_session_generation);
+	session = atomic64_inc_return(&bm_session_generation);
+	if (!session)
+		session = atomic64_inc_return(&bm_session_generation);
+	file->private_data = (void *)(unsigned long)session;
 	return 0;
 }
 
@@ -170,14 +205,19 @@ static int bm_release_file(struct inode *inode, struct file *file)
 {
 	u32 id;
 	struct bm_queue *q;
-	(void)inode; (void)file;
+	(void)inode;
+	(void)file;
 	mutex_lock(&bm_queues_lock);
 	xa_for_each(&bm_queues, id, q) {
+		struct bm_queue_mem *old_mem;
 		mutex_lock(&q->lock);
 		q->attached = false;
 		if (q->generation != U64_MAX)
 			q->generation++;
+		old_mem = q->mem;
+		q->mem = NULL;
 		mutex_unlock(&q->lock);
+		bm_mem_put(old_mem);
 		wake_up_all(&q->wait);
 	}
 	mutex_unlock(&bm_queues_lock);
@@ -206,7 +246,7 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		info.ring_ctrl_size = BM_UAPI_RING_CTRL_SIZE;
 		info.max_batch = BM_UAPI_MAX_BATCH;
 		info.max_ring_order = BM_UAPI_MAX_RING_ORDER;
-		info.features = 0; /* No request submission/cancellation feature advertised yet. */
+		info.features = 0; /* No request submission/cancellation feature yet. */
 		memset(info.reserved, 0, sizeof(info.reserved));
 		return copy_to_user(up, &info, sizeof(info)) ? -EFAULT : 0;
 	}
@@ -216,7 +256,8 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		unsigned long index;
 		if (copy_from_user(&query, up, sizeof(query)))
 			return -EFAULT;
-		if (query.size != sizeof(query) || query.reserved)
+		if (query.size != sizeof(query) || query.reserved ||
+		    query.after_queue_id > BM_UAPI_MAX_QUEUE_ID)
 			return -EINVAL;
 		index = (unsigned long)query.after_queue_id + 1;
 		mutex_lock(&bm_queues_lock);
@@ -237,6 +278,7 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case BM_IOC_SETUP_QUEUE: {
 		struct bm_uapi_setup setup;
 		struct bm_queue *q;
+		struct bm_queue_mem *mem;
 		size_t bytes;
 		u32 entries;
 		int ret;
@@ -244,7 +286,7 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		if (setup.size != sizeof(setup) || setup.version != BM_UAPI_VERSION ||
 		    setup.flags || setup.reserved[0] || setup.reserved[1] ||
-		    !setup.queue_id)
+		    !setup.queue_id || setup.queue_id > BM_UAPI_MAX_QUEUE_ID)
 			return -EINVAL;
 		ret = bm_layout(setup.ring_order, &bytes);
 		if (ret)
@@ -253,20 +295,30 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (!q)
 			return -ENOENT;
 		mutex_lock(&q->lock);
-		if (q->dead) ret = -ENODEV;
-		else if (q->attached) ret = -EBUSY;
-		else if (q->area) ret = -EALREADY;
+		if (q->dead)
+			ret = -ENODEV;
+		else if (q->attached)
+			ret = -EBUSY;
 		else {
-			q->area = vmalloc_user(bytes);
-			if (!q->area) ret = -ENOMEM;
+			mem = kzalloc(sizeof(*mem), GFP_KERNEL);
+			if (!mem)
+				ret = -ENOMEM;
 			else {
-				q->area_bytes = bytes;
-				q->ring_order = setup.ring_order;
-				entries = 1U << setup.ring_order;
-				bm_init_ring_ctrl(q, BM_UAPI_MMAP_REQUEST_CTRL, entries);
-				bm_init_ring_ctrl(q, BM_UAPI_MMAP_COMP_CTRL, entries);
-				q->attached = true;
-				ret = 0;
+				kref_init(&mem->ref); /* Queue owns one reference. */
+				mem->area = vmalloc_user(bytes);
+				mem->bytes = bytes;
+				if (!mem->area) {
+					kfree(mem);
+					ret = -ENOMEM;
+				} else {
+					q->mem = mem;
+					q->ring_order = setup.ring_order;
+					entries = 1U << setup.ring_order;
+					bm_init_ring_ctrl(q, BM_UAPI_MMAP_REQUEST_CTRL, entries);
+					bm_init_ring_ctrl(q, BM_UAPI_MMAP_COMP_CTRL, entries);
+					q->attached = true;
+					ret = 0;
+				}
 			}
 		}
 		if (!ret) {
@@ -281,7 +333,8 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 		mutex_unlock(&q->lock);
 		kref_put(&q->ref, bm_queue_release);
-		if (ret) return ret;
+		if (ret)
+			return ret;
 		return copy_to_user(up, &setup, sizeof(setup)) ? -EFAULT : 0;
 	}
 	case BM_IOC_RESET_QUEUE: {
@@ -292,19 +345,23 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (!raw || raw > BM_UAPI_MAX_QUEUE_ID)
 			return -EINVAL;
 		q = bm_queue_lookup((u32)raw);
-		if (!q) return -ENOENT;
+		if (!q)
+			return -ENOENT;
 		mutex_lock(&q->lock);
+		if (!q->attached) {
+			mutex_unlock(&q->lock);
+			kref_put(&q->ref, bm_queue_release);
+			return -ENOTCONN;
+		}
 		if (q->generation == U64_MAX) {
 			mutex_unlock(&q->lock);
 			kref_put(&q->ref, bm_queue_release);
 			return -EOVERFLOW;
 		}
 		q->generation++;
-		if (q->area) {
-			memset(q->area, 0, q->area_bytes);
-			bm_init_ring_ctrl(q, BM_UAPI_MMAP_REQUEST_CTRL, 1U << q->ring_order);
-			bm_init_ring_ctrl(q, BM_UAPI_MMAP_COMP_CTRL, 1U << q->ring_order);
-		}
+		memset(q->mem->area, 0, q->mem->bytes);
+		bm_init_ring_ctrl(q, BM_UAPI_MMAP_REQUEST_CTRL, 1U << q->ring_order);
+		bm_init_ring_ctrl(q, BM_UAPI_MMAP_COMP_CTRL, 1U << q->ring_order);
 		mutex_unlock(&q->lock);
 		wake_up_all(&q->wait);
 		wake_up_all(&bm_poll_wait);
@@ -318,19 +375,19 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 }
 
-static void bm_vma_open(struct vm_area_struct *vma)
+static void bm_mem_vma_open(struct vm_area_struct *vma)
 {
-	struct bm_queue *q = vma->vm_private_data;
-	kref_get(&q->ref);
+	struct bm_queue_mem *mem = vma->vm_private_data;
+	kref_get(&mem->ref);
 }
-static void bm_vma_close(struct vm_area_struct *vma)
+static void bm_mem_vma_close(struct vm_area_struct *vma)
 {
-	struct bm_queue *q = vma->vm_private_data;
-	kref_put(&q->ref, bm_queue_release);
+	struct bm_queue_mem *mem = vma->vm_private_data;
+	bm_mem_put(mem);
 }
 static const struct vm_operations_struct bm_vm_ops = {
-	.open = bm_vma_open,
-	.close = bm_vma_close,
+	.open = bm_mem_vma_open,
+	.close = bm_mem_vma_close,
 };
 
 static int bm_mmap(struct file *file, struct vm_area_struct *vma)
@@ -351,17 +408,20 @@ static int bm_mmap(struct file *file, struct vm_area_struct *vma)
 	if (!q)
 		return -ENOENT;
 	mutex_lock(&q->lock);
-	if (q->dead || !q->attached || !q->area)
+	if (q->dead || !q->attached || !q->mem)
 		ret = -ENOTCONN;
-	else if (local > q->area_bytes || length > q->area_bytes - local)
+	else if (local > q->mem->bytes || length > q->mem->bytes - local)
 		ret = -EINVAL;
 	else {
+		struct bm_queue_mem *mem = q->mem;
+		kref_get(&mem->ref); /* Initial VMA reference; fork uses vm_ops.open. */
 		vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-		ret = remap_vmalloc_range(vma, q->area, local >> PAGE_SHIFT);
+		ret = remap_vmalloc_range(vma, mem->area, local >> PAGE_SHIFT);
 		if (!ret) {
-			kref_get(&q->ref); /* Initial VMA reference; fork uses .open. */
 			vma->vm_ops = &bm_vm_ops;
-			vma->vm_private_data = q;
+			vma->vm_private_data = mem;
+		} else {
+			bm_mem_put(mem);
 		}
 	}
 	mutex_unlock(&q->lock);
@@ -382,14 +442,16 @@ static __poll_t bm_poll(struct file *file, poll_table *wait)
 		struct bm_uapi_ring_ctrl *ctrl;
 		u32 head, tail;
 		mutex_lock(&q->lock);
-		if (q->attached && !q->dead && q->area) {
-			ctrl = q->area + BM_UAPI_MMAP_REQUEST_CTRL;
+		if (q->attached && !q->dead && q->mem) {
+			ctrl = q->mem->area + BM_UAPI_MMAP_REQUEST_CTRL;
 			head = le32_to_cpu((__force __le32)READ_ONCE(ctrl->head));
 			tail = le32_to_cpu((__force __le32)READ_ONCE(ctrl->tail));
-			if (head != tail) mask |= EPOLLIN | EPOLLRDNORM;
+			if (head != tail)
+				mask |= EPOLLIN | EPOLLRDNORM;
 		}
 		mutex_unlock(&q->lock);
-		if (mask) break;
+		if (mask)
+			break;
 	}
 	mutex_unlock(&bm_queues_lock);
 	return mask;
