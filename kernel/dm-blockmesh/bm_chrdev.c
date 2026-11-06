@@ -144,7 +144,8 @@ static void bm_abort_queue_pending(struct bm_queue *q)
 }
 int bm_queue_submit(u32 queue_id, u64 target_cookie,
 		    struct bm_uapi_request *request, struct bio *bio,
-		    struct block_device *bdev, u64 base_sector, u64 sector_offset,
+		    struct block_device *bdev, u64 base_sector, u64 target_sectors,
+		    u64 sector_offset,
 		    u32 block_count)
 {
 	struct bm_queue *q;
