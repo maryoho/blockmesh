@@ -40,9 +40,10 @@ func TestPublishDynamicGeometryExpandsLastAGBitmapAndDualSuperblock(t *testing.T
 	if err=PublishDynamicGeometry(dev,old,next,committer);err!=nil{t.Fatal(err)}
 	got,err:=OpenDynamicSuperblockPair(dev);if err!=nil{t.Fatal(err)}
 	if got!=next{t.Fatalf("opened superblock=%+v want=%+v",got,next)}
-	physical,_,err:=PlanDynamicBitmapAllocation(dev,next,0,2)
-	if err!=nil{t.Fatal(err)}
-	if physical!=4{t.Fatalf("newly exposed blocks start at %d, want 4",physical)}
+	bitmap:=make([]byte,format.PageSize)
+	if _,err=dev.ReadAt(bitmap,int64(next.Geometry.BitmapOffset+format.PageSize));err!=nil{t.Fatal(err)}
+	for bit:=uint64(4);bit<6;bit++{if bitmap[bit/8]&(1<<uint(bit%8))!=0{t.Fatalf("newly exposed bit %d remains allocated",bit)}}
+	for bit:=uint64(6);bit<8;bit++{if bitmap[bit/8]&(1<<uint(bit%8))==0{t.Fatalf("still-invalid padding bit %d became free",bit)}}
 }
 
 func TestPublishDynamicGeometryRejectsNewAGWithoutMigration(t *testing.T){
