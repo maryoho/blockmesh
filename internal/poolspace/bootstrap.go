@@ -163,6 +163,11 @@ func FormatBootstrap(dev device.Device,volumeSlots uint32,logicalSectorBytes uin
 		if binary.LittleEndian.Uint64(p[:8])==0x424D504F4F4C3032{return nil,ErrLegacyPoolFormat}
 		for _,v:=range p{if v!=0{return nil,errors.New("refusing to format a non-empty or unknown device")}}
 	}
+ for off:=uint64(2*PageSize);off<BootstrapSize;off+=PageSize{
+  p:=make([]byte,PageSize)
+  if err:=readFull(dev,p,int64(off));err!=nil{return nil,fmt.Errorf("inspect reserved Bootstrap page at %d: %w",off,err)}
+  for _,v:=range p{if v!=0{return nil,fmt.Errorf("refusing to overwrite non-zero reserved Bootstrap page at %d",off)}}
+ }
 	plan,err:=PlanDevice(deviceBytes,volumeSlots);if err!=nil{return nil,err}
 	a,err:=NewAllocator(deviceBytes,BootstrapSize,plan.InitialMetadata);if err!=nil{return nil,err}
 	m:=ExtentMap{Generation:1,DeviceBytes:deviceBytes,Extents:a.Extents()}

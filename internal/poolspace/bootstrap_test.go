@@ -150,6 +150,13 @@ func TestBootstrapValidatesLogicalSectorGeometry(t *testing.T){
  if _,err=OpenBootstrap(logicalSectorDevice{Device:f,sector:512});err==nil{t.Fatal("expected persisted sector mismatch")}
 }
 
+func TestFormatBootstrapRejectsDirtyReservedRegion(t *testing.T){
+ f,err:=device.OpenFile(t.TempDir()+"/dirty.img");if err!=nil{t.Fatal(err)};defer f.Close()
+ if _,err=f.WriteAt([]byte{0},(2<<40)-1);err!=nil{t.Fatal(err)}
+ if _,err=f.WriteAt([]byte{0x7f},int64(6<<20));err!=nil{t.Fatal(err)}
+ if _,err=FormatBootstrap(f,64,512);err==nil{t.Fatal("expected non-zero Bootstrap reservation to be rejected")}
+}
+
 func TestBootstrapRejectsLegacyFormat(t *testing.T){
 	d,err:=device.OpenFile(t.TempDir()+"/legacy.img");if err!=nil{t.Fatal(err)};defer d.Close()
 	page:=make([]byte,PageSize);binaryPutUint64(page,0x424D504F4F4C3032)
