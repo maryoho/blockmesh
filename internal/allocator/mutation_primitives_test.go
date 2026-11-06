@@ -19,6 +19,21 @@ func TestIdempotencyRecordRoundTrip(t *testing.T) {
 	if _, err = DecodeIdempotencyRecord(b); !errors.Is(err, ErrIdempotencyRecord) { t.Fatalf("corruption error=%v", err) }
 }
 
+func TestIdempotencyRecordPagePayloadRoundTrip(t *testing.T) {
+	r := IdempotencyRecord{NextPage: 17, LogicalStart: 21, PhysicalStart: 42, BlockCount: 8, Operation: 3, OwnerEpoch: 11}
+	r.Key[0], r.Fingerprint[0] = 9, 7
+	payload, err := r.EncodePayload()
+	if err != nil { t.Fatal(err) }
+	if len(payload) >= int(format.PageSize)-64 { t.Fatalf("payload unexpectedly large: %d", len(payload)) }
+	got, err := DecodeIdempotencyRecordPayload(payload)
+	if err != nil { t.Fatal(err) }
+	if got != r { t.Fatalf("payload round trip: got %+v want %+v", got, r) }
+	payload[30] ^= 1
+	if _, err := DecodeIdempotencyRecordPayload(payload); !errors.Is(err, ErrIdempotencyRecord) {
+		t.Fatalf("corrupt payload error=%v", err)
+	}
+}
+
 func TestIdempotencyHashNamespaceAndDeterminism(t *testing.T) {
 	var a, b [16]byte
 	a[0], b[0] = 1, 2

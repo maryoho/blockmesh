@@ -21,6 +21,60 @@ var (
 	ErrIdempotencyFull = errors.New("persistent idempotency index is full")
 )
 
+// IdempotencyRecordPageType identifies an allocator-owned immutable page in
+// the Volume PersistentArena. The record is stored as a normal metastore.Page
+// payload (not a raw 4KiB image), so its allocation is tracked by the Arena.
+const IdempotencyRecordPageType uint16 = 0x100
+
+const idempotencyPayloadSize = 108
+
+// EncodePayload returns the compact payload for a metastore.Page. The outer
+// metadata page checksum protects the complete page; this inner CRC protects
+// the record schema and makes standalone record validation explicit.
+func (r IdempotencyRecord) EncodePayload() ([]byte, error) {
+	if r.Key == ([16]byte{}) || r.Fingerprint == ([32]byte{}) ||
+		r.BlockCount == 0 || r.OwnerEpoch == 0 ||
+		r.LogicalStart > ^uint64(0)-uint64(r.BlockCount) ||
+		r.PhysicalStart > ^uint64(0)-uint64(r.BlockCount) {
+		return nil, ErrIdempotencyRecord
+	}
+	b := make([]byte, idempotencyPayloadSize)
+	copy(b[:8], idempotencyMagic)
+	binary.LittleEndian.PutUint32(b[8:12], idempotencyVersion)
+	binary.LittleEndian.PutUint64(b[16:24], r.NextPage)
+	copy(b[24:40], r.Key[:])
+	copy(b[40:72], r.Fingerprint[:])
+	binary.LittleEndian.PutUint64(b[72:80], r.LogicalStart)
+	binary.LittleEndian.PutUint64(b[80:88], r.PhysicalStart)
+	binary.LittleEndian.PutUint32(b[88:92], r.BlockCount)
+	binary.LittleEndian.PutUint16(b[92:94], r.Operation)
+	binary.LittleEndian.PutUint64(b[96:104], r.OwnerEpoch)
+	binary.LittleEndian.PutUint32(b[104:108], crc32.Checksum(b[:104], castagnoli))
+	return b, nil
+}
+
+// DecodeIdempotencyRecordPayload validates a compact metastore.Page payload.
+func DecodeIdempotencyRecordPayload(b []byte) (IdempotencyRecord, error) {
+	var r IdempotencyRecord
+	if len(b) != idempotencyPayloadSize || string(b[:8]) != idempotencyMagic ||
+		binary.LittleEndian.Uint32(b[8:12]) != idempotencyVersion ||
+		crc32.Checksum(b[:104], castagnoli) != binary.LittleEndian.Uint32(b[104:108]) {
+		return r, ErrIdempotencyRecord
+	}
+	for _, v := range b[12:16] { if v != 0 { return r, ErrIdempotencyRecord } }
+	for _, v := range b[94:96] { if v != 0 { return r, ErrIdempotencyRecord } }
+	r.NextPage = binary.LittleEndian.Uint64(b[16:24])
+	copy(r.Key[:], b[24:40])
+	copy(r.Fingerprint[:], b[40:72])
+	r.LogicalStart = binary.LittleEndian.Uint64(b[72:80])
+	r.PhysicalStart = binary.LittleEndian.Uint64(b[80:88])
+	r.BlockCount = binary.LittleEndian.Uint32(b[88:92])
+	r.Operation = binary.LittleEndian.Uint16(b[92:94])
+	r.OwnerEpoch = binary.LittleEndian.Uint64(b[96:104])
+	if _, err := r.EncodePayload(); err != nil { return IdempotencyRecord{}, err }
+	return r, nil
+}
+
 // IdempotencyRecord is one immutable record page in the Volume PersistentArena.
 // NextPage links records with the same 63-bit hash, so a hash collision never
 // aliases two 128-bit keys. The B+Tree index stores hash -> head page.
