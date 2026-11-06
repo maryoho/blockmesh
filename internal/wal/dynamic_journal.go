@@ -9,8 +9,7 @@ import (
 	"math"
 	"sync"
 
-	"blockmesh/internal/device"
-	"blockmesh/internal/format"
+		"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
 )
 
@@ -19,7 +18,7 @@ import (
 // durable active bank and make bank rotation crash-safe.
 type DynamicJournal struct {
 	mu sync.Mutex
-	dev device.Device
+	dev DynamicMetadataDevice
 	sb format.DynamicSuperblock
 	ag uint32
 	segmentBase uint64
@@ -35,7 +34,7 @@ type DynamicJournal struct {
 	poisoned bool
 }
 
-func OpenDynamicJournal(dev device.Device,sb format.DynamicSuperblock,ag uint32)(*DynamicJournal,error){
+func OpenDynamicJournal(dev DynamicMetadataDevice,sb format.DynamicSuperblock,ag uint32)(*DynamicJournal,error){
 	if dev==nil{return nil,errors.New("nil BMPOOL03 metadata device")}
 	if err:=sb.Validate();err!=nil{return nil,err}
 	g:=sb.Geometry

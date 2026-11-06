@@ -12,7 +12,7 @@ func TestOpenDynamicPoolVolumeAndPersistentArena(t *testing.T){
 	if err!=nil{t.Fatal(err)}
 	var id [16]byte;copy(id[:],"bm03-metastore01")
 	pool,err:=format.NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
-	dev:=newMemdev(int(g.MetadataBytes/PageSize))
+	dev:=newMemdev(g.MetadataBytes/PageSize)
 	arenaStart:=g.ReservedOffset/PageSize
 	desc:=format.DynamicVolumeDescriptor{VolumeID:"dynamic-vol-1",AG:0,Generation:1,VolumeSequence:1,
 		MappingRootOffset:g.MappingOffset,BitmapSequence:1,OwnerEpoch:7,ArenaStart:arenaStart,ArenaPages:128,
