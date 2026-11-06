@@ -167,6 +167,7 @@ func TestBootstrapAllocateDataExtentsPublishesConsistentViews(t *testing.T) {
 	metadata, data, generation, err := s.OpenViews()
 	if err != nil { t.Fatal(err) }
 	if metadata == nil || data == nil || generation != 2 { t.Fatalf("invalid views metadata=%v data=%v generation=%d", metadata, data, generation) }
+	if metadata.Generation()!=generation||data.Generation()!=generation{t.Fatalf("view generation mismatch metadata=%d data=%d extent-map=%d",metadata.Generation(),data.Generation(),generation)}
 	if data.Size() != 8<<20 { t.Fatalf("Data view size=%d", data.Size()) }
 	payload := []byte("logical data view on the same LUN")
 	if n, err := data.WriteAt(payload, 0); err != nil || n != len(payload) { t.Fatalf("DataView write n=%d err=%v", n, err) }
