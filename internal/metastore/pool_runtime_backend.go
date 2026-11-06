@@ -244,7 +244,7 @@ func (b *PoolVolumeRuntimeBackend) OpenMetadata(_ context.Context, spec VolumeRu
 	arena, err := NewPersistentArena(store, live, committer, b.coordinator)
 	if err != nil { return nil, fmt.Errorf("open persistent Arena: %w", err) }
 	return &VolumeRuntimeMetadata{
-		Store: store, ReaderTable: readers, Arena: arena,
+		Store: store, ReaderTable: readers, Arena: arena, Committer: committer,
 		PublishOwnerEpoch: func(_ context.Context, epoch uint64) error {
 			if err:=store.AdvanceOwnerEpoch(epoch, committer);err!=nil{
 				_ = b.recordEvent(spec,epoch,"descriptor.owner_epoch.durable","publish_owner_epoch","failure","descriptor-commit-error",err.Error())
@@ -394,4 +394,9 @@ func (s *poolRuntimeReaderSession) CloseDrained(ctx context.Context, drained boo
 	s.cancel()
 	<-s.done
 	return s.session.CloseDrained(ctx, drained)
+}
+
+func (s *poolRuntimeReaderSession) RequestSnapshot() (uint64, uint64, error) {
+	if s == nil || s.session == nil { return 0, 0, errors.New("nil Pool Reader Session") }
+	return s.session.RequestSnapshot()
 }

@@ -48,6 +48,9 @@ type VolumeRuntimeMetadata struct {
 	OwnerEpoch uint64
 	ReaderTable *ReaderTable
 	Arena       *PersistentArena
+	// Committer is the cluster-safe AG WAL committer shared by the Store,
+	// Reader Table, persistent Arena and request-facing COW B+Tree.
+	Committer Committer
 	// PublishOwnerEpoch must commit the newly acquired owner lease epoch to
 	// the BMDVOL02 descriptor through the cluster-safe WAL before admission.
 	// It is required for RW runtimes and must be backed by Store.AdvanceOwnerEpoch.

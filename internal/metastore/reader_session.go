@@ -32,7 +32,9 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 	if table == nil || registrar == nil { return nil, errors.New("reader table and SCSI PR registrar are required") }
 	if table.coordinator == nil { return nil, ErrReaderCoordinatorRequired }
 	if err := table.store.Refresh(); err != nil { return nil, err }
-	rootGeneration := table.store.Superblock().MappingSequence
+	rootSnapshot := table.store.Superblock()
+	rootGeneration := rootSnapshot.MappingSequence
+	rootPage := rootSnapshot.RootPage
 	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, slot, nodeID, bootID, epoch, onLeaseLost)
 	if err != nil { return nil, err }
 	if err = registrar.RegisterReader(ctx,nodeID,bootID); err != nil {
@@ -45,7 +47,7 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 		if cleanupErr==nil { _ = lease.Close() }
 		return nil, errors.Join(err,cleanupErr)
 	}
-	return &ReaderSession{table:table,lease:lease,registrar:registrar,slot:slot,nodeID:nodeID,bootID:bootID,epoch:epoch,rootGeneration:rootGeneration},nil
+	return &ReaderSession{table:table,lease:lease,registrar:registrar,slot:slot,nodeID:nodeID,bootID:bootID,epoch:epoch,rootGeneration:rootGeneration,rootPage:rootPage},nil
 }
 
 func (s *ReaderSession) checkLeaseLocked() error {
@@ -67,8 +69,11 @@ func (s *ReaderSession) AdvanceGeneration(newGeneration uint64, oldGenerationIOs
 	if s == nil { return errors.New("nil reader session") }
 	s.mu.Lock(); defer s.mu.Unlock()
 	if err := s.checkLeaseLocked(); err != nil { return err }
-	if err := s.table.AdvanceGeneration(s.slot,s.nodeID,s.bootID,s.epoch,newGeneration,oldGenerationIOsDrained); err != nil { return err }
-	s.rootGeneration = newGeneration
+	if err := s.table.store.Refresh(); err != nil { return err }
+	sb := s.table.store.Superblock()
+	if sb.MappingSequence != newGeneration { return ErrReaderGeneration }
+	if err := s.table.AdvanceGenerationAtRoot(s.slot,s.nodeID,s.bootID,s.epoch,sb.RootPage,newGeneration,oldGenerationIOsDrained); err != nil { return err }
+	s.rootGeneration, s.rootPage = newGeneration, sb.RootPage
 	return nil
 }
 
