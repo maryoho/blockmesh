@@ -11,6 +11,12 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
+#include "blockmesh_uapi.h"
+
+static_assert(sizeof(struct bm_uapi_ring_ctrl) == BM_UAPI_RING_CTRL_SIZE);
+static_assert(sizeof(struct bm_uapi_request) == BM_UAPI_REQUEST_SIZE);
+static_assert(sizeof(struct bm_uapi_completion) == BM_UAPI_COMPLETION_SIZE);
+static_assert(sizeof(struct bm_uapi_mapping) == BM_UAPI_MAPPING_SIZE);
 #define DM_MSG_PREFIX "blockmesh"
 struct bm_target {
 	struct dm_dev *dev;
