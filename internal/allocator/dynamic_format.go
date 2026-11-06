@@ -56,6 +56,7 @@ func FormatDynamicPool(dev device.Device, sb format.DynamicSuperblock) error {
 		if !allZero(page)&&!equalBytes(page,encoded){return errors.New("existing BMPOOL03 superblock differs from interrupted format request")}
 	}
 	if err=initializeDynamicBitmaps(dev,sb);err!=nil{return err}
+	if err=format.InitializeDynamicCheckpoints(dev,sb.Geometry);err!=nil{return fmt.Errorf("initialize BMPOOL03 checkpoints: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync initialized BMPOOL03 bitmap region: %w",err)}
 	// Publish copy A, flush, then copy B, flush. Either complete copy is
 	// sufficient for read-only discovery; the marker prevents RW activation

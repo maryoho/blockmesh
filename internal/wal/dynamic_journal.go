@@ -13,17 +13,22 @@ import (
 	"blockmesh/internal/format"
 )
 
-// DynamicJournal is a BMPOOL03 append-only redo journal. Its segment base and
-// capacity are derived from the persisted DynamicGeometry, never BMPOOL02
-// package constants. P4-1.2.5.17 adds checkpointed bank rotation/reclamation.
+// DynamicJournal is a BMPOOL03 per-AG redo journal. Each geometry-sized AG
+// segment is split into two banks; dual checkpoint descriptors select the
+// durable active bank and make bank rotation crash-safe.
 type DynamicJournal struct {
 	mu sync.Mutex
 	dev device.Device
 	sb format.DynamicSuperblock
 	ag uint32
+	segmentBase uint64
+	bankSize uint64
 	base uint64
-	size uint64
 	end uint64
+	activeBank uint32
+	checkpointSlot uint32
+	checkpointGeneration uint64
+	checkpointTxID uint64
 	nextTx uint64
 	lastTx uint64
 	poisoned bool
@@ -34,17 +39,49 @@ func OpenDynamicJournal(dev device.Device,sb format.DynamicSuperblock,ag uint32)
 	if err:=sb.Validate();err!=nil{return nil,err}
 	g:=sb.Geometry
 	if ag>=g.AGCount{return nil,fmt.Errorf("BMPOOL03 AG %d out of range",ag)}
-	if g.WALSegmentBytes<4*format.PageSize{return nil,errors.New("BMPOOL03 WAL segment must be at least 16KiB")}
+	if g.WALSegmentBytes<4*format.PageSize||g.WALSegmentBytes%(2*format.PageSize)!=0{return nil,errors.New("BMPOOL03 WAL segment must contain two page-aligned banks")}
 	if dev.Size()<0||uint64(dev.Size())<g.MetadataBytes{return nil,errors.New("BMPOOL03 MetadataView is smaller than geometry")}
-	base:=g.WALOffset+uint64(ag)*g.WALSegmentBytes
-	if base<g.WALOffset||base>g.MetadataBytes||g.WALSegmentBytes>g.MetadataBytes-base{return nil,errors.New("BMPOOL03 AG WAL segment outside MetadataView")}
-	j:=&DynamicJournal{dev:dev,sb:sb,ag:ag,base:base,size:g.WALSegmentBytes,nextTx:1}
-	if _,err:=j.Recover();err!=nil{return nil,fmt.Errorf("recover BMPOOL03 AG %d WAL: %w",ag,err)}
+	seg:=g.WALOffset+uint64(ag)*g.WALSegmentBytes
+	if seg<g.WALOffset||seg>g.MetadataBytes||g.WALSegmentBytes>g.MetadataBytes-seg{return nil,errors.New("BMPOOL03 AG WAL segment outside MetadataView")}
+	j:=&DynamicJournal{dev:dev,sb:sb,ag:ag,segmentBase:seg,bankSize:g.WALSegmentBytes/2}
+	cp,slot,err:=j.loadCheckpoint()
+	if err!=nil{return nil,err}
+	j.activeBank,j.checkpointSlot=cp.ActiveBank,slot
+	j.checkpointGeneration,j.checkpointTxID=cp.Generation,cp.CheckpointTxID
+	j.lastTx=cp.CheckpointTxID
+	if j.lastTx==math.MaxUint64{return nil,errors.New("BMPOOL03 WAL transaction ID exhausted")}
+	j.nextTx=j.lastTx+1
+	j.base=j.segmentBase+uint64(j.activeBank)*j.bankSize
+	if _,err=j.Recover();err!=nil{return nil,fmt.Errorf("recover BMPOOL03 AG %d WAL: %w",ag,err)}
 	return j,nil
 }
 
-// Commit persists Intent, then Commit, then applies page after-images. An
-// error after any WAL write poisons this instance; reopen/recovery is required.
+func(j *DynamicJournal)loadCheckpoint()(format.DynamicCheckpoint,uint32,error){
+	var zero format.DynamicCheckpoint
+	var valid []format.DynamicCheckpoint
+	var slots []uint32
+	for slot:=uint32(0);slot<2;slot++{
+		off,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,slot);if err!=nil{return zero,0,err}
+		page:=make([]byte,format.PageSize)
+		n,e:=j.dev.ReadAt(page,int64(off));if e!=nil&&!(e==io.EOF&&n==len(page)){return zero,0,e};if n!=len(page){return zero,0,io.ErrUnexpectedEOF}
+		cp,e:=format.DecodeDynamicCheckpoint(page,j.ag);if e==nil{valid=append(valid,cp);slots=append(slots,slot)}
+	}
+	if len(valid)==0{return zero,0,errors.New("no valid BMPOOL03 checkpoint descriptor")}
+	best:=0
+	if len(valid)==2{
+		if valid[0].Generation==valid[1].Generation&&valid[0]!=valid[1]{return zero,0,errors.New("conflicting BMPOOL03 checkpoint copies at equal generation")}
+		if valid[1].Generation>valid[0].Generation{best=1}
+	}
+	chosen,slot:=valid[best],slots[best]
+	other:=uint32(1)-slot
+	off,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,other);if err!=nil{return zero,0,err}
+	page,err:=chosen.Encode();if err!=nil{return zero,0,err}
+	if err=writeAtFull(j.dev,page,int64(off));err!=nil{return zero,0,err}
+	if err=j.dev.Sync();err!=nil{return zero,0,err}
+	return chosen,slot,nil
+}
+
+// Commit follows Intent Sync -> Commit Sync -> apply after-images -> Sync.
 func(j *DynamicJournal)Commit(updates []PageUpdate)error{
 	if len(updates)==0{return errors.New("empty BMPOOL03 WAL transaction")}
 	j.mu.Lock();defer j.mu.Unlock()
@@ -68,49 +105,72 @@ func(j *DynamicJournal)Commit(updates []PageUpdate)error{
 }
 
 func(j *DynamicJournal)append(record []byte)error{
-	if uint64(len(record))>j.size-j.end{return ErrJournalFull}
+	if uint64(len(record))>j.bankSize-j.end{return ErrJournalFull}
 	if err:=writeAtFull(j.dev,record,int64(j.base+j.end));err!=nil{return err}
 	j.end+=uint64(len(record));return nil
 }
 
 func(j *DynamicJournal)validateUpdates(updates []PageUpdate)error{
 	seen:=make(map[uint64]struct{},len(updates))
-	walEnd:=j.sb.Geometry.WALOffset+j.sb.Geometry.WALSize
+	g:=j.sb.Geometry
+	walEnd:=g.WALOffset+g.WALSize
 	for _,u:=range updates{
 		if u.Offset%format.PageSize!=0||len(u.Image)!=int(format.PageSize){return errors.New("BMPOOL03 WAL update must be a 4KiB page")}
-		if u.Offset<2*format.PageSize||u.Offset>j.sb.Geometry.MetadataBytes||format.PageSize>j.sb.Geometry.MetadataBytes-u.Offset{return errors.New("BMPOOL03 WAL update outside metadata data regions")}
-		if u.Offset<dynamicFormatMarkerEnd&&u.Offset+format.PageSize>dynamicFormatMarkerStart{return errors.New("BMPOOL03 WAL update overlaps format marker")}
-		if u.Offset<walEnd&&u.Offset+format.PageSize>j.sb.Geometry.WALOffset{return errors.New("BMPOOL03 WAL update overlaps WAL region")}
+		if u.Offset<2*format.PageSize||u.Offset>g.MetadataBytes||format.PageSize>g.MetadataBytes-u.Offset{return errors.New("BMPOOL03 WAL update outside metadata data regions")}
+		if u.Offset<3*format.PageSize&&u.Offset+format.PageSize>2*format.PageSize{return errors.New("BMPOOL03 WAL update overlaps format marker")}
+		if u.Offset<walEnd&&u.Offset+format.PageSize>g.WALOffset{return errors.New("BMPOOL03 WAL update overlaps WAL region")}
 		if _,ok:=seen[u.Offset];ok{return errors.New("duplicate BMPOOL03 WAL page update")};seen[u.Offset]=struct{}{}
 	}
 	return nil
 }
-
-const dynamicFormatMarkerStart=uint64(2*format.PageSize)
-const dynamicFormatMarkerEnd=dynamicFormatMarkerStart+format.PageSize
-
 func(j *DynamicJournal)apply(u PageUpdate)error{return writeAtFull(j.dev,u.Image,int64(u.Offset))}
 
-// Recover scans the complete dynamic AG segment and idempotently reapplies
-// every committed transaction. Incomplete trailing records are ignored.
+// Checkpoint clears the inactive bank before publishing a new dual-copy
+// descriptor. A crash before descriptor durability keeps the old bank active;
+// after descriptor durability the selected bank is already empty.
+func(j *DynamicJournal)Checkpoint()error{
+	j.mu.Lock();defer j.mu.Unlock()
+	if j.poisoned{return errors.New("BMPOOL03 WAL requires recovery before checkpoint")}
+	if j.checkpointGeneration==math.MaxUint64{return errors.New("BMPOOL03 checkpoint generation exhausted")}
+	nextBank:=uint32(1)-j.activeBank
+	nextBase:=j.segmentBase+uint64(nextBank)*j.bankSize
+	zero:=make([]byte,int(j.bankSize))
+	if err:=writeAtFull(j.dev,zero,int64(nextBase));err!=nil{return fmt.Errorf("clear inactive BMPOOL03 WAL bank: %w",err)}
+	if err:=j.dev.Sync();err!=nil{return fmt.Errorf("sync cleared BMPOOL03 WAL bank: %w",err)}
+	cp:=format.DynamicCheckpoint{AG:j.ag,Generation:j.checkpointGeneration+1,CheckpointTxID:j.lastTx,ActiveBank:nextBank}
+	page,err:=cp.Encode();if err!=nil{return err}
+	nextSlot:=uint32(1)-j.checkpointSlot
+	off,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,nextSlot);if err!=nil{return err}
+	if err=writeAtFull(j.dev,page,int64(off));err!=nil{j.poisoned=true;return err}
+	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}
+	mirrorOff,err:=format.DynamicCheckpointOffset(j.sb.Geometry,j.ag,j.checkpointSlot);if err!=nil{j.poisoned=true;return err}
+	if err=writeAtFull(j.dev,page,int64(mirrorOff));err!=nil{j.poisoned=true;return err}
+	if err=j.dev.Sync();err!=nil{j.poisoned=true;return err}
+	j.activeBank,j.checkpointSlot=nextBank,nextSlot
+	j.checkpointGeneration,j.checkpointTxID=cp.Generation,cp.CheckpointTxID
+	j.base,j.end=nextBase,0
+	if cp.CheckpointTxID==math.MaxUint64{j.poisoned=true;return errors.New("BMPOOL03 WAL transaction ID exhausted")}
+	j.nextTx=cp.CheckpointTxID+1
+	return nil
+}
+
+// Recover replays committed transactions in the selected bank. A durable
+// Intent without Commit is retained but never applied.
 func(j *DynamicJournal)Recover()(bool,error){
 	j.mu.Lock();defer j.mu.Unlock()
 	intents:=map[uint64][]PageUpdate{}
 	intentCRC:=map[uint64]uint32{}
 	var off uint64
-	next:=uint64(1)
+	next:=j.checkpointTxID+1
 	var committed []journalTxn
-	for off<j.size{
-		if j.size-off<journalHeaderSize{break}
+	for off<j.bankSize{
+		if j.bankSize-off<journalHeaderSize{break}
 		h:=make([]byte,journalHeaderSize)
-		n,err:=j.dev.ReadAt(h,int64(j.base+off))
-		if err!=nil&&err!=io.EOF{return false,err}
-		if n==0&&err==io.EOF{break}
-		if n<len(h){break}
+		n,err:=j.dev.ReadAt(h,int64(j.base+off));if err!=nil&&err!=io.EOF{return false,err};if n==0&&err==io.EOF{break};if n<len(h){break}
 		if allZero(h){break}
 		if binary.LittleEndian.Uint32(h[:4])!=journalMagic||binary.LittleEndian.Uint16(h[4:6])!=journalVersion||crc32.Checksum(h[:24],journalCRC)!=binary.LittleEndian.Uint32(h[24:28]){return false,ErrJournalCorrupt}
 		kind:=binary.LittleEndian.Uint16(h[6:8]);plen:=uint64(binary.LittleEndian.Uint32(h[8:12]));tx:=binary.LittleEndian.Uint64(h[12:20])
-		if tx==0||plen>journalMaxRecord||plen>j.size-off-journalHeaderSize{return false,ErrJournalCorrupt}
+		if tx<=j.checkpointTxID||tx==0||plen>journalMaxRecord||plen>j.bankSize-off-journalHeaderSize{return false,ErrJournalCorrupt}
 		p:=make([]byte,int(plen));if plen>0{n,err=j.dev.ReadAt(p,int64(j.base+off+journalHeaderSize));if err!=nil&&err!=io.EOF{return false,err};if n<len(p){break}}
 		if crc32.Checksum(p,journalCRC)!=binary.LittleEndian.Uint32(h[20:24]){return false,ErrJournalCorrupt}
 		switch kind{
@@ -134,5 +194,5 @@ func(j *DynamicJournal)Recover()(bool,error){
 }
 
 func(j *DynamicJournal)UsedBytes()uint64{j.mu.Lock();defer j.mu.Unlock();return j.end}
-func(j *DynamicJournal)CapacityBytes()uint64{return j.size}
+func(j *DynamicJournal)CapacityBytes()uint64{return j.bankSize}
 func(j *DynamicJournal)AG()uint32{return j.ag}

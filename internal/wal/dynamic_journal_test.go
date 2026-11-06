@@ -23,14 +23,14 @@ func dynamicWALFixture(t *testing.T)(*dynamicWALDevice,format.DynamicSuperblock)
 	if e!=nil{t.Fatal(e)}
 	var id [16]byte;copy(id[:],"dynamic-wal-001")
 	sb,e:=format.NewDynamicSuperblock(g,id,1,1);if e!=nil{t.Fatal(e)}
-	return newDynamicWALDevice(g.MetadataBytes),sb
+	dev:=newDynamicWALDevice(g.MetadataBytes)\n\tif err=format.InitializeDynamicCheckpoints(dev,g);err!=nil{t.Fatal(err)}\n\treturn dev,sb
 }
 
 func TestDynamicJournalUsesDynamicSegmentAndAGCount(t *testing.T){
 	dev,sb:=dynamicWALFixture(t)
 	for ag:=uint32(0);ag<sb.Geometry.AGCount;ag++{
 		j,e:=OpenDynamicJournal(dev,sb,ag);if e!=nil{t.Fatal(e)}
-		if j.CapacityBytes()!=sb.Geometry.WALSegmentBytes||j.AG()!=ag{t.Fatalf("wrong AG journal geometry")}
+		if j.CapacityBytes()!=sb.Geometry.WALSegmentBytes/2||j.AG()!=ag{t.Fatalf("wrong AG journal geometry")}
 	}
 }
 
@@ -62,4 +62,20 @@ func TestDynamicJournalLeavesUncommittedIntentUnapplied(t *testing.T){
 	copy(dev.b[j.base:],record[:len(record)-5])
 	j2,e:=OpenDynamicJournal(dev,sb,1);if e!=nil{t.Fatal(e)}
 	if j2.UsedBytes()==0{t.Fatal("expected durable Intent to remain in append-only log")}; page:=make([]byte,format.PageSize);if _,e=dev.ReadAt(page,int64(sb.Geometry.MappingOffset));e!=nil{t.Fatal(e)};if !allZero(page){t.Fatal("uncommitted Intent was incorrectly applied")}
+}
+
+func TestDynamicJournalCheckpointRotatesAndReopens(t *testing.T){
+	dev,sb:=dynamicWALFixture(t)
+	j,err:=OpenDynamicJournal(dev,sb,0);if err!=nil{t.Fatal(err)}
+	image:=make([]byte,format.PageSize);copy(image,"checkpointed")
+	if err=j.Commit([]PageUpdate{{Offset:sb.Geometry.MappingOffset,Image:image}});err!=nil{t.Fatal(err)}
+	if err=j.Checkpoint();err!=nil{t.Fatal(err)}
+	if j.UsedBytes()!=0{t.Fatalf("expected empty active bank, got %d",j.UsedBytes())}
+	j2,err:=OpenDynamicJournal(dev,sb,0);if err!=nil{t.Fatal(err)}
+	if j2.UsedBytes()!=0{t.Fatal("reopened checkpoint bank is not empty")}
+	cp0off,_:=format.DynamicCheckpointOffset(sb.Geometry,0,0)
+	cp1off,_:=format.DynamicCheckpointOffset(sb.Geometry,0,1)
+	cp0,_:=format.DecodeDynamicCheckpoint(dev.b[cp0off:cp0off+format.PageSize],0)
+	cp1,_:=format.DecodeDynamicCheckpoint(dev.b[cp1off:cp1off+format.PageSize],0)
+	if cp0!=cp1||cp0.Generation!=2||cp0.CheckpointTxID!=1||cp0.ActiveBank!=1{t.Fatalf("checkpoint copies not mirrored: %+v %+v",cp0,cp1)}
 }
