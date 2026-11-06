@@ -40,7 +40,7 @@ func TestDynamicJournalCommitAndRecovery(t *testing.T){
 	off:=sb.Geometry.MappingOffset
 	image:=make([]byte,format.PageSize);copy(image,"mapping-redo")
 	if e=j.Commit([]PageUpdate{{Offset:off,Image:image}});e!=nil{t.Fatal(e)}
-	for i:=range dev.b[off:off+format.PageSize]{dev.b[off+int64(i)]=0}
+	for i:=range dev.b[int(off):int(off+format.PageSize)]{dev.b[int(off)+i]=0}
 	j2,e:=OpenDynamicJournal(dev,sb,2);if e!=nil{t.Fatal(e)}
 	got:=make([]byte,format.PageSize);if _,e=dev.ReadAt(got,int64(off));e!=nil{t.Fatal(e)}
 	if string(got[:11])!="mapping-redo"{t.Fatalf("redo not replayed: %q",got[:11])}
