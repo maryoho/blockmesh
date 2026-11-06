@@ -23,7 +23,8 @@ func dynamicWALFixture(t *testing.T)(*dynamicWALDevice,format.DynamicSuperblock)
 	if e!=nil{t.Fatal(e)}
 	var id [16]byte;copy(id[:],"dynamic-wal-001")
 	sb,e:=format.NewDynamicSuperblock(g,id,1,1);if e!=nil{t.Fatal(e)}
-	dev:=newDynamicWALDevice(g.MetadataBytes)\n\tif err=format.InitializeDynamicCheckpoints(dev,g);err!=nil{t.Fatal(err)}\n\treturn dev,sb
+	dev:=newDynamicWALDevice(g.MetadataBytes)
+	if err=format.InitializeDynamicCheckpoints(dev,g);err!=nil{t.Fatal(err)}\n\treturn dev,sb
 }
 
 func TestDynamicJournalUsesDynamicSegmentAndAGCount(t *testing.T){
