@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"math"
 	"sync"
 
@@ -218,7 +217,7 @@ func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,p
 }
 
 func(a *DynamicVolumeAllocator) ensureUniqueVolumeID(id string,except uint32)error{
-	if id==""{return ErrVolumeID}
+	if id==""{return errors.New("Volume ID is required")}
 	count:=uint32(a.sb.Geometry.NodeTableSize/(2*format.PageSize))
 	for i:=uint32(0);i<count;i++{
 		if i==except{continue}
@@ -262,5 +261,8 @@ func(a *DynamicVolumeAllocator)bitmapHeaderImages(bitmap []byte,h dynamicReserve
 	return images,nil
 }
 
-var _ ClusterSafeCommitter = (ClusterSafeCommitter)(nil)
-var _ io.ReaderAt = (io.ReaderAt)(nil)
+
+func dynamicVolumeAllZero(b []byte) bool {
+	for _,v:=range b { if v!=0{return false} }
+	return true
+}
