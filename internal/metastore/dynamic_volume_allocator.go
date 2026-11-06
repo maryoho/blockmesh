@@ -163,12 +163,8 @@ func encodeDynamicReservedFormatMarker(h dynamicReservedHeader) []byte {
 	return b
 }
 func dynamicReservedFormatMarkerMatches(b []byte,h dynamicReservedHeader) bool {
-	if len(b)!=int(format.PageSize)||binary.LittleEndian.Uint64(b[:8])!=dynamicReservedFormatMagic||
-		binary.LittleEndian.Uint32(b[8:12])!=dynamicReservedVersion||
-		crc32.Checksum(b[:dynamicReservedHeaderCRC],crcTable)!=binary.LittleEndian.Uint32(b[dynamicReservedHeaderCRC:]){return false}
-	return string(b[16:32])==string(h.PoolUUID[:])&&binary.LittleEndian.Uint64(b[32:40])==h.RegionStart&&
-		binary.LittleEndian.Uint64(b[40:48])==h.RegionPages&&binary.LittleEndian.Uint64(b[48:56])==h.BitmapPages&&
-		binary.LittleEndian.Uint64(b[56:64])==h.AllocStart
+	if len(b)!=int(format.PageSize){return false}
+	return string(b)==string(encodeDynamicReservedFormatMarker(h))
 }
 
 func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) {
