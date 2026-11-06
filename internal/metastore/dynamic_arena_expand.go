@@ -13,7 +13,7 @@ import (
 // MetadataView capacity. Lifecycle pages are copied to the new tail and synced
 // before the BMDVOL03 descriptor is WAL-published. Existing roots and arena
 // page IDs remain unchanged.
-func(s *Store)ExpandDynamicArena(committer Committer)error{
+func(s *Store)expandDynamicArenaLegacy(committer Committer)error{
 	if s==nil||committer==nil{return errors.New("metastore and WAL committer are required")}
 	cluster,ok:=committer.(ClusterSafeCommitter);if !ok||!cluster.ClusterSafe(){return ErrClusterSafeCommitterRequired}
 	s.mu.Lock();defer s.mu.Unlock()
@@ -58,6 +58,37 @@ func(s *Store)ExpandDynamicArena(committer Committer)error{
 	s.sbSlot=slot
 	return nil
 }
+
+ // ExpandDynamicArena preserves the legacy BMPOOL03 slot-0 behavior for
+ // Pools without the Reserved allocator. New multi-Volume Pools grow through
+ // the persistent Reserved bitmap and per-Volume descriptor.
+ func(s *Store)ExpandDynamicArena(committer Committer)error{
+	if s!=nil&&s.dynamicPool&&DynamicVolumeAllocatorPresent(s.dev,s.dynamicSB){
+		return s.ExpandDynamicArenaBy(256,committer)
+	}
+	return s.expandDynamicArenaLegacy(committer)
+ }
+
+ // ExpandDynamicArenaBy grows this Volume by an explicit number of 4KiB Arena
+ // pages. The Reserved allocator must already have been expanded to the
+ // current MetadataView geometry.
+ func(s *Store)ExpandDynamicArenaBy(pages uint64,committer Committer)error{
+	if s==nil||committer==nil||pages==0{return errors.New("metastore, positive Arena growth and WAL committer are required")}
+	cluster,ok:=committer.(ClusterSafeCommitter);if !ok||!cluster.ClusterSafe(){return ErrClusterSafeCommitterRequired}
+	s.mu.Lock();defer s.mu.Unlock()
+	if !s.dynamicPool{return errors.New("Arena expansion requires BMPOOL03")}
+	if !DynamicVolumeAllocatorPresent(s.dev,s.dynamicSB){return ErrDynamicVolumeAllocatorUnformatted}
+	allocator,err:=OpenDynamicVolumeAllocator(s.dev,s.dynamicSB);if err!=nil{return err}
+	next,slot,err:=allocator.GrowVolume(s.volumeIndex,pages,cluster);if err!=nil{return err}
+	s.dynamicDescriptor=next
+	s.sb.Generation=next.Generation
+	s.sb.ArenaStart=next.ArenaStart
+	s.sb.ArenaPages=next.ArenaPages
+	s.sb.LifecycleStart=next.LifecycleStart
+	s.sb.LifecyclePages=next.LifecyclePages
+	s.sbSlot=slot
+	return nil
+ }
 
 // ExpandDynamicArenaUnderLease is the shared-SAN entry point. It holds the
 // Volume AG lock and requires a live Owner lease while relocating lifecycle
