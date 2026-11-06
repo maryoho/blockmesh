@@ -221,7 +221,7 @@ func(s *BootstrapStore)persist(next *Allocator,deviceBytes uint64)error{
 	release,err:=s.locker.Lock(ctx,resource);if err!=nil{return fmt.Errorf("acquire Pool Bootstrap lock: %w",err)}
 	current,openErr:=OpenBootstrap(s.dev)
 	if openErr!=nil{_ = release();return openErr}
-	if current.record.Generation!=s.record.Generation{_ = release();return ErrStaleBootstrap}
+	if current.record.Generation!=s.record.Generation||current.record.PoolUUID!=s.record.PoolUUID{_ = release();return ErrStaleBootstrap}
 	if s.record.Generation==math.MaxUint64||s.record.ExtentMapGeneration==math.MaxUint64{_ = release();return errors.New("Bootstrap generation exhausted")}
 	mapSlot:=extentMapSlotA
 	if s.record.ExtentMapOffset==extentMapSlotA{mapSlot=extentMapSlotA+extentMapSlotSize}
