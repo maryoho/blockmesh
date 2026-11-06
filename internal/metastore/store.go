@@ -106,6 +106,9 @@ type Store struct {
 	// Pool-backed Stores publish roots through the inactive BMDVOL02
 	// descriptor copy; the Pool Superblock at LBA 0/1 is never modified.
 	poolBacked bool
+	dynamicPool bool
+	dynamicSB format.DynamicSuperblock
+	dynamicDescriptor format.DynamicVolumeDescriptor
 	poolSB format.Superblock
 	descriptor format.VolumeDescriptor
 	descriptorPair uint64
@@ -240,6 +243,7 @@ func (s *Store) OwnerEpoch() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.poolBacked { return 0 }
+	if s.dynamicPool { return s.dynamicDescriptor.OwnerEpoch }
 	return s.descriptor.OwnerEpoch
 }
 
@@ -257,6 +261,14 @@ func (s *Store) AdvanceOwnerEpoch(epoch uint64, committer Committer) error {
 	defer s.mu.Unlock()
 	if !s.poolBacked { return errors.New("owner epoch is supported only by Pool-backed Volumes") }
 	if err := s.refreshLocked(); err != nil { return err }
+	if s.dynamicPool {
+		if epoch <= s.dynamicDescriptor.OwnerEpoch { return fmt.Errorf("owner epoch %d must exceed durable epoch %d",epoch,s.dynamicDescriptor.OwnerEpoch) }
+		if s.dynamicDescriptor.Generation==math.MaxUint64||s.dynamicDescriptor.VolumeSequence==math.MaxUint64{return errors.New("Dynamic Volume Descriptor sequence exhausted")}
+		next:=s.dynamicDescriptor;next.Generation++;next.VolumeSequence++;next.OwnerEpoch=epoch
+		image,err:=next.Encode();if err!=nil{return err};slot:=uint64(1)-s.sbSlot
+		if err=committer.CommitImages([]PageImage{{Offset:s.descriptorPair+slot*PageSize,Data:image}});err!=nil{return fmt.Errorf("commit owner epoch %d: %w",epoch,err)}
+		s.dynamicDescriptor=next;s.sb.Generation=next.Generation;s.sbSlot=slot;return nil
+	}
 	if epoch <= s.descriptor.OwnerEpoch {
 		return fmt.Errorf("owner epoch %d must exceed durable epoch %d", epoch, s.descriptor.OwnerEpoch)
 	}
@@ -287,7 +299,7 @@ func (s *Store) PoolDescriptor() (format.VolumeDescriptor, error) {
 	if s == nil { return format.VolumeDescriptor{}, errors.New("nil metastore") }
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.poolBacked { return format.VolumeDescriptor{}, errors.New("Volume is not Pool-backed") }
+	if !s.poolBacked || s.dynamicPool { return format.VolumeDescriptor{}, errors.New("Volume is not BMPOOL02-backed") }
 	if err := s.refreshLocked(); err != nil { return format.VolumeDescriptor{}, err }
 	return s.descriptor, nil
 }
@@ -296,7 +308,7 @@ func (s *Store) PoolSuperblock() (format.Superblock, error) {
 	if s == nil { return format.Superblock{}, errors.New("nil metastore") }
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if !s.poolBacked { return format.Superblock{}, errors.New("Volume is not Pool-backed") }
+	if !s.poolBacked || s.dynamicPool { return format.Superblock{}, errors.New("Volume is not BMPOOL02-backed") }
 	return s.poolSB, nil
 }
 
@@ -317,6 +329,7 @@ func (s *Store) Refresh() error {
 }
 
 func (s *Store) refreshLocked() error {
+	if s.dynamicPool { return s.refreshDynamicPoolLocked() }
 	if s.poolBacked {
 		return s.refreshPoolLocked()
 	}
@@ -355,6 +368,14 @@ func (s *Store) Publish(rootPage, mappingSequence uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err:=s.refreshLocked();err!=nil{return err}
+	if s.dynamicPool {
+		if rootPage!=NoPage&&!s.inArena(rootPage){return ErrOutOfRange}
+		if mappingSequence<=s.sb.MappingSequence{return errors.New("mapping sequence must increase")}
+		if s.sb.LifecyclePages!=0{return ErrPersistentArenaRequired}
+		next,slot,image,err:=s.dynamicDescriptorAfterImage(rootPage,mappingSequence);if err!=nil{return err}
+		if err=writeFullAt(s.dev,image,int64(s.descriptorPair+slot*PageSize));err!=nil{return err};if err=s.dev.Sync();err!=nil{return err}
+		s.dynamicDescriptor=next;s.sb.Generation=next.Generation;s.sb.RootPage=next.RootPage;s.sb.MappingSequence=next.MappingSequence;s.sbSlot=slot;return nil
+	}
 	if s.poolBacked {
 		if rootPage != NoPage && !s.inArena(rootPage) { return ErrOutOfRange }
 		if mappingSequence <= s.sb.MappingSequence { return errors.New("mapping sequence must increase") }
@@ -439,7 +460,8 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	if s.sb.Generation == math.MaxUint64 {
 		return errors.New("superblock generation exhausted")
 	}
-	if s.poolBacked && s.descriptor.VolumeSequence == math.MaxUint64 {
+	if s.poolBacked && !s.dynamicPool && s.descriptor.VolumeSequence == math.MaxUint64 { return errors.New("Volume Descriptor sequence exhausted") }
+	if s.dynamicPool && s.dynamicDescriptor.VolumeSequence == math.MaxUint64 {
 		return errors.New("Volume Descriptor sequence exhausted")
 	}
 	if len(pages)+len(extra)+1>MaxMetadataTransactionPages { return ErrMetadataTransactionTooLarge }
@@ -490,11 +512,14 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 		inArena := s.sb.LifecyclePages != 0 &&
 			image.Offset >= s.sb.ArenaStart*PageSize &&
 			image.Offset < (s.sb.ArenaStart+s.sb.ArenaPages)*PageSize
-		inPoolBitmap := s.poolBacked &&
+		inPoolBitmap := s.poolBacked && !s.dynamicPool &&
 			image.Offset >= s.poolSB.BitmapOffset &&
 			image.Offset <= s.poolSB.BitmapOffset+s.poolSB.BitmapSize &&
 			PageSize <= s.poolSB.BitmapOffset+s.poolSB.BitmapSize-image.Offset
-		if !inLifecycle && !inPoolBitmap && !inArena {
+		inDynamicBitmap := s.dynamicPool && image.Offset >= s.dynamicSB.Geometry.BitmapOffset &&
+			image.Offset <= s.dynamicSB.Geometry.BitmapOffset+s.dynamicSB.Geometry.BitmapSize &&
+			PageSize <= s.dynamicSB.Geometry.BitmapOffset+s.dynamicSB.Geometry.BitmapSize-image.Offset
+		if !inLifecycle && !inPoolBitmap && !inDynamicBitmap && !inArena {
 			return fmt.Errorf("extra metadata after-image %d is outside Volume lifecycle and Pool Data Bitmap regions", image.Offset)
 		}
 		pageID := image.Offset / PageSize
@@ -518,8 +543,13 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	var rootOffset uint64
 	var rootImage []byte
 	var nextDescriptor format.VolumeDescriptor
+	var nextDynamicDescriptor format.DynamicVolumeDescriptor
 	rootSlot := uint64(1) - s.sbSlot
-	if s.poolBacked {
+	if s.dynamicPool {
+		var err error
+		nextDynamicDescriptor,rootSlot,rootImage,err=s.dynamicDescriptorAfterImage(rootPage,mappingSequence)
+		if err!=nil{return err};rootOffset=s.descriptorPair+rootSlot*PageSize
+	} else if s.poolBacked {
 		var err error
 		nextDescriptor, rootSlot, rootImage, err = s.poolDescriptorAfterImage(rootPage, mappingSequence)
 		if err != nil { return err }
@@ -537,7 +567,8 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	}
 	s.sb = next
 	s.sbSlot = rootSlot
-	if s.poolBacked { s.descriptor = nextDescriptor }
+	if s.poolBacked && !s.dynamicPool { s.descriptor = nextDescriptor }
+	if s.dynamicPool { s.dynamicDescriptor = nextDynamicDescriptor }
 	return nil
 }
 

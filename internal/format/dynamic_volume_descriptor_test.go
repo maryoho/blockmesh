@@ -1,6 +1,7 @@
 package format
 
 import (
+	"io"
 	"testing"
 )
 
