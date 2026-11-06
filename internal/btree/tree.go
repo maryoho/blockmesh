@@ -441,3 +441,32 @@ func encodeInternal(children []nodeRef, level uint16) []byte {
 	}
 	return b
 }
+
+// UsesPersistentArena reports whether this tree was opened with durable Arena
+// lifecycle management.
+func (t *Tree) UsesPersistentArena() bool {
+	if t == nil { return false }
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.persistentArena != nil
+}
+
+// UsesClusterSafeCommitter reports whether root publication is protected by
+// the distributed WAL commit protocol required for shared-SAN operation.
+func (t *Tree) UsesClusterSafeCommitter() bool {
+	if t == nil { return false }
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	c, ok := t.journal.(metastore.ClusterSafeCommitter)
+	return ok && c.ClusterSafe()
+}
+
+// AbortReservedArenaPages releases a reservation that has not been submitted
+// to a WAL transaction. It must never be used after an ambiguous commit error.
+func (t *Tree) AbortReservedArenaPages(r *metastore.Reservation) error {
+	if t == nil || r == nil { return metastore.ErrReservationDone }
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.persistentArena == nil { return metastore.ErrPersistentArenaRequired }
+	return r.Abort()
+}
