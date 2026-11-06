@@ -23,7 +23,7 @@ var _ device.Device=(*dynamicFormatMem)(nil)
 func dynamicFormatFixture(t *testing.T)(*dynamicFormatMem,format.DynamicSuperblock){
 	t.Helper()
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:10*format.BlockSize,MetadataBytes:64<<20,
-		AGSizeBytes:4*format.BlockSize,WALSegmentBytes:format.PageSize,MappingBytes:8<<20,CheckpointBytes:format.PageSize})
+		AGSizeBytes:4*format.BlockSize,WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10})
 	if err!=nil{t.Fatal(err)}
 	var id [16]byte;copy(id[:],"bm-pool-format03")
 	sb,err:=format.NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}

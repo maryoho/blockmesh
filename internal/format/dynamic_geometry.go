@@ -54,7 +54,7 @@ func PlanDynamicGeometry(c DynamicGeometryConfig) (DynamicGeometry, error) {
 	if c.DataBytes < BlockSize || c.DataBytes%BlockSize != 0 ||
 		c.MetadataBytes < 2*1024*1024 || c.MetadataBytes%PageSize != 0 ||
 		c.AGSizeBytes < BlockSize || c.AGSizeBytes%BlockSize != 0 ||
-		c.WALSegmentBytes < PageSize || c.WALSegmentBytes%PageSize != 0 ||
+		c.WALSegmentBytes < 4*PageSize || c.WALSegmentBytes%(2*PageSize) != 0 ||
 		c.MappingBytes == 0 || c.MappingBytes%PageSize != 0 ||
 		c.CheckpointBytes == 0 || c.CheckpointBytes%PageSize != 0 {
 		return g, ErrInvalidDynamicGeometry
@@ -64,6 +64,10 @@ func PlanDynamicGeometry(c DynamicGeometryConfig) (DynamicGeometry, error) {
 	agCount := ceilDivGeometry(total, agSize)
 	if agCount == 0 || agCount > math.MaxUint32 {
 		return g, fmt.Errorf("%w: AG count out of range", ErrInvalidDynamicGeometry)
+	}
+	minCheckpoint, ok := mulGeometry(agCount, 2*PageSize)
+	if !ok || c.CheckpointBytes < minCheckpoint {
+		return g, fmt.Errorf("%w: checkpoint region requires at least %d bytes for %d AGs", ErrInvalidDynamicGeometry, minCheckpoint, agCount)
 	}
 	last := total - (agCount-1)*agSize
 	bitmapRaw := ceilDivGeometry(agSize, 8)

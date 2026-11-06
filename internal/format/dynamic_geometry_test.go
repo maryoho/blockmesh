@@ -36,7 +36,7 @@ func TestPlanDynamicGeometrySmallDeviceAndNonPowerOfTwoAG(t *testing.T) {
 
 func TestPlanDynamicGeometryRejectsInvalidAndInsufficientMetadata(t *testing.T) {
 	base:=DynamicGeometryConfig{DataBytes:8*BlockSize,MetadataBytes:4<<20,AGSizeBytes:4*BlockSize,
-		WALSegmentBytes:PageSize,MappingBytes:2<<20,CheckpointBytes:PageSize}
+		WALSegmentBytes:4*PageSize,MappingBytes:2<<20,CheckpointBytes:16*PageSize}
 	if _,err:=PlanDynamicGeometry(base);!errors.Is(err,ErrInvalidDynamicGeometry) { t.Fatalf("expected metadata capacity error, got %v",err) }
 	base.MetadataBytes=8<<20
 	base.DataBytes=BlockSize+1
@@ -45,7 +45,7 @@ func TestPlanDynamicGeometryRejectsInvalidAndInsufficientMetadata(t *testing.T) 
 
 func TestDynamicGeometryRejectsAGOutOfRange(t *testing.T) {
 	g,err:=PlanDynamicGeometry(DynamicGeometryConfig{DataBytes:8*BlockSize,MetadataBytes:64<<20,
-		AGSizeBytes:4*BlockSize,WALSegmentBytes:PageSize,MappingBytes:8<<20,CheckpointBytes:PageSize})
+		AGSizeBytes:4*BlockSize,WALSegmentBytes:4*PageSize,MappingBytes:8<<20,CheckpointBytes:16*PageSize})
 	if err!=nil { t.Fatal(err) }
 	if _,err=g.AGBlocks(g.AGCount);!errors.Is(err,ErrInvalidDynamicGeometry) { t.Fatalf("expected range error, got %v",err) }
 }

@@ -9,7 +9,7 @@ import (
 func testDynamicSuperblock(t *testing.T) DynamicSuperblock {
 	t.Helper()
 	g,err:=PlanDynamicGeometry(DynamicGeometryConfig{DataBytes:10*BlockSize,MetadataBytes:64<<20,
-		AGSizeBytes:4*BlockSize,WALSegmentBytes:PageSize,MappingBytes:8<<20,CheckpointBytes:PageSize})
+		AGSizeBytes:4*BlockSize,WALSegmentBytes:4*PageSize,MappingBytes:8<<20,CheckpointBytes:64<<10})
 	if err!=nil{t.Fatal(err)}
 	var id [16]byte
 	copy(id[:],"blockmesh-pool03")

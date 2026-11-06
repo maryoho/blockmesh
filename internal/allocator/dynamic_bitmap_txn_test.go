@@ -13,7 +13,7 @@ func dynamicBitmapFixture(t *testing.T) (format.DynamicSuperblock,*bytes.Reader)
 	t.Helper()
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{
 		DataBytes:10*format.BlockSize,MetadataBytes:64<<20,AGSizeBytes:4*format.BlockSize,
-		WALSegmentBytes:format.PageSize,MappingBytes:8<<20,CheckpointBytes:format.PageSize,
+		WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10,
 	})
 	if err!=nil{t.Fatal(err)}
 	var uuid [16]byte;copy(uuid[:],"dynamic-bitmap01")
