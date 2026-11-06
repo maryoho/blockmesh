@@ -53,7 +53,7 @@ type SetupQueue struct {
 func (s SetupQueue) Validate() error {
 	l,err:=Layout(s.RingOrder); if err!=nil{return err}
 	if s.QueueGeneration==0{return errors.New("queue generation must be non-zero")}; if s.QueueID==0 || s.QueueID>MaxQueueID{return errors.New("queue ID must be in the non-zero 20-bit range")}
-	if s.RequestControlOffset!=EncodeMmapOffset(s.QueueID,l.RequestControl) || s.RequestRingOffset!=EncodeMmapOffset(s.QueueID,l.RequestRing) || s.CompletionControlOffset!=EncodeMmapOffset(s.QueueID,l.CompletionControl) || s.CompletionRingOffset!=EncodeMmapOffset(s.QueueID,l.CompletionRing) || s.PayloadOffset!=EncodeMmapOffset(s.QueueID,l.Payload)){return errors.New("kernel returned unexpected mmap offsets")}
+	if s.RequestControlOffset!=EncodeMmapOffset(s.QueueID,l.RequestControl) || s.RequestRingOffset!=EncodeMmapOffset(s.QueueID,l.RequestRing) || s.CompletionControlOffset!=EncodeMmapOffset(s.QueueID,l.CompletionControl) || s.CompletionRingOffset!=EncodeMmapOffset(s.QueueID,l.CompletionRing) || s.PayloadOffset!=EncodeMmapOffset(s.QueueID,l.Payload){return errors.New("kernel returned unexpected mmap offsets")}
 	if s.MaxBatch!=MaxBatch{return errors.New("kernel max batch mismatch")}
 	return nil
 }
