@@ -139,7 +139,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		}
 	}
 
-	physical, bitmapImages, err := PlanBitmapAllocation(a.store.Device(), pool, desc.AG, req.BlockCount)
+	physical, bitmapImages, err := PlanBitmapAllocation(a.store, pool, desc.AG, req.BlockCount)
 	if err != nil { return result, fmt.Errorf("plan AG bitmap allocation: %w", err) }
 	reservation, ids, err := a.tree.ReserveExternalPages(1)
 	if err != nil { return result, fmt.Errorf("reserve idempotency record page: %w", err) }

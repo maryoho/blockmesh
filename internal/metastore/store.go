@@ -560,6 +560,17 @@ func (s *Store) WritePage(p Page) error {
 	return writeFullAt(s.dev, b, int64(p.ID*PageSize))
 }
 
+// ReadAt exposes bounded read-only access to fixed-LBA metadata regions.
+func (s *Store) ReadAt(p []byte, off int64) (int, error) {
+	if s == nil { return 0, errors.New("nil metastore") }
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if off < 0 || uint64(off) > s.sb.TotalPages*PageSize || uint64(len(p)) > s.sb.TotalPages*PageSize-uint64(off) {
+		return 0, ErrOutOfRange
+	}
+	return s.dev.ReadAt(p, off)
+}
+
 func (s *Store) ReadPage(id uint64) (Page, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
