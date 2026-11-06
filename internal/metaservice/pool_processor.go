@@ -92,11 +92,23 @@ func (p *PoolRuntimeProcessor) openTree(s *poolTreeState, snap metastore.Metadat
 
 func (p *PoolRuntimeProcessor) Process(ctx context.Context, req uapi.Request) (Result, error) {
 	if p == nil || p.manager == nil { return Result{}, ErrFenced }
+	if err := ctx.Err(); err != nil { return Result{}, err }
 	if err := req.Validate(); err != nil { return Result{}, fmt.Errorf("%w: %v", ErrInvalid, err) }
 	volumeID, nodeID, bootID := uuidText(req.VolumeID), uuidText(req.NodeID), uuidText(req.BootID)
 	snap, err := p.manager.ResolveMetadataRequest(volumeID, nodeID, bootID,
 		req.OwnerEpoch, req.ReaderEpoch, req.RootGeneration)
-	if err != nil { return Result{}, err }
+	if err != nil {
+		switch {
+		case errors.Is(err, metastore.ErrRuntimeRequestFenced), errors.Is(err, metastore.ErrVolumeRuntimeStopping):
+			return Result{}, errors.Join(ErrFenced, err)
+		case errors.Is(err, metastore.ErrRuntimeRequestStaleEpoch):
+			return Result{}, errors.Join(ErrStaleEpoch, err)
+		case errors.Is(err, metastore.ErrRuntimeRequestInvalid):
+			return Result{}, errors.Join(ErrInvalid, err)
+		default:
+			return Result{}, err
+		}
+	}
 	state := p.state(volumeID)
 	state.mu.Lock()
 	defer state.mu.Unlock()

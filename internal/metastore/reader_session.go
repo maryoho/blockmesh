@@ -23,6 +23,7 @@ type ReaderSession struct {
 	epoch uint64
 	mu sync.Mutex
 	rootGeneration uint64
+	rootPage uint64
 	closed bool
 }
 
