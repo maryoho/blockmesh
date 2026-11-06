@@ -18,6 +18,13 @@ func(dynamicVolumeTestCommitter)ClusterSafe()bool{return true}
 type dynamicVolumeTestFence struct{err error}
 func(f dynamicVolumeTestFence)ProveVolumeFenced(_ context.Context,_ string,_ uint64)error{return f.err}
 
+type dynamicVolumeFailDevice struct{Device; failOffset int64; failed bool}
+func(d *dynamicVolumeFailDevice)WriteAt(p []byte,off int64)(int,error){
+	if off==d.failOffset&&!d.failed{d.failed=true;return 0,errors.New("injected Reserved allocator write failure")}
+	return d.Device.WriteAt(p,off)
+}
+func(d *dynamicVolumeFailDevice)Size()int64{if s,ok:=d.Device.(interface{Size()int64});ok{return s.Size()};return 0}
+
 func dynamicVolumeAllocatorFixture(t *testing.T)(*memdev,format.DynamicSuperblock){
 	t.Helper()
 	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{DataBytes:8*format.BlockSize,MetadataBytes:64<<20,
@@ -86,4 +93,14 @@ func TestDynamicVolumeAllocatorRefusesNonEmptyReservedRegion(t *testing.T){
 	off:=sb.Geometry.ReservedOffset
 	dev.b[off+10]=1
 	if err:=FormatDynamicVolumeAllocator(dev,sb);err==nil{t.Fatal("expected non-empty Reserved region rejection")}
+}
+
+func TestDynamicVolumeAllocatorFormatCanResumeAfterMarker(t *testing.T){
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	start:=sb.Geometry.ReservedOffset/format.PageSize
+	failed:=&dynamicVolumeFailDevice{Device:dev,failOffset:int64((start+2)*format.PageSize)}
+	if err:=FormatDynamicVolumeAllocator(failed,sb);err==nil{t.Fatal("expected injected bitmap write failure")}
+	if _,err:=OpenDynamicVolumeAllocator(dev,sb);!errors.Is(err,ErrDynamicVolumeAllocatorUnformatted){t.Fatalf("expected unformatted allocator while marker is present, got %v",err)}
+	if err:=RecoverDynamicVolumeAllocatorFormat(dev,sb);err!=nil{t.Fatal(err)}
+	if _,err:=OpenDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
 }
