@@ -50,10 +50,10 @@ func PlanDevice(deviceBytes uint64, volumeSlots uint32) (Plan, error) {
 		bitmap := ceilDiv(blocks, 8)
 		// A mapping record is budgeted at 24 bytes. 70% B+Tree page
 		// occupancy and two generations cover COW/retire overlap.
-		mapping := alignUp(ceilDiv(blocks*24*2*100, 70*PageSize)*PageSize, ExtentSize)
+		mapping := alignUp(ceilDiv(blocks*24*2*100, 70*PageSize)*PageSize, PageSize)
 		wal := maxU64(64<<20, minU64(2<<30, data/100))
 		// 64MiB per Volume for descriptor/reader/owner/lifecycle metadata.
-		perVolume := uint64(volumeSlots) * (64 << 20)
+		perVolume := uint64(volumeSlots) * (4 << 20)
 		raw := BootstrapSize + bitmap + mapping + wal + perVolume
 		// 30% headroom above estimated live/transactional structures.
 		required := alignUp(ceilDiv(raw*100, 70), ExtentSize)
@@ -82,7 +82,7 @@ func MetadataExpansionTarget(currentCapacity, usedBytes, growthBytes, extentSize
 	need,ok:=addChecked(usedBytes,growthBytes); if !ok { return 0,ErrInvalidGeometry }
 	need,ok=mulDivCeil(need,130,100); if !ok { return 0,ErrInvalidGeometry }
 	target:=alignUp(need,extentSize)
-	if target<=currentCapacity { target=currentCapacity+extentSize }
+	if target<=currentCapacity { var ok bool; target,ok=addChecked(currentCapacity,extentSize); if !ok { return 0,ErrInvalidGeometry } }
 	return target,nil
 }
 

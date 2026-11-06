@@ -42,7 +42,7 @@ func(d *BlockDevice)Rescan()(uint64,error){
  if d==nil{return 0,ErrClosed};d.mu.Lock();defer d.mu.Unlock()
  if d.closed{return 0,ErrClosed};old:=d.size
  if err:=d.refreshLocked();err!=nil{return 0,err}
- if d.size<old{return uint64(old),fmt.Errorf("device shrink detected: old=%d new=%d; refusing to accept shrink",old,d.size)}
+ if d.size<old{newSize:=d.size;d.size=old;return uint64(old),fmt.Errorf("device shrink detected: old=%d new=%d; refusing to accept shrink",old,newSize)}
  return uint64(d.size),nil
 }
 func(d *BlockDevice)Path()string{return d.path}

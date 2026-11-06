@@ -7,7 +7,7 @@ import (
 
 func TestPlanDeviceScalesAndAligns(t *testing.T){
 	small,err:=PlanDevice(2<<40,64);if err!=nil{t.Fatal(err)}
-	large,err:=PlanDevice(20<<40,64);if err!=nil{t.Fatal(err)}
+	large,err:=PlanDevice(100<<40,64);if err!=nil{t.Fatal(err)}
 	if small.InitialMetadata%ExtentSize!=0||large.InitialMetadata%ExtentSize!=0{t.Fatal("metadata plan is not extent aligned")}
 	if large.InitialMetadata<=small.InitialMetadata||large.DataCapacity<=small.DataCapacity{t.Fatalf("capacity did not scale: small=%+v large=%+v",small,large)}
 	if small.InitialMetadata>=small.DeviceBytes||small.DataCapacity==0{t.Fatal("invalid plan")}
