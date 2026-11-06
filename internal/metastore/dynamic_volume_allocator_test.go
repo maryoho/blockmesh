@@ -2,6 +2,7 @@ package metastore
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"testing"
 
