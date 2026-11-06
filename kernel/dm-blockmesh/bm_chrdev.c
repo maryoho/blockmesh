@@ -41,6 +41,7 @@ struct bm_pending {
 	struct bio *bio;
 	struct block_device *bdev;
 	u64 request_id, generation, logical_start, base_sector, target_sectors, sector_offset, owner_epoch;
+	u16 operation;
 	u32 block_count;
 };
 struct bm_queue_mem {
@@ -199,6 +200,7 @@ int bm_queue_submit(u32 queue_id, u64 target_cookie,
 			pending->target_sectors = target_sectors;
 			pending->sector_offset = sector_offset;
 			pending->owner_epoch = le64_to_cpu(request->owner_epoch);
+			pending->operation = le16_to_cpu(request->operation);
 			pending->block_count = block_count;
 			list_add_tail(&pending->list, &q->pending);
 			q->pending_count++;
@@ -245,6 +247,15 @@ static void bm_finish_pending(struct bm_pending *p,
 	if (code != BM_UAPI_C_OK ||
 	    le64_to_cpu(completion->owner_epoch) != p->owner_epoch)
 		goto io_error;
+	if (p->operation == BM_UAPI_OP_DISCARD) {
+		if (le32_to_cpu(completion->mapping_count) || le32_to_cpu(completion->payload_bytes))
+			goto io_error;
+		/* Logical discard retires metadata; never issue an early physical discard
+		 * while an RO reader may still reference the old extent. */
+		bio_endio(bio);
+		kfree(p);
+		return;
+	}
 	if (!p->block_count) {
 		if (le32_to_cpu(completion->mapping_count) ||
 		    le32_to_cpu(completion->payload_bytes))

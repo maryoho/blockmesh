@@ -1,0 +1,97 @@
+//go:build linux
+
+package metaservice
+
+import (
+ "context"
+ "encoding/binary"
+ "errors"
+ "fmt"
+ "syscall"
+ "unsafe"
+ "blockmesh/internal/uapi"
+)
+const (
+ ioctlGetABI uint32=0xc0404200
+ ioctlSetupQueue uint32=0xc0504201
+ ioctlNextQueue uint32=0xc0284204
+ ioctlKick uint32=uapi.IoctlKick
+ pollIn int16=1
+ pollPri int16=2
+ pollFailure int16=0x008|0x010|0x020
+)
+type pollFD struct{FD int32;Events int16;Revents int16}
+type mappedQueue struct{mem *QueueMemory;regions [][]byte}
+type Device struct{fd int;path string;processor Processor;queues map[uint32]*mappedQueue;closed bool}
+func ioctl(fd int,cmd uint32,b []byte)error{
+ if len(b)==0{return errors.New("empty ioctl payload")}
+ _,_,e:=syscall.Syscall(syscall.SYS_IOCTL,uintptr(fd),uintptr(cmd),uintptr(unsafe.Pointer(&b[0])))
+ if e!=0{return e};return nil
+}
+func OpenDevice(path string,p Processor)(*Device,error){
+ if path==""||p==nil{return nil,errors.New("device path and processor are required")}
+ fd,e:=syscall.Open(path,syscall.O_RDWR|syscall.O_CLOEXEC,0);if e!=nil{return nil,e}
+ fail:=func(err error)(*Device,error){_ = syscall.Close(fd);return nil,err}
+ b:=make([]byte,uapi.ABIInfoSize);binary.LittleEndian.PutUint32(b[:4],uapi.ABIInfoSize)
+ if e=ioctl(fd,ioctlGetABI,b);e!=nil{return fail(fmt.Errorf("GET_ABI: %w",e))}
+ info,e:=uapi.UnmarshalABIInfo(b);if e!=nil{return fail(e)}
+ need:=uapi.FeatureRequestRing|uapi.FeatureCompletionKick
+ if info.Features&need!=need{return fail(fmt.Errorf("kernel lacks required feature bits %#x",need))}
+ return &Device{fd:fd,path:path,processor:p,queues:make(map[uint32]*mappedQueue)},nil
+}
+func(d *Device)scan()error{
+ for after:=uint32(0);;{
+  q:=make([]byte,40);binary.LittleEndian.PutUint32(q[:4],40);binary.LittleEndian.PutUint32(q[4:8],after)
+  e:=ioctl(d.fd,ioctlNextQueue,q);if errors.Is(e,syscall.ENOENT){return nil};if e!=nil{return fmt.Errorf("NEXT_QUEUE: %w",e)}
+  id,order:=binary.LittleEndian.Uint32(q[8:12]),binary.LittleEndian.Uint32(q[12:16])
+  if id==0||id<=after{return errors.New("NEXT_QUEUE returned invalid Queue ID")};after=id
+  if d.queues[id]!=nil{continue};if e=d.setup(id,order);e!=nil{if errors.Is(e,syscall.ENOENT){continue};return fmt.Errorf("setup Queue %d: %w",id,e)}
+ }
+}
+func(d *Device)setup(id,order uint32)error{
+ b:=make([]byte,uapi.SetupSize);binary.LittleEndian.PutUint32(b[:4],uapi.SetupSize)
+ binary.LittleEndian.PutUint32(b[4:8],uint32(uapi.Version));binary.LittleEndian.PutUint32(b[8:12],order)
+ binary.LittleEndian.PutUint32(b[68:72],id)
+ if e:=ioctl(d.fd,ioctlSetupQueue,b);e!=nil{return e}
+ info,e:=uapi.UnmarshalSetupQueue(b);if e!=nil{return e};l,e:=uapi.Layout(order);if e!=nil{return e}
+ regions:=[][]byte{}
+	mapOne:=func(off,n uint64)([]byte,error){
+	 if n==0||n>uint64(int(^uint(0)>>1)){return nil,errors.New("invalid mmap length")}
+	 x,er:=syscall.Mmap(d.fd,int64(off),int(n),syscall.PROT_READ|syscall.PROT_WRITE,syscall.MAP_SHARED)
+	 if er==nil{regions=append(regions,x)};return x,er
+	}
+	cleanup:=func(){for i:=len(regions)-1;i>=0;i--{_ = syscall.Munmap(regions[i])}}
+	rc,er:=mapOne(info.RequestControlOffset,4096);if er!=nil{cleanup();return er}
+	rr,er:=mapOne(info.RequestRingOffset,uint64(l.Entries)*uapi.RequestSize);if er!=nil{cleanup();return er}
+	cc,er:=mapOne(info.CompletionControlOffset,4096);if er!=nil{cleanup();return er}
+	cr,er:=mapOne(info.CompletionRingOffset,uint64(l.Entries)*uapi.CompletionSize);if er!=nil{cleanup();return er}
+	pl,er:=mapOne(info.PayloadOffset,l.PayloadBytes);if er!=nil{cleanup();return er}
+	d.queues[id]=&mappedQueue{mem:&QueueMemory{Info:info,RequestControl:rc,RequestRing:rr,CompletionControl:cc,CompletionRing:cr,Payload:pl},regions:regions}
+	return nil
+}
+func(d *Device)kick(id uint32)error{b:=make([]byte,4);binary.LittleEndian.PutUint32(b,id);return ioctl(d.fd,ioctlKick,b)}
+func(d *Device)Run(ctx context.Context)error{
+ if d.closed{return errors.New("device closed")};if e:=d.scan();e!=nil{return e}
+ for{
+  if e:=ctx.Err();e!=nil{return e}
+  p:=pollFD{FD:int32(d.fd),Events:pollIn|pollPri}
+  _,_,errno:=syscall.Syscall(syscall.SYS_POLL,uintptr(unsafe.Pointer(&p)),1,250)
+  if errno!=0&&errno!=syscall.EINTR{return fmt.Errorf("poll %s: %w",d.path,errno)}
+  if p.Revents&pollFailure!=0{return fmt.Errorf("device poll failure: %#x",p.Revents)}
+  if p.Revents&pollPri!=0{if e:=d.scan();e!=nil{return e}}
+  if p.Revents&pollIn==0{continue}
+  for id,m:=range d.queues{
+   for{
+    n,w,e:=m.mem.Drain(ctx,d.processor,1<<m.mem.Info.RingOrder);if e!=nil{return fmt.Errorf("Queue %d: %w",id,e)}
+    if w>0{if e=d.kick(id);e!=nil{if errors.Is(e,syscall.ENOENT){d.unmap(id);break};return fmt.Errorf("KICK Queue %d: %w",id,e)}}
+    if n==0{break}
+   }
+  }
+ }
+}
+func(d *Device)unmap(id uint32){m:=d.queues[id];if m==nil{return};for i:=len(m.regions)-1;i>=0;i--{_ = syscall.Munmap(m.regions[i])};delete(d.queues,id)}
+func(d *Device)Close()error{
+ if d==nil||d.closed{return nil};d.closed=true
+ for id:=range d.queues{d.unmap(id)}
+ if e:=syscall.Close(d.fd);e!=nil{return fmt.Errorf("close %s: %w",d.path,e)};return nil
+}

@@ -59,6 +59,7 @@ type Completion struct {
 	PayloadOffset, MappingCount, PayloadBytes uint32
 }
 func (r Request) Validate() error {
+	if r.Flags != 0 { return errors.New("request flags are reserved and must be zero") }
 	if r.RequestID == 0 || r.QueueGeneration == 0 { return errors.New("request ID and queue generation must be non-zero") }
 	if r.VolumeID == ([16]byte{}) || r.NodeID == ([16]byte{}) || r.BootID == ([16]byte{}) { return errors.New("volume, node and boot UUIDs are required") }
 	switch r.Operation {
@@ -110,6 +111,9 @@ func UnmarshalRequest(b []byte) (Request, error) {
 func (c Completion) MarshalBinary() ([]byte, error) {
 	if c.RequestID == 0 || c.QueueGeneration == 0 { return nil, errors.New("completion request ID and generation must be non-zero") }
 	if c.Code > CodeInternal { return nil, errors.New("unknown completion code") }
+	if c.Flags != 0 { return nil, errors.New("completion flags are reserved and must be zero") }
+	if c.MappingCount == 0 && c.PayloadOffset != 0 { return nil, errors.New("completion without mapping must have zero payload offset") }
+	if c.MappingCount > 1 { return nil, errors.New("current kernel supports one mapping per completion") }
 	if c.Code != CodeOK && (c.MappingCount != 0 || c.PayloadBytes != 0) { return nil, errors.New("error completion cannot carry mappings") }
 	if c.MappingCount > MaxBatch || c.PayloadBytes != c.MappingCount*MappingSize { return nil, errors.New("invalid mapping payload length") }
 	b := make([]byte, CompletionSize)
