@@ -146,22 +146,39 @@ func TestPersistentArenaLifecycleReplaysAtomicallyWithWAL(t *testing.T) {
  }
 }
 func TestPutBatchWithImagesCommitsExtrasAndRootTogether(t *testing.T) {
-	dev:=newMemoryDevice(128)
-	store,err:=metastore.Format(dev,metastore.Layout{VolumeID:"batch-images",TotalPages:128,ArenaStart:2,ArenaPages:126})
-	if err!=nil { t.Fatal(err) }
-	committer:=memoryCommitter{dev:dev}
-	tree,err:=Open(store,committer);if err!=nil { t.Fatal(err) }
-	extraOffset:=uint64(127)*metastore.PageSize
+	path:=t.TempDir()+"/pool.img"
+	f,err:=os.Create(path);if err!=nil{t.Fatal(err)}
+	if err=f.Truncate(int64(format.MetadataSize));err!=nil{t.Fatal(err)}
+	if err=f.Close();err!=nil{t.Fatal(err)}
+	dev,err:=device.Open(path,true);if err!=nil{t.Fatal(err)};defer dev.Close()
+	pool,err:=format.NewSuperblock(0);if err!=nil{t.Fatal(err)}
+	if _,err=dev.WriteAt(pool.Encode(),int64(format.SuperAOffset));err!=nil{t.Fatal(err)}
+	pool.Generation=2
+	if _,err=dev.WriteAt(pool.Encode(),int64(format.SuperBOffset));err!=nil{t.Fatal(err)}
+	pair,err:=format.VolumeDescriptorPairOffset(pool,0);if err!=nil{t.Fatal(err)}
+	slotBytes:=(pool.MetadataSize-pool.ReservedOffset)/uint64(format.MaxVolumeDescriptors)/format.PageSize*format.PageSize
+	arenaStart:=pool.ReservedOffset/format.PageSize+format.OwnerRecordPages
+	desc:=format.VolumeDescriptor{VolumeID:"batch-pool",AG:0,Generation:1,VolumeSequence:1,MappingRootOffset:pool.MappingOffset,BitmapSequence:1,OwnerEpoch:1,ArenaStart:arenaStart,ArenaPages:128,RootPage:^uint64(0),LifecycleStart:arenaStart+128,LifecyclePages:8}
+	_ = slotBytes
+	image,err:=desc.Encode();if err!=nil{t.Fatal(err)}
+	for slot:=uint64(0);slot<2;slot++ { if _,err=dev.WriteAt(image,int64(pair+slot*format.PageSize));err!=nil{t.Fatal(err)} }
+	if err=dev.Sync();err!=nil{t.Fatal(err)}
+	store,err:=metastore.OpenPoolVolume(dev,pool,0,"batch-pool");if err!=nil{t.Fatal(err)}
+	if err=metastore.FormatLifecycle(store);err!=nil{t.Fatal(err)}
+	journal,err:=wal.New(dev,pool,0);if err!=nil{t.Fatal(err)}
+	tree,err:=OpenPersistent(store,journal);if err!=nil{t.Fatal(err)}
+	extraOffset:=pool.BitmapOffset+format.PageSize
 	extra:=make([]byte,metastore.PageSize);copy(extra[:8],"BMEXTRA1")
-	if err=tree.PutBatchWithImages([]Item{{Key:10,Value:100},{Key:20,Value:200}},[]metastore.PageImage{{Offset:extraOffset,Data:extra}});err!=nil { t.Fatal(err) }
-	if got,err:=tree.Get(10);err!=nil||got!=100 { t.Fatalf("Get(10)=%d err=%v",got,err) }
-	if got,err:=tree.Get(20);err!=nil||got!=200 { t.Fatalf("Get(20)=%d err=%v",got,err) }
+	if err=tree.PutBatchWithImages([]Item{{Key:10,Value:100},{Key:20,Value:200}},[]metastore.PageImage{{Offset:extraOffset,Data:extra}});err!=nil{t.Fatal(err)}
+	if got,err:=tree.Get(10);err!=nil||got!=100{t.Fatalf("Get(10)=%d err=%v",got,err)}
+	if got,err:=tree.Get(20);err!=nil||got!=200{t.Fatalf("Get(20)=%d err=%v",got,err)}
 	read:=make([]byte,metastore.PageSize)
-	if n,err:=dev.ReadAt(read,int64(extraOffset));err!=nil||n!=len(read) { t.Fatalf("read extra image n=%d err=%v",n,err) }
-	if string(read[:8])!="BMEXTRA1" { t.Fatalf("extra image not committed: %q",read[:8]) }
-	reopenedStore,err:=metastore.Open(dev,"batch-images");if err!=nil { t.Fatal(err) }
-	reopened,err:=Open(reopenedStore);if err!=nil { t.Fatal(err) }
-	if got,err:=reopened.Get(20);err!=nil||got!=200 { t.Fatalf("reopen Get(20)=%d err=%v",got,err) }
+	if n,err:=dev.ReadAt(read,int64(extraOffset));err!=nil||n!=len(read){t.Fatalf("read extra image n=%d err=%v",n,err)}
+	if string(read[:8])!="BMEXTRA1"{t.Fatalf("extra image not committed: %q",read[:8])}
+	reopened,err:=metastore.OpenPoolVolume(dev,pool,0,"batch-pool");if err!=nil{t.Fatal(err)}
+	recoveredJournal,err:=wal.New(dev,pool,0);if err!=nil{t.Fatal(err)}
+	reopenedTree,err:=OpenPersistent(reopened,recoveredJournal);if err!=nil{t.Fatal(err)}
+	if got,err:=reopenedTree.Get(20);err!=nil||got!=200{t.Fatalf("reopen Get(20)=%d err=%v",got,err)}
 }
 
 func TestPutGetReplaceDeleteAndReopen(t *testing.T) {

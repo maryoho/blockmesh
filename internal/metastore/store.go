@@ -481,9 +481,15 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 			image.Offset > s.sb.TotalPages*PageSize || PageSize > s.sb.TotalPages*PageSize-image.Offset {
 			return fmt.Errorf("invalid extra metadata after-image at offset %d", image.Offset)
 		}
-		if s.sb.LifecyclePages == 0 || image.Offset < s.sb.LifecycleStart*PageSize ||
-			image.Offset >= (s.sb.LifecycleStart+s.sb.LifecyclePages)*PageSize {
-			return fmt.Errorf("extra metadata after-image %d is outside lifecycle region", image.Offset)
+		inLifecycle := s.sb.LifecyclePages != 0 &&
+			image.Offset >= s.sb.LifecycleStart*PageSize &&
+			image.Offset < (s.sb.LifecycleStart+s.sb.LifecyclePages)*PageSize
+		inPoolBitmap := s.poolBacked &&
+			image.Offset >= s.poolSB.BitmapOffset &&
+			image.Offset <= s.poolSB.BitmapOffset+s.poolSB.BitmapSize &&
+			PageSize <= s.poolSB.BitmapOffset+s.poolSB.BitmapSize-image.Offset
+		if !inLifecycle && !inPoolBitmap {
+			return fmt.Errorf("extra metadata after-image %d is outside Volume lifecycle and Pool Data Bitmap regions", image.Offset)
 		}
 		pageID := image.Offset / PageSize
 		if _, exists := seen[pageID]; exists {
@@ -494,9 +500,6 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 	}
 
 	if s.sb.LifecyclePages != 0 {
-		if uint64(len(extra)) != s.sb.LifecyclePages {
-			return ErrPersistentArenaRequired
-		}
 		for page:=s.sb.LifecycleStart;page<s.sb.LifecycleStart+s.sb.LifecyclePages;page++ {
 			if _,ok:=seen[page];!ok { return fmt.Errorf("missing lifecycle after-image for page %d",page) }
 		}
