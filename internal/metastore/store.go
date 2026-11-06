@@ -484,7 +484,11 @@ func (s *Store) CommitPagesAndPublishWithImages(pages []Page, extra []PageImage,
 		inLifecycle := s.sb.LifecyclePages != 0 &&
 			image.Offset >= s.sb.LifecycleStart*PageSize &&
 			image.Offset < (s.sb.LifecycleStart+s.sb.LifecyclePages)*PageSize
-		inArena := image.Offset >= s.sb.ArenaStart*PageSize &&
+		// Caller-owned Arena after-images are accepted only on persistent
+		// lifecycle layouts; PersistentArena additionally proves each page
+		// belongs to this transaction's Reservation.
+		inArena := s.sb.LifecyclePages != 0 &&
+			image.Offset >= s.sb.ArenaStart*PageSize &&
 			image.Offset < (s.sb.ArenaStart+s.sb.ArenaPages)*PageSize
 		inPoolBitmap := s.poolBacked &&
 			image.Offset >= s.poolSB.BitmapOffset &&
