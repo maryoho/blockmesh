@@ -10,7 +10,7 @@ const (
 	PageSize       uint64 = 4096
 	AllocationSize uint64 = 4 << 20
 	ExtentSize     uint64 = 1 << 30
-	BootstrapSize  uint64 = 4 << 20
+	BootstrapSize  uint64 = 8 << 20
 )
 
 var ErrInvalidGeometry = errors.New("invalid Pool device geometry")
@@ -54,7 +54,7 @@ func PlanDevice(deviceBytes uint64, volumeSlots uint32) (Plan, error) {
 		wal := maxU64(64<<20, minU64(2<<30, data/100))
 		// 64MiB per Volume for descriptor/reader/owner/lifecycle metadata.
 		perVolume := uint64(volumeSlots) * (4 << 20)
-		raw := BootstrapSize + bitmap + mapping + wal + perVolume
+		raw := bitmap + mapping + wal + perVolume
 		// 30% headroom above estimated live/transactional structures.
 		required := alignUp(ceilDiv(raw*100, 70), ExtentSize)
 		if required == meta { break }
