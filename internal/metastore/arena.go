@@ -101,6 +101,30 @@ func (a *Arena) Reserve(count uint64) (*Reservation, error) {
 	return r, nil
 }
 
+
+ // Extend atomically appends count newly reserved pages to this reservation.
+ // Existing page IDs remain stable, allowing callers to reserve external record
+ // pages first and let the B+Tree append its COW pages later.
+ func (r *Reservation) Extend(count uint64) ([]uint64, error) {
+  if r==nil||r.arena==nil||count==0||count>r.arena.pages { return nil,ErrInvalidPageSet }
+  a:=r.arena
+  a.mu.Lock();defer a.mu.Unlock()
+  if r.done {return nil,ErrReservationDone}
+  if count>uint64(^uint(0)>>1)-uint64(len(r.pages)) {return nil,ErrInvalidPageSet}
+  added:=make([]uint64,0,int(count))
+  for uint64(len(added))<count {
+   id,ok:=a.takeFreeLocked()
+   if !ok {
+    for i:=len(added)-1;i>=0;i-- {delete(a.reserved,added[i]);a.free=append(a.free,added[i])}
+    return nil,ErrArenaFull
+   }
+   a.reserved[id]=r.id
+   added=append(added,id)
+  }
+  r.pages=append(r.pages,added...)
+  return append([]uint64(nil),added...),nil
+ }
+
 func (r *Reservation) Pages() []uint64 {
 	if r == nil || r.arena == nil {
 		return nil

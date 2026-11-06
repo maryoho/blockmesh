@@ -266,6 +266,30 @@ func (t *Tree) PutBatchWithImages(updates []Item, extra []metastore.PageImage) e
 // from one Reservation, then publishes their images, index updates, lifecycle
 // state and root in one WAL transaction.
 func (t *Tree) PutBatchWithArenaPages(updates []Item, arenaPages []metastore.Page, extra []metastore.PageImage) error {
+	return t.putBatchWithArenaPages(updates,arenaPages,extra,nil)
+}
+
+// ReserveExternalPages reserves immutable record pages before their IDs are
+// embedded in the B+Tree index. The returned Reservation must be passed to
+// PutBatchWithReservedArenaPages; callers must not Commit or Abort it directly.
+func (t *Tree) ReserveExternalPages(count uint64) (*metastore.Reservation, []uint64, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.persistentArena==nil {return nil,nil,metastore.ErrPersistentArenaRequired}
+	r,err:=t.persistentArena.Reserve(count)
+	if err!=nil{return nil,nil,err}
+	return r,r.Pages(),nil
+}
+
+// PutBatchWithReservedArenaPages publishes pages whose IDs were obtained from
+// ReserveExternalPages. The same reservation is extended for all COW pages,
+// so external records, B+Tree nodes, index values and the root share one WAL.
+func (t *Tree) PutBatchWithReservedArenaPages(updates []Item, reservation *metastore.Reservation, arenaPages []metastore.Page, extra []metastore.PageImage) error {
+	if reservation==nil||len(arenaPages)==0 {return metastore.ErrInvalidPageSet}
+	return t.putBatchWithArenaPages(updates,arenaPages,extra,reservation)
+}
+
+func (t *Tree) putBatchWithArenaPages(updates []Item, arenaPages []metastore.Page, extra []metastore.PageImage, reservation *metastore.Reservation) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(updates)==0 && len(extra)==0 && len(arenaPages)==0 { return nil }
@@ -300,7 +324,7 @@ func (t *Tree) PutBatchWithArenaPages(updates []Item, arenaPages []metastore.Pag
 	}
 	if !changed && len(extra)==0 { return nil }
 	if root==nil && len(extra)>0 { root=nil }
-	return t.publishCOWWithArenaPages(root,next,arenaPages,extra)
+	return t.publishCOWWithReservedPages(root,next,arenaPages,extra,reservation)
 }
 
 // Delete removes key and returns ErrKeyNotFound when it does not exist.
