@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
 )
 
 func dynamicGeometryUpdateFixture(t *testing.T)(*dynamicFormatMem,format.DynamicSuperblock){

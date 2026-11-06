@@ -1,8 +1,11 @@
 package allocator
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"math"
 
 	"blockmesh/internal/device"
@@ -58,11 +61,11 @@ func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,ne
 	base:=oldG.BitmapOffset+uint64(ag)*oldG.BitmapStride
 	desc:=make([]byte,format.PageSize)
 	if err:=readAtFull(r,desc,int64(base));err!=nil{return nil,err}
-	if binaryLittleUint64(desc[:8])!=bitmapDescriptorMagic||binaryLittleUint32(desc[8:12])!=ag{return nil,errors.New("BMPOOL03 final AG bitmap descriptor invalid")}
-	seq:=binaryLittleUint64(desc[16:24]);if seq==math.MaxUint64{return nil,errors.New("BMPOOL03 bitmap sequence exhausted")}
+	if binary.LittleEndian.Uint64(desc[:8])!=bitmapDescriptorMagic||binary.LittleEndian.Uint32(desc[8:12])!=ag{return nil,errors.New("BMPOOL03 final AG bitmap descriptor invalid")}
+	seq:=binary.LittleEndian.Uint64(desc[16:24]);if seq==math.MaxUint64{return nil,errors.New("BMPOOL03 bitmap sequence exhausted")}
 	bitmap:=make([]byte,oldG.BitmapPaddedBytes)
 	if err:=readAtFull(r,bitmap,int64(base+format.PageSize));err!=nil{return nil,err}
-	if crc32Checksum(bitmap)!=binaryLittleUint32(desc[24:28]){return nil,errors.New("BMPOOL03 final AG bitmap CRC32C mismatch")}
+	if crc32.Checksum(bitmap,castagnoli)!=binary.LittleEndian.Uint32(desc[24:28]){return nil,errors.New("BMPOOL03 final AG bitmap CRC32C mismatch")}
 	for bit:=oldG.LastAGBlocks;bit<newG.LastAGBlocks;bit++{
 		mask:=byte(1<<uint(bit%8))
 		if bitmap[bit/8]&mask==0{return nil,fmt.Errorf("newly exposed bitmap bit %d was not reserved padding",bit)}
@@ -95,11 +98,12 @@ func PublishDynamicGeometry(dev device.Device,current,next format.DynamicSuperbl
 		images,err:=PlanDynamicBitmapGrow(dev,current,next);if err!=nil{return err}
 		if len(images)>0{if err=bitmapCommitter.CommitImages(images);err!=nil{return fmt.Errorf("publish newly exposed Data bitmap bits: %w",err)}}
 	}
+	if _,err:=OpenDynamicSuperblockPair(dev);err!=nil{return err}
 	selected,slot,err:=readDynamicSuperblockPairWithSlot(dev);if err!=nil{return err}
 	if selected!=current{return errors.New("stale BMPOOL03 geometry publisher: current on-disk superblock changed")}
 	encoded,err:=next.Encode();if err!=nil{return err}
 	inactive:=uint64(1)-slot
-	if err=writeDynamicAtFull(dev,encoded,int64(inactive*format.PageSize));err!=nil{return fmt.Errorf("publish first BMPOOL03 superblock copy: %w",err)}
+	if err=writeDynamicDeviceFull(dev,encoded,int64(inactive*format.PageSize));err!=nil{return fmt.Errorf("publish first BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync first BMPOOL03 superblock copy: %w",err)}
 	if err=writeDynamicAtFull(dev,encoded,int64(slot*format.PageSize));err!=nil{return fmt.Errorf("publish second BMPOOL03 superblock copy: %w",err)}
 	if err=dev.Sync();err!=nil{return fmt.Errorf("sync second BMPOOL03 superblock copy: %w",err)}
@@ -131,7 +135,6 @@ func readDynamicSuperblockPairWithSlot(dev device.Device)(format.DynamicSuperblo
 	return valid[0].sb,valid[0].slot,nil
 }
 
-func binaryLittleUint64(b []byte)uint64{return uint64(b[0])|uint64(b[1])<<8|uint64(b[2])<<16|uint64(b[3])<<24|uint64(b[4])<<32|uint64(b[5])<<40|uint64(b[6])<<48|uint64(b[7])<<56}
-func binaryLittleUint32(b []byte)uint32{return uint32(b[0])|uint32(b[1])<<8|uint32(b[2])<<16|uint32(b[3])<<24}
-func binaryPut64(b []byte,v uint64){for i:=0;i<8;i++{b[i]=byte(v>>(8*i))}}
-func binaryPut32(b []byte,v uint32){for i:=0;i<4;i++{b[i]=byte(v>>(8*i))}}
+func writeDynamicDeviceFull(dev device.Device,b []byte,off int64)error{
+	n,err:=dev.WriteAt(b,off);if err!=nil{return err};if n!=len(b){return io.ErrShortWrite};return nil
+}
