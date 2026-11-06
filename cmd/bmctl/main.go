@@ -285,9 +285,63 @@ func expandPoolMetadata(id string,c poolConfig)error{
 	if usage.ObservedAt.IsZero()||time.Since(usage.ObservedAt)>time.Duration(c.MetadataUsageMaxAgeSeconds)*time.Second||usage.ObservedAt.After(time.Now().Add(5*time.Minute)){
 		return errors.New("metadata usage snapshot is missing, stale, or from the future")
 	}
-	dev,store,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
-	target,err:=store.ExpandMetadata(usage.UsedBytes,usage.GrowthBytes);if err!=nil{return err}
-	fmt.Printf("{\"pool_id\":%q,\"metadata_bytes\":%d,\"generation\":%d}\n",id,target,store.Record().Generation)
+	dev,bootstrap,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
+	metadataOld,dataOld,oldViewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	if dataOld==nil{return errors.New("Pool has no DataView")}
+	currentSB,err:=allocator.OpenDynamicSuperblockPair(metadataOld);if err!=nil{return fmt.Errorf("open BMPOOL03 before expansion: %w",err)}
+	record:=bootstrap.Record()
+	if currentSB.ViewGeneration!=oldViewGeneration{return errors.New("BMPOOL03 and Bootstrap view generations are inconsistent before expansion")}
+	var currentMetadataTotal uint64
+	for _,extent:=range bootstrap.Extents(){if extent.Kind==poolspace.Metadata{currentMetadataTotal+=extent.Length}}
+	if currentMetadataTotal<record.BootstrapBytes{return poolspace.ErrInvalidGeometry}
+	currentMetadata:=currentMetadataTotal-record.BootstrapBytes
+	targetMetadata,err:=poolspace.MetadataExpansionTarget(currentMetadata,usage.UsedBytes,usage.GrowthBytes,poolspace.ExtentSize);if err!=nil{return err}
+	targetTotal:=targetMetadata+record.BootstrapBytes
+	if record.Generation==^uint64(0){return errors.New("Bootstrap generation exhausted")}
+	nextViewGeneration:=record.Generation+1
+	nextSB,err:=allocator.BuildDynamicGeometryUpdate(currentSB,targetTotal,uint64(dataOld.Size()),nextViewGeneration)
+	if err!=nil{return fmt.Errorf("preflight BMPOOL03 geometry expansion: %w",err)}
+	var volumeAllocator *metastore.DynamicVolumeAllocator
+	reservedAllocator:=metastore.DynamicVolumeAllocatorPresent(metadataOld,currentSB)
+	if reservedAllocator{
+		volumeAllocator,err=metastore.OpenDynamicVolumeAllocator(metadataOld,currentSB);if err!=nil{return err}
+		if err=volumeAllocator.CanExpandRegion(nextSB);err!=nil{return fmt.Errorf("preflight Reserved allocator expansion: %w",err)}
+	}
+	target,err:=bootstrap.ExpandMetadata(usage.UsedBytes,usage.GrowthBytes);if err!=nil{return err}
+	if target!=targetTotal{return fmt.Errorf("metadata expansion plan changed under execution: planned=%d actual=%d",targetTotal,target)}
+	metadata,data,viewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	if data==nil||viewGeneration!=nextViewGeneration||uint64(metadata.Size())!=targetTotal{return errors.New("Bootstrap did not publish the planned MetadataView generation/capacity")}
+	locker:=newSanlock(c)
+	ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute);defer cancel()
+	if !owner.Valid(){return errors.New("Owner lease lost before BMPOOL03 geometry publication")}
+	if err=allocator.PublishDynamicGeometryUnderLease(ctx,metadata,currentSB,nextSB,owner,locker,nil);err!=nil{return fmt.Errorf("publish expanded BMPOOL03 geometry: %w",err)}
+	walResource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",record.PoolUUID,0)
+	globalCommitter,err:=wal.NewDynamicSharedCommitter(metadata,nextSB,0,locker,walResource);if err!=nil{return err}
+	if reservedAllocator{
+		if !owner.Valid(){return errors.New("Owner lease lost before Reserved allocator expansion")}
+		if err=volumeAllocator.ExpandRegion(metadata,nextSB,globalCommitter);err!=nil{return fmt.Errorf("expand Reserved allocator: %w",err)}
+		if !owner.Valid(){return errors.New("Owner lease lost during Reserved allocator expansion")}
+	}
+	volume,err:=metastore.OpenDynamicPoolVolume(metadata,nextSB,0,id);if err!=nil{return err}
+	descriptor,err:=volume.DynamicPoolDescriptor();if err!=nil{return err}
+	volumeCommitter:=globalCommitter
+	if descriptor.AG!=0{
+		resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",record.PoolUUID,descriptor.AG)
+		volumeCommitter,err=wal.NewDynamicSharedCommitter(metadata,nextSB,descriptor.AG,locker,resource);if err!=nil{return err}
+	}
+	if reservedAllocator{
+		pages:=c.ArenaGrowthPages;if pages==0{pages=256}
+		unlock,e:=locker.Lock(ctx,fmt.Sprintf("ag:%03d",descriptor.AG));if e!=nil{return e}
+		if !owner.Valid(){_ = unlock();return errors.New("Owner lease lost before Volume Arena growth")}
+		e=volume.ExpandDynamicArenaBy(pages,volumeCommitter)
+		unlockErr:=unlock()
+		if e!=nil{return e};if unlockErr!=nil{return unlockErr}
+		if !owner.Valid(){return errors.New("Owner lease lost during Volume Arena growth")}
+	}else{
+		if err=volume.ExpandDynamicArenaUnderLease(ctx,owner,locker,volumeCommitter);err!=nil{return err}
+	}
+	fmt.Printf("{\"pool_id\":%q,\"metadata_bytes\":%d,\"view_generation\":%d,\"superblock_generation\":%d,\"arena_pages_added\":%d}\n",
+		id,target,viewGeneration,nextSB.Generation,func()uint64{if reservedAllocator{if c.ArenaGrowthPages>0{return c.ArenaGrowthPages};return 256};return 0}())
 	return nil
 }
 func statusPool(id string,c poolConfig)error{
