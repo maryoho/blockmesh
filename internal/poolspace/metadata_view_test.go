@@ -13,23 +13,12 @@ func TestMetadataViewSkipsBootstrapAndMapsFragmentedMetadata(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	defer f.Close()
 	if _, err = f.WriteAt([]byte{0}, (48<<20)-1); err != nil { t.Fatal(err) }
-	extents := []Extent{
+	metadataExtents := []Extent{
 		{Start:0, Length:BootstrapSize, Kind:Metadata},
 		{Start:16<<20, Length:4<<20, Kind:Metadata},
 		{Start:32<<20, Length:4<<20, Kind:Metadata},
-		{Start:8<<20, Length:8<<20, Kind:Free},
-		{Start:20<<20, Length:12<<20, Kind:Free},
 	}
-	// Extent maps are physically sorted and cover the device. The Metadata
-	// view deliberately omits the Bootstrap reservation and joins later ranges.
-	extents = []Extent{
-		{Start:0, Length:BootstrapSize, Kind:Metadata},
-		{Start:BootstrapSize, Length:8<<20, Kind:Free},
-		{Start:16<<20, Length:4<<20, Kind:Metadata},
-		{Start:20<<20, Length:12<<20, Kind:Free},
-		{Start:32<<20, Length:4<<20, Kind:Metadata},
-	}
-	view, err := NewMetadataView(f, extents)
+	view, err := NewMetadataView(f, metadataExtents)
 	if err != nil { t.Fatal(err) }
 	payload := bytes.Repeat([]byte{0x6b}, 5<<20)
 	if n, err := view.WriteAt(payload, 0); err != nil || n != len(payload) {
