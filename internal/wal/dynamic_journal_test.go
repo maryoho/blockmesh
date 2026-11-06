@@ -24,7 +24,7 @@ func dynamicWALFixture(t *testing.T)(*dynamicWALDevice,format.DynamicSuperblock)
 	var id [16]byte;copy(id[:],"dynamic-wal-001")
 	sb,e:=format.NewDynamicSuperblock(g,id,1,1);if e!=nil{t.Fatal(e)}
 	dev:=newDynamicWALDevice(g.MetadataBytes)
-	if err=format.InitializeDynamicCheckpoints(dev,g);err!=nil{t.Fatal(err)}
+	if err:=format.InitializeDynamicCheckpoints(dev,g);err!=nil{t.Fatal(err)}
 	return dev,sb
 }
 
