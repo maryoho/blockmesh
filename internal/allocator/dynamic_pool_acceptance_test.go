@@ -70,7 +70,7 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	alloc,err:=NewDynamicPoolAllocator(store,tree,locks,data);if err!=nil{t.Fatal(err)}
 	lease:=&crashOwnerLease{resource:"volume:"+desc.VolumeID,epoch:desc.OwnerEpoch}
 	var key [16]byte;var fp [32]byte;key[0]=0x55;fp[0]=0xaa
-	first:=AllocateRequest{IdempotencyKey:key,Fingerprint:fp,LogicalStart:10,BlockCount:1,Operation:1}
+	first:=AllocateRequest{IdempotencyKey:key,Fingerprint:fp,LogicalStart:1,BlockCount:1,Operation:1}
 	if _,err=alloc.AllocateZeroPublishTxn(context.Background(),lease,first);!errors.Is(err,ErrAllocationOutcomeUnknown){
 		t.Fatalf("expected uncertain WAL outcome, got %v",err)
 	}
@@ -119,10 +119,10 @@ func TestBMPOOL03EndToEndCrashRecoveryAndOnlineExpansion(t *testing.T){
 	if err!=nil{t.Fatal(err)}
 	tree3,err:=btree.OpenPersistentWithExternalPages(store3,committer3,ResolveIdempotencyPages);if err!=nil{t.Fatal(err)}
 	alloc3,err:=NewDynamicPoolAllocator(store3,tree3,locks,dataExpanded);if err!=nil{t.Fatal(err)}
-	second:=AllocateRequest{IdempotencyKey:[16]byte{0x56},Fingerprint:[32]byte{0xbb},LogicalStart:11,BlockCount:3,Operation:1}
+	second:=AllocateRequest{IdempotencyKey:[16]byte{0x56},Fingerprint:[32]byte{0xbb},LogicalStart:2,BlockCount:3,Operation:1}
 	r2,err:=alloc3.AllocateZeroPublishTxn(context.Background(),lease,second);if err!=nil{t.Fatal(err)}
 	if r2.PhysicalStart!=1{t.Fatalf("second allocation physical=%d want=1",r2.PhysicalStart)}
-	third:=AllocateRequest{IdempotencyKey:[16]byte{0x57},Fingerprint:[32]byte{0xbc},LogicalStart:14,BlockCount:1,Operation:1}
+	third:=AllocateRequest{IdempotencyKey:[16]byte{0x57},Fingerprint:[32]byte{0xbc},LogicalStart:5,BlockCount:1,Operation:1}
 	r3,err:=alloc3.AllocateZeroPublishTxn(context.Background(),lease,third);if err!=nil{t.Fatal(err)}
 	if r3.PhysicalStart!=4{t.Fatalf("allocation from newly exposed Data capacity=%d want=4",r3.PhysicalStart)}
 }
