@@ -11,6 +11,7 @@ import (
 
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
+	"blockmesh/internal/metastore"
 )
 
 // DynamicJournal is a BMPOOL03 per-AG redo journal. Each geometry-sized AG
@@ -124,6 +125,14 @@ func(j *DynamicJournal)validateUpdates(updates []PageUpdate)error{
 	return nil
 }
 func(j *DynamicJournal)apply(u PageUpdate)error{return writeAtFull(j.dev,u.Image,int64(u.Offset))}
+
+
+// CommitImages adapts DynamicJournal to the metastore transaction interface.
+func(j *DynamicJournal)CommitImages(images []metastore.PageImage)error{
+	updates:=make([]PageUpdate,len(images))
+	for i,image:=range images{updates[i]=PageUpdate{Offset:image.Offset,Image:image.Data}}
+	return j.Commit(updates)
+}
 
 // Checkpoint clears the inactive bank before publishing a new dual-copy
 // descriptor. A crash before descriptor durability keeps the old bank active;
