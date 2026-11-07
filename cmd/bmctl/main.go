@@ -398,8 +398,13 @@ func expandPoolData(id string,c poolConfig)error{
 	ag:=currentSB.Geometry.AGCount-1
 	resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",currentSB.PoolUUID,ag)
 	committer,err:=wal.NewDynamicSharedCommitter(metadata,currentSB,ag,locker,resource);if err!=nil{return err}
-	_,err=metastore.OpenDynamicPoolVolume(metadata,currentSB,0,id);if err!=nil{return err}
 	epochReader,err:=metastore.NewDynamicOwnerEpochReader(metadata,currentSB,0,id);if err!=nil{return err}
+	// The MetadataView generation is already newer because Bootstrap has
+	// committed the new Data extents. Read the existing descriptor epoch
+	// directly; opening a Volume runtime against the old Superblock would
+	// correctly reject this transitional generation mismatch.
+	epoch,err:=epochReader.ReadOwnerEpoch();if err!=nil{return err}
+	if epoch!=owner.Epoch(){return fmt.Errorf("OwnerEpoch mismatch before Data growth: descriptor=%d lease=%d",epoch,owner.Epoch())}
 	if err=wal.GuardDynamicSharedCommitter(committer,owner,id,epochReader.ReadOwnerEpoch);err!=nil{return err}
 	ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute);defer cancel()
 	if !owner.Valid(){return errors.New("Owner lease lost before Data geometry publication")}
