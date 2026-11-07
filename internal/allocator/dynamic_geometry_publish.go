@@ -18,9 +18,8 @@ import (
 var ErrDynamicGeometryRequiresMigration=errors.New("BMPOOL03 growth exceeds reserved AG geometry; metadata layout migration is required")
 
 // BuildDynamicGeometryUpdate replans a new logical view generation while
-// preserving every existing metadata-region offset. This first online-growth
-// implementation supports metadata growth and Data growth within the existing
-// final AG; adding another AG requires a separately reserved AG-capacity plan.
+// preserving every existing metadata-region offset. AGCapacity reserves stable
+// WAL, Bitmap and Checkpoint slots so AGCount can grow without moving metadata.
 func BuildDynamicGeometryUpdate(current format.DynamicSuperblock,metadataBytes,dataBytes,viewGeneration uint64)(format.DynamicSuperblock,error){
 	var zero format.DynamicSuperblock
 	if err:=current.Validate();err!=nil{return zero,err}
@@ -55,7 +54,8 @@ func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,ne
 	if r==nil||oldSB.Validate()!=nil||newSB.Validate()!=nil{return nil,errors.New("invalid BMPOOL03 bitmap growth request")}
 	oldG,newG:=oldSB.Geometry,newSB.Geometry
 	if newG.AGCount<oldG.AGCount||oldG.AGCapacity!=newG.AGCapacity||oldG.BitmapOffset!=newG.BitmapOffset||oldG.BitmapStride!=newG.BitmapStride||
-		oldG.BitmapPaddedBytes!=newG.BitmapPaddedBytes{return nil,ErrDynamicGeometryRequiresMigration}
+		oldG.BitmapPaddedBytes!=newG.BitmapPaddedBytes||newG.AGSizeBlocks!=oldG.AGSizeBlocks||
+		newG.TotalBlocks<oldG.TotalBlocks{return nil,ErrDynamicGeometryRequiresMigration}
 	ag:=oldG.AGCount-1
 	newValid,err:=newG.AGBlocks(ag);if err!=nil{return nil,err}
 	if newValid<oldG.LastAGBlocks{return nil,ErrDynamicGeometryRequiresMigration}
@@ -64,26 +64,32 @@ func PlanDynamicBitmapGrow(r interface{ReadAt([]byte,int64)(int,error)},oldSB,ne
 	desc:=make([]byte,format.PageSize)
 	if err:=readAtFull(r,desc,int64(base));err!=nil{return nil,err}
 	if binary.LittleEndian.Uint64(desc[:8])!=bitmapDescriptorMagic||binary.LittleEndian.Uint32(desc[8:12])!=ag{return nil,errors.New("BMPOOL03 final AG bitmap descriptor invalid")}
-	seq:=binary.LittleEndian.Uint64(desc[16:24]);if seq==math.MaxUint64{return nil,errors.New("BMPOOL03 bitmap sequence exhausted")}
+	seq:=binary.LittleEndian.Uint64(desc[16:24])
 	bitmap:=make([]byte,oldG.BitmapPaddedBytes)
 	if err:=readAtFull(r,bitmap,int64(base+format.PageSize));err!=nil{return nil,err}
 	if crc32.Checksum(bitmap,castagnoli)!=binary.LittleEndian.Uint32(desc[24:28]){return nil,errors.New("BMPOOL03 final AG bitmap CRC32C mismatch")}
+	changed:=false
 	for bit:=oldG.LastAGBlocks;bit<newValid;bit++{
 		mask:=byte(1<<uint(bit%8))
-		if bitmap[bit/8]&mask==0{return nil,fmt.Errorf("newly exposed bitmap bit %d was not reserved padding",bit)}
-		bitmap[bit/8]&^=mask
+		// These bits were padding under oldG and could never have been
+		// allocated. A clear bit therefore means an earlier growth attempt
+		// durably committed this transition before crashing. Treat it as
+		// already initialized so publication can be retried idempotently.
+		if bitmap[bit/8]&mask!=0{bitmap[bit/8]&^=mask;changed=true}
 	}
+	if !changed{return nil,nil}
+	if seq==math.MaxUint64{return nil,errors.New("BMPOOL03 bitmap sequence exhausted")}
 	images:=make([]metastore.PageImage,0,int(oldG.BitmapPaddedBytes/format.PageSize)+1)
 	for p:=uint64(0);p<oldG.BitmapPaddedBytes/format.PageSize;p++{
 		off:=base+format.PageSize+p*format.PageSize
-		page:=append([]byte(nil),bitmap[p*format.PageSize:(p+1)*format.PageSize]...)
+		page:=append([]byte(nil),bitmap[p*format.PageSize:(p+1)*format.PageSize]...) 
 		images=append(images,metastore.PageImage{Offset:off,Data:page})
 	}
-	binary.LittleEndian.PutUint64(desc[16:24],seq+1);binary.LittleEndian.PutUint32(desc[24:28],crc32.Checksum(bitmap,castagnoli))
+	binary.LittleEndian.PutUint64(desc[16:24],seq+1)
+	binary.LittleEndian.PutUint32(desc[24:28],crc32.Checksum(bitmap,castagnoli))
 	images=append(images,metastore.PageImage{Offset:base,Data:desc})
 	return images,nil
 }
-
 // PublishDynamicGeometry commits newly exposed final-AG bitmap bits first,
 // then publishes the new geometry to the older superblock copy and finally
 // mirrors it to the previous active copy. A crash at any point leaves either
@@ -96,7 +102,9 @@ func publishDynamicGeometryChecked(dev device.Device,current,next format.Dynamic
 	if dev==nil{return errors.New("nil BMPOOL03 MetadataView")}
 	if err:=current.Validate();err!=nil{return err};if err:=next.Validate();err!=nil{return err}
 	if next.PoolUUID!=current.PoolUUID||next.Generation!=current.Generation+1||
-		next.ViewGeneration<=current.ViewGeneration{return errors.New("BMPOOL03 geometry publication identity/generation mismatch")}
+		next.ViewGeneration<=current.ViewGeneration||next.Geometry.MetadataBytes<current.Geometry.MetadataBytes||
+		next.Geometry.DataBytes<current.Geometry.DataBytes||next.Geometry.AGCount<current.Geometry.AGCount||
+		next.Geometry.AGCapacity!=current.Geometry.AGCapacity||next.Geometry.AGSizeBlocks!=current.Geometry.AGSizeBlocks{return errors.New("BMPOOL03 geometry publication identity/generation mismatch")}
 	if uint64(dev.Size())<next.Geometry.MetadataBytes{return errors.New("expanded MetadataView is smaller than new geometry")}
 	if !sameDynamicMetadataLayout(current.Geometry,next.Geometry){return ErrDynamicGeometryRequiresMigration}
 	if guard!=nil{if err:=guard();err!=nil{return err}}
@@ -176,8 +184,9 @@ func writeDynamicDeviceFull(dev device.Device,b []byte,off int64)error{
 
 
 // initializeDynamicAGSlots initializes previously reserved AG slots while they
-// are still unreachable through the old Superblock. The caller publishes the
-// increased AGCount only after all WAL, bitmap and checkpoint metadata is durable.
+// are still unreachable through the old Superblock. It is idempotent: after a
+// crash, the old AGCount remains authoritative and retry may reinitialize any
+// slot that was not yet made visible.
 func initializeDynamicAGSlots(dev device.Device, oldG, newG format.DynamicGeometry) error {
 	for ag:=oldG.AGCount; ag<newG.AGCount; ag++ {
 		seg:=newG.WALOffset+uint64(ag)*newG.WALSegmentBytes

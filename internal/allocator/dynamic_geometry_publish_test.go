@@ -80,3 +80,39 @@ func TestDynamicGeometryGrowthActivatesReservedAG(t *testing.T) {
 		if binary.LittleEndian.Uint32(desc[8:12])!=ag{t.Fatalf("AG %d descriptor not initialized",ag)}
 	}
 }
+
+// TestDynamicAGGrowthRetryAfterBitmapCommit verifies the crash window between
+// committing the old final AG's newly valid bitmap bits and initializing the
+// newly activated AG slots. Retrying must recognize already-cleared padding
+// bits and complete publication idempotently.
+func TestDynamicAGGrowthRetryAfterBitmapCommit(t *testing.T) {
+	g,err:=format.PlanDynamicGeometry(format.DynamicGeometryConfig{
+		DataBytes:6*format.BlockSize,MetadataBytes:64<<20,AGSizeBytes:4*format.BlockSize,
+		WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10,AGCapacity:4,
+	})
+	if err!=nil{t.Fatal(err)}
+	var id [16]byte;copy(id[:],"ag-growth-retry")
+	old,err:=format.NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
+	dev:=newDynamicFormatMem(g.MetadataBytes)
+	if err=FormatDynamicPool(dev,old);err!=nil{t.Fatal(err)}
+	next,err:=BuildDynamicGeometryUpdate(old,g.MetadataBytes,10*format.BlockSize,2);if err!=nil{t.Fatal(err)}
+	if next.Geometry.AGCount!=3{t.Fatalf("AGCount=%d want 3",next.Geometry.AGCount)}
+	// Fail while initializing AG2, after the previous final AG bitmap update
+	// has been durably committed by the supplied committer.
+	dev.failWriteAt=int64(g.WALOffset+2*g.WALSegmentBytes)
+	committer:=dynamicPageImageCommitter{dev:dev}
+	if err=PublishDynamicGeometry(dev,old,next,committer);err==nil{t.Fatal("expected injected new-AG initialization failure")}
+	got,err:=OpenDynamicSuperblockPair(dev);if err!=nil{t.Fatal(err)}
+	if got!=old{t.Fatalf("incomplete growth became visible: generation=%d AGCount=%d",got.Generation,got.Geometry.AGCount)}
+	// AG1 blocks 2 and 3 were padding before the attempted growth and may
+	// already be clear because the WAL commit completed.
+	bitmap:=make([]byte,format.PageSize)
+	off:=old.Geometry.BitmapOffset+old.Geometry.BitmapStride+format.PageSize
+	if _,err=dev.ReadAt(bitmap,int64(off));err!=nil{t.Fatal(err)}
+	for bit:=uint64(2);bit<4;bit++{if bitmap[bit/8]&(1<<uint(bit%8))!=0{t.Fatalf("expected committed growth bit %d to be clear",bit)}}
+	// Retry with the same old/new Superblocks. It must publish AGCount only
+	// after AG2 metadata is initialized and synced.
+	if err=PublishDynamicGeometry(dev,old,next,committer);err!=nil{t.Fatalf("retry AG growth: %v",err)}
+	got,err=OpenDynamicSuperblockPair(dev);if err!=nil{t.Fatal(err)}
+	if got!=next{t.Fatalf("retry published %+v, want %+v",got,next)}
+}
