@@ -379,7 +379,7 @@ func expandPoolData(id string,c poolConfig)error{
 	metadataOld,dataOld,oldViewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
 	if dataOld==nil{return errors.New("Pool has no DataView")}
 	currentSB,err:=allocator.OpenDynamicSuperblockPair(metadataOld);if err!=nil{return fmt.Errorf("open BMPOOL03 before Data expansion: %w",err)}
-	if currentSB.ViewGeneration!=oldViewGeneration{return errors.New("BMPOOL03 and Bootstrap view generations are inconsistent before Data expansion")}
+	if currentSB.ViewGeneration>oldViewGeneration{return errors.New("BMPOOL03 ViewGeneration is newer than the Bootstrap Extent Map")}
 	currentData:=uint64(dataOld.Size())
 	targetData,err:=poolspace.DataExpansionTarget(currentData,usage.UsedBytes,usage.GrowthBytes,poolspace.AllocationSize);if err!=nil{return err}
 	if targetData>currentData{
@@ -387,9 +387,10 @@ func expandPoolData(id string,c poolConfig)error{
 		if len(allocated)==0{return errors.New("Data expansion allocator returned no extents")}
 	}
 	metadata,data,viewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
-	if data==nil||viewGeneration==oldViewGeneration{return errors.New("Data extent allocation did not publish a new Bootstrap view generation")}
-	if uint64(data.Size())<currentSB.Geometry.DataBytes{return errors.New("DataView is smaller than persisted BMPOOL03 geometry")}
-	if uint64(data.Size())==currentSB.Geometry.DataBytes{
+	if data==nil{return errors.New("Pool has no DataView after Data extent allocation")}
+	if targetData>currentData&&viewGeneration==oldViewGeneration{return errors.New("Data extent allocation did not publish a new Bootstrap view generation")}
+	if uint64(metadata.Size())<currentSB.Geometry.MetadataBytes||uint64(data.Size())<currentSB.Geometry.DataBytes{return errors.New("MetadataView or DataView is smaller than persisted BMPOOL03 geometry")}
+	if uint64(data.Size())==currentSB.Geometry.DataBytes&&uint64(metadata.Size())==currentSB.Geometry.MetadataBytes&&viewGeneration==currentSB.ViewGeneration{
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"pool_id":id,"data_bytes":data.Size(),"view_generation":viewGeneration,"superblock_generation":currentSB.Generation,"changed":false})
 	}
 	nextSB,err:=allocator.BuildDynamicGeometryUpdate(currentSB,uint64(metadata.Size()),uint64(data.Size()),viewGeneration);if err!=nil{return fmt.Errorf("plan BMPOOL03 Data/AG growth: %w",err)}
