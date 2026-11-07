@@ -72,6 +72,19 @@ func PlanDevice(deviceBytes uint64, volumeSlots uint32) (Plan, error) {
 		VolumeSlots:volumeSlots, EstimatedBitmap:bitmap, EstimatedMapping:mapping, EstimatedWAL:wal},nil
 }
 
+// DataExpansionTarget computes a DataView target from measured use and a growth forecast.
+// Unlike metadata expansion, a DataView that already has sufficient headroom is
+// left unchanged. The result is aligned to the 4MiB allocation extent size.
+func DataExpansionTarget(currentCapacity,usedBytes,growthBytes,allocationSize uint64)(uint64,error){
+	if allocationSize==0||allocationSize&(allocationSize-1)!=0||currentCapacity%allocationSize!=0||usedBytes>currentCapacity{return 0,ErrInvalidGeometry}
+	need,ok:=addChecked(usedBytes,growthBytes);if !ok{return 0,ErrInvalidGeometry}
+	need,ok=mulDivCeil(need,130,100);if !ok{return 0,ErrInvalidGeometry}
+	units:=ceilDiv(need,allocationSize)
+	if units>math.MaxUint64/allocationSize{return 0,ErrInvalidGeometry}
+	target:=units*allocationSize
+	if target<currentCapacity{target=currentCapacity}
+	return target,nil
+}
 // MetadataExpansionTarget computes the target metadata capacity. Expansion is
 // explicitly requested by the operator, but its size is never user supplied.
 // The target uses observed use plus a growth forecast and a 30% headroom.

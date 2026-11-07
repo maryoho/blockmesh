@@ -37,6 +37,8 @@ type poolConfig struct {
 	OwnerLeaseHelper string `json:"owner_lease_helper"`
 	MetadataUsageFile string `json:"metadata_usage_file"`
 	MetadataUsageMaxAgeSeconds int64 `json:"metadata_usage_max_age_seconds"`
+	DataUsageFile string `json:"data_usage_file"`
+	DataUsageMaxAgeSeconds int64 `json:"data_usage_max_age_seconds"`
 	AGSizeBytes uint64 `json:"ag_size_bytes"`
 	AGCapacity uint32 `json:"ag_capacity"`
 	WALSegmentBytes uint64 `json:"wal_segment_bytes"`
@@ -70,7 +72,7 @@ func main(){
 	if len(os.Args)<2||os.Args[1]!="pool"{usage();os.Exit(2)}
 	if err:=runPool(os.Args[2:]);err!=nil{fmt.Fprintln(os.Stderr,"bmctl:",err);os.Exit(1)}
 }
-func usage(){fmt.Fprintln(os.Stderr,"Usage: bmctl pool <format|dynamic-format|dynamic-status|dynamic-recover|rescan|metadata-expand|metadata-expand-status> --pool <id> [--config-dir /etc/blockmesh/pools]")}
+func usage(){fmt.Fprintln(os.Stderr,"Usage: bmctl pool <format|dynamic-format|dynamic-status|dynamic-recover|rescan|metadata-expand|metadata-expand-status|data-expand> --pool <id> [--config-dir /etc/blockmesh/pools]")}
 func runPool(args []string)error{
 	if len(args)==0{usage();return errors.New("pool operation is required")}
 	op:=args[0]
@@ -99,6 +101,8 @@ func runPool(args []string)error{
 		return expandPoolMetadata(*poolID,cfg)
 	case "metadata-expand-status":
 		return statusPool(*poolID,cfg)
+	case "data-expand":
+		return expandPoolData(*poolID,cfg)
 	default:
 		usage();return fmt.Errorf("unknown Pool operation %q",op)
 	}
@@ -110,6 +114,7 @@ func loadConfig(dir,id string)(poolConfig,error){
 	if err=json.Unmarshal(b,&c);err!=nil{return c,fmt.Errorf("decode Pool config: %w",err)}
 	if c.DevicePath==""||c.Lockspace==""||c.LockDevice==""||c.LockOffsetBytes==0{return c,errors.New("Pool config requires device_path, lockspace, lock_device and non-zero lock_offset_bytes")}
 	if c.MetadataUsageMaxAgeSeconds<=0{c.MetadataUsageMaxAgeSeconds=3600}
+	if c.DataUsageMaxAgeSeconds<=0{c.DataUsageMaxAgeSeconds=3600}
 	return c,nil
 }
 func newSanlock(c poolConfig)*lock.SanlockLocker{
@@ -361,6 +366,44 @@ func expandPoolMetadata(id string,c poolConfig)error{
 	fmt.Printf("{\"pool_id\":%q,\"metadata_bytes\":%d,\"view_generation\":%d,\"superblock_generation\":%d,\"arena_pages_added\":%d}\n",
 		id,target,viewGeneration,nextSB.Generation,func()uint64{if reservedAllocator{if c.ArenaGrowthPages>0{return c.ArenaGrowthPages};return 256};return 0}())
 	return nil
+}
+// expandPoolData allocates additional Data extents from a fresh usage/forecast
+// snapshot, then publishes the resulting DataView geometry through BMPOOL03.
+// The requested target size is computed internally; operators cannot supply it.
+func expandPoolData(id string,c poolConfig)error{
+	if c.DataUsageFile==""{return errors.New("data_usage_file is required; Data usage telemetry must be supplied by the storage service")}
+	b,err:=os.ReadFile(c.DataUsageFile);if err!=nil{return fmt.Errorf("read Data usage snapshot: %w",err)}
+	var usage usageSnapshot;if err=json.Unmarshal(b,&usage);err!=nil{return fmt.Errorf("decode Data usage snapshot: %w",err)}
+	if usage.ObservedAt.IsZero()||time.Since(usage.ObservedAt)>time.Duration(c.DataUsageMaxAgeSeconds)*time.Second||usage.ObservedAt.After(time.Now().Add(5*time.Minute)){return errors.New("Data usage snapshot is missing, stale, or from the future")}
+	dev,bootstrap,owner,err:=openStore(c,id,true);if err!=nil{return err};defer dev.Close();defer owner.Close()
+	metadataOld,dataOld,oldViewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	if dataOld==nil{return errors.New("Pool has no DataView")}
+	currentSB,err:=allocator.OpenDynamicSuperblockPair(metadataOld);if err!=nil{return fmt.Errorf("open BMPOOL03 before Data expansion: %w",err)}
+	if currentSB.ViewGeneration!=oldViewGeneration{return errors.New("BMPOOL03 and Bootstrap view generations are inconsistent before Data expansion")}
+	currentData:=uint64(dataOld.Size())
+	targetData,err:=poolspace.DataExpansionTarget(currentData,usage.UsedBytes,usage.GrowthBytes,poolspace.AllocationSize);if err!=nil{return err}
+	if targetData>currentData{
+		allocated,e:=bootstrap.AllocateDataExtents(targetData-currentData);if e!=nil{return fmt.Errorf("allocate Data extents: %w",e)}
+		if len(allocated)==0{return errors.New("Data expansion allocator returned no extents")}
+	}
+	metadata,data,viewGeneration,err:=bootstrap.OpenViews();if err!=nil{return err}
+	if data==nil||viewGeneration==oldViewGeneration{return errors.New("Data extent allocation did not publish a new Bootstrap view generation")}
+	if uint64(data.Size())<currentSB.Geometry.DataBytes{return errors.New("DataView is smaller than persisted BMPOOL03 geometry")}
+	if uint64(data.Size())==currentSB.Geometry.DataBytes{
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"pool_id":id,"data_bytes":data.Size(),"view_generation":viewGeneration,"superblock_generation":currentSB.Generation,"changed":false})
+	}
+	nextSB,err:=allocator.BuildDynamicGeometryUpdate(currentSB,uint64(metadata.Size()),uint64(data.Size()),viewGeneration);if err!=nil{return fmt.Errorf("plan BMPOOL03 Data/AG growth: %w",err)}
+	locker:=newSanlock(c)
+	ag:=currentSB.Geometry.AGCount-1
+	resource:=fmt.Sprintf("blockmesh:pool:%x:ag:%03d:wal",currentSB.PoolUUID,ag)
+	committer,err:=wal.NewDynamicSharedCommitter(metadata,currentSB,ag,locker,resource);if err!=nil{return err}
+	_,err=metastore.OpenDynamicPoolVolume(metadata,currentSB,0,id);if err!=nil{return err}
+	epochReader,err:=metastore.NewDynamicOwnerEpochReader(metadata,currentSB,0,id);if err!=nil{return err}
+	if err=wal.GuardDynamicSharedCommitter(committer,owner,id,epochReader.ReadOwnerEpoch);err!=nil{return err}
+	ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute);defer cancel()
+	if !owner.Valid(){return errors.New("Owner lease lost before Data geometry publication")}
+	if err=allocator.PublishDynamicGeometryUnderLease(ctx,metadata,currentSB,nextSB,owner,locker,committer);err!=nil{return fmt.Errorf("publish BMPOOL03 Data/AG growth: %w",err)}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"pool_id":id,"data_bytes":data.Size(),"ag_count":nextSB.Geometry.AGCount,"ag_capacity":nextSB.Geometry.AGCapacity,"view_generation":viewGeneration,"superblock_generation":nextSB.Generation,"changed":true})
 }
 func statusPool(id string,c poolConfig)error{
 	dev,store,_,err:=openStore(c,id,false);if err!=nil{return err};defer dev.Close()

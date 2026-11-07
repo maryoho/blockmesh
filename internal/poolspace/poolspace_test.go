@@ -43,3 +43,16 @@ func TestFailedAllocationDoesNotConsumePartialFreeSpace(t *testing.T) {
  if len(before)!=len(after){t.Fatalf("extent count changed on failed allocation: before=%v after=%v",before,after)}
  for i:=range before{if before[i]!=after[i]{t.Fatalf("allocator mutated on failed request: before=%v after=%v",before,after)}}
 }
+
+func TestDataExpansionTargetUsesForecastAndDoesNotGrowWhenSufficient(t *testing.T) {
+	current:=uint64(10*AllocationSize)
+	got,err:=DataExpansionTarget(current,8*AllocationSize,2*AllocationSize,AllocationSize);if err!=nil{t.Fatal(err)}
+	if got<=current||got%AllocationSize!=0{t.Fatalf("expected aligned Data growth, got %d",got)}
+	noGrowth,err:=DataExpansionTarget(current,4*AllocationSize,AllocationSize,AllocationSize);if err!=nil{t.Fatal(err)}
+	if noGrowth!=current{t.Fatalf("sufficient Data capacity grew unexpectedly: got=%d current=%d",noGrowth,current)}
+}
+
+func TestDataExpansionTargetRejectsOverflowAndInvalidUsage(t *testing.T) {
+	if _,err:=DataExpansionTarget(4*AllocationSize,5*AllocationSize,0,AllocationSize);err==nil{t.Fatal("expected usage greater than capacity rejection")}
+	if _,err:=DataExpansionTarget(4*AllocationSize,AllocationSize,^uint64(0),AllocationSize);err==nil{t.Fatal("expected forecast overflow rejection")}
+}
