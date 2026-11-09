@@ -171,7 +171,7 @@ static int bm_owner_prepare(struct bm_target *bm, const char *arg, const char *i
 	/* bm_message serializes all control transitions with control_lock. */
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch <= bm->owner_epoch) ret = -ESTALE;
-	else { bm->owner_epoch = epoch; bm->reader_epoch = 0; bm->root_generation = 0; bm->read_only = false; bm->reader_gate_open = false; bm->fenced = false; ret = 0; }
+	else { bm->owner_epoch = epoch; bm->root_generation = 0; bm->read_only = false; bm->reader_gate_open = false; bm->fenced = false; ret = 0; }
 	spin_unlock_irqrestore(&bm->state_lock, flags);
 	return ret;
 }
@@ -242,7 +242,6 @@ static int bm_reader_prepare(struct bm_target *bm, const char *epoch_arg,
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch <= bm->reader_epoch) ret = -ESTALE;
 	else {
-		bm->owner_epoch = 0;
 		bm->reader_epoch = epoch;
 		bm->root_generation = root;
 		bm->read_only = true;
