@@ -1,0 +1,400 @@
+package dynamicruntime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"blockmesh/internal/metastore"
+)
+
+var (
+	ErrManagerClosed = errors.New("BMPOOL03 DynamicVolumeRuntimeManager is closed")
+	ErrRuntimeConflict = errors.New("BMPOOL03 Volume is active with a different runtime identity or mode")
+	ErrRuntimeStopping = errors.New("BMPOOL03 Volume runtime is stopping or requires cleanup")
+	ErrReadOnlyUnavailable = errors.New("BMPOOL03 read-only runtime opener is not configured")
+	ErrOwnerMonitorRequired = errors.New("BMPOOL03 RW runtime requires a monitored Owner lease")
+	ErrReaderHealthRequired = errors.New("BMPOOL03 RO runtime requires a heartbeat-capable Reader session")
+)
+
+type OwnerAcquirer func(context.Context, metastore.VolumeRuntimeSpec) (OwnerLease, error)
+
+// ReadOnlySession is the live Reader Table / sanlock session. Heartbeat must
+// fail when either the distributed Reader lease or durable Reader slot is no
+// longer healthy. CloseDrained may be called only after the DM read path drains.
+type ReadOnlySession interface {
+	Heartbeat() error
+	CloseDrained(context.Context, bool) error
+}
+
+// ReadOnlyRuntimeOpener must open BMPOOL03 views from one Bootstrap generation,
+// join the requested Reader slot and return the session that pins its generation.
+// It must not acquire or publish a RW Owner lease.
+type ReadOnlyRuntimeOpener func(context.Context, metastore.VolumeRuntimeSpec) (*Runtime, ReadOnlySession, error)
+
+// RequestGate serializes the final health check with DM queue admission.
+// FailStop must synchronously close/suspend the local data path before returning.
+type RequestGate interface {
+	EnableRequestsGuarded(context.Context, metastore.VolumeRuntimeSpec, *Runtime, func() error) error
+	StopRequests(context.Context, string) error
+	DrainRequests(context.Context, string) error
+	FailStop(context.Context, metastore.VolumeRuntimeSpec, error) error
+}
+
+type ManagerConfig struct {
+	AcquireOwner OwnerAcquirer
+	OpenReadWrite interface {
+		OpenReadWrite(context.Context, metastore.VolumeRuntimeSpec, OwnerLease) (*Runtime, error)
+	}
+	OpenReadOnly ReadOnlyRuntimeOpener
+	Gate RequestGate
+	ReaderHeartbeatInterval time.Duration
+}
+
+type RuntimeState uint8
+
+const (
+	RuntimeCreated RuntimeState = iota
+	RuntimeOpening
+	RuntimeAdmitting
+	RuntimeActive
+	RuntimeLeaseLost
+	RuntimeStopping
+	RuntimeStopped
+	RuntimeFailed
+)
+
+type managedRuntime struct {
+	spec metastore.VolumeRuntimeSpec
+	runtime *Runtime
+	reader ReadOnlySession
+	state RuntimeState
+	enabled bool
+	stopping bool
+	watchCancel context.CancelFunc
+	watchDone chan struct{}
+	failure error
+}
+
+type DynamicVolumeRuntimeManager struct {
+	cfg ManagerConfig
+	mu sync.Mutex
+	runtimes map[string]*managedRuntime
+	volumeLocks map[string]*sync.Mutex
+	closed bool
+}
+
+func NewDynamicVolumeRuntimeManager(cfg ManagerConfig) (*DynamicVolumeRuntimeManager, error) {
+	if cfg.OpenReadWrite == nil || cfg.Gate == nil {
+		return nil, errors.New("BMPOOL03 Runtime opener and DM RequestGate are required")
+	}
+	if cfg.ReaderHeartbeatInterval <= 0 {
+		cfg.ReaderHeartbeatInterval = 250 * time.Millisecond
+	}
+	return &DynamicVolumeRuntimeManager{
+		cfg: cfg,
+		runtimes: make(map[string]*managedRuntime),
+		volumeLocks: make(map[string]*sync.Mutex),
+	}, nil
+}
+
+func validateManagerSpec(spec metastore.VolumeRuntimeSpec) error {
+	if strings.TrimSpace(spec.VolumeID) == "" || strings.TrimSpace(spec.NodeID) == "" || strings.TrimSpace(spec.BootID) == "" {
+		return errors.New("VolumeID, NodeID and BootID are required")
+	}
+	switch spec.Mode {
+	case metastore.VolumeRuntimeReadWrite:
+		if spec.ReaderEpoch != 0 {
+			return errors.New("RW activation must not carry a ReaderEpoch")
+		}
+	case metastore.VolumeRuntimeReadOnly:
+		if spec.ReaderEpoch == 0 {
+			return errors.New("RO activation requires a non-zero ReaderEpoch")
+		}
+	default:
+		return errors.New("invalid BMPOOL03 runtime mode")
+	}
+	return nil
+}
+
+func (m *DynamicVolumeRuntimeManager) volumeLock(volumeID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.volumeLocks[volumeID]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.volumeLocks[volumeID] = l
+	}
+	return l
+}
+
+// Activate opens the selected BMPOOL03 runtime, starts lease-health supervision,
+// and admits DM requests only after a final synchronous health check under the
+// RequestGate's admission serialization lock. Repeated activation with the same
+// identity is idempotent; a different identity/mode is rejected.
+func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metastore.VolumeRuntimeSpec) error {
+	if m == nil || ctx == nil {
+		return errors.New("manager and activation context are required")
+	}
+	if err := validateManagerSpec(spec); err != nil {
+		return err
+	}
+	vl := m.volumeLock(spec.VolumeID)
+	vl.Lock()
+	defer vl.Unlock()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrManagerClosed
+	}
+	if current := m.runtimes[spec.VolumeID]; current != nil {
+		m.mu.Unlock()
+		if current.stopping || current.state == RuntimeLeaseLost || current.state == RuntimeFailed {
+			return ErrRuntimeStopping
+		}
+		if current.spec != spec {
+			return ErrRuntimeConflict
+		}
+		if current.state == RuntimeActive {
+			return nil
+		}
+		return ErrRuntimeStopping
+	}
+	m.mu.Unlock()
+
+	rt := &managedRuntime{spec: spec, state: RuntimeOpening}
+	var openErr error
+	switch spec.Mode {
+	case metastore.VolumeRuntimeReadWrite:
+		if m.cfg.AcquireOwner == nil {
+			return errors.New("RW activation requires a P3 OwnerCoordinator adapter")
+		}
+		owner, err := m.cfg.AcquireOwner(ctx, spec)
+		if err != nil {
+			return fmt.Errorf("acquire fenced P3 Owner lease: %w", err)
+		}
+		if owner == nil || !owner.Valid() || owner.Epoch() == 0 || owner.VolumeID() != spec.VolumeID {
+			if owner != nil { _ = owner.Close() }
+			return ErrOwnerProof
+		}
+		monitor, ok := owner.(interface{ Lost() <-chan error })
+		if !ok || monitor.Lost() == nil {
+			_ = owner.Close()
+			return ErrOwnerMonitorRequired
+		}
+		rt.runtime, openErr = m.cfg.OpenReadWrite.OpenReadWrite(ctx, spec, owner)
+		// Backend.OpenReadWrite takes ownership of owner and closes it on failure.
+		if openErr != nil {
+			return fmt.Errorf("open BMPOOL03 RW runtime: %w", openErr)
+		}
+		if rt.runtime == nil || rt.runtime.Owner == nil || rt.runtime.Owner.Epoch() != owner.Epoch() {
+			if rt.runtime != nil { _ = rt.runtime.Close() } else { _ = owner.Close() }
+			return errors.New("BMPOOL03 backend returned a runtime without the acquired Owner lease")
+		}
+	case metastore.VolumeRuntimeReadOnly:
+		if m.cfg.OpenReadOnly == nil {
+			return ErrReadOnlyUnavailable
+		}
+		rt.runtime, rt.reader, openErr = m.cfg.OpenReadOnly(ctx, spec)
+		if openErr != nil {
+			if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
+			if rt.runtime != nil { _ = rt.runtime.Close() }
+			return fmt.Errorf("open BMPOOL03 RO runtime: %w", openErr)
+		}
+		if rt.runtime == nil || rt.reader == nil {
+			if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
+			if rt.runtime != nil { _ = rt.runtime.Close() }
+			return errors.New("BMPOOL03 RO opener returned nil Runtime or Reader session")
+		}
+	}
+
+	check := func() error { return m.checkHealth(rt) }
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	rt.watchCancel = watchCancel
+	rt.watchDone = make(chan struct{})
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		watchCancel()
+		<-rt.watchDone // watcher is started below; avoid publishing into a closed manager.
+		return ErrManagerClosed
+	}
+	m.runtimes[spec.VolumeID] = rt
+	m.mu.Unlock()
+	go m.watchRuntime(watchCtx, rt)
+
+	if err := m.cfg.Gate.EnableRequestsGuarded(ctx, spec, rt.runtime, check); err != nil {
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(fmt.Errorf("admit BMPOOL03 DM requests: %w", err), cleanupErr)
+	}
+	if err := check(); err != nil {
+		_ = m.cfg.Gate.FailStop(context.Background(), spec, err)
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(err, cleanupErr)
+	}
+	m.mu.Lock()
+	if rt.state == RuntimeLeaseLost || rt.failure != nil {
+		m.mu.Unlock()
+		cause := rt.failure
+		if cause == nil { cause = errors.New("runtime lease was lost during admission") }
+		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
+		return errors.Join(cause, cleanupErr)
+	}
+	rt.enabled = true
+	rt.state = RuntimeActive
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *DynamicVolumeRuntimeManager) checkHealth(rt *managedRuntime) error {
+	if rt == nil || rt.runtime == nil {
+		return errors.New("BMPOOL03 runtime is unavailable")
+	}
+	switch rt.spec.Mode {
+	case metastore.VolumeRuntimeReadWrite:
+		if rt.runtime.Owner == nil || !rt.runtime.Owner.Valid() {
+			return ErrOwnerProof
+		}
+	case metastore.VolumeRuntimeReadOnly:
+		if rt.reader == nil {
+			return ErrReaderHealthRequired
+		}
+		if err := rt.reader.Heartbeat(); err != nil {
+			return fmt.Errorf("BMPOOL03 Reader lease/table heartbeat: %w", err)
+		}
+	default:
+		return errors.New("invalid BMPOOL03 runtime mode")
+	}
+	return nil
+}
+
+func (m *DynamicVolumeRuntimeManager) watchRuntime(ctx context.Context, rt *managedRuntime) {
+	defer close(rt.watchDone)
+	if rt.spec.Mode == metastore.VolumeRuntimeReadWrite {
+		owner := rt.runtime.Owner.(interface{ Lost() <-chan error })
+		select {
+		case <-ctx.Done():
+			return
+		case cause, open := <-owner.Lost():
+			if !open || cause == nil { cause = errors.New("P3 Owner lease lost") }
+			m.failStop(rt, cause)
+			return
+		}
+	}
+	ticker := time.NewTicker(m.cfg.ReaderHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := m.checkHealth(rt); err != nil {
+				m.failStop(rt, err)
+				return
+			}
+		}
+	}
+}
+
+func (m *DynamicVolumeRuntimeManager) failStop(rt *managedRuntime, cause error) {
+	if rt == nil { return }
+	err := m.cfg.Gate.FailStop(context.Background(), rt.spec, cause)
+	m.mu.Lock()
+	rt.state = RuntimeLeaseLost
+	rt.enabled = false
+	rt.failure = errors.Join(cause, err)
+	m.mu.Unlock()
+}
+
+// Deactivate closes admission and drains all in-flight requests before releasing
+// Reader/Owner leases or either logical view. On any unsafe teardown boundary,
+// the Runtime remains registered so cleanup can be retried without losing pins.
+func (m *DynamicVolumeRuntimeManager) Deactivate(ctx context.Context, volumeID string) error {
+	if m == nil { return nil }
+	if ctx == nil { return errors.New("deactivation context is required") }
+	vl := m.volumeLock(volumeID)
+	vl.Lock()
+	defer vl.Unlock()
+	m.mu.Lock()
+	rt := m.runtimes[volumeID]
+	m.mu.Unlock()
+	if rt == nil { return nil }
+	return m.deactivateLocked(ctx, volumeID, rt)
+}
+
+func (m *DynamicVolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID string, rt *managedRuntime) error {
+	m.mu.Lock()
+	if !rt.stopping { rt.stopping = true; rt.state = RuntimeStopping }
+	m.mu.Unlock()
+	if err := m.cfg.Gate.StopRequests(ctx, volumeID); err != nil {
+		return fmt.Errorf("stop BMPOOL03 DM request admission: %w", err)
+	}
+	if err := m.cfg.Gate.DrainRequests(ctx, volumeID); err != nil {
+		return fmt.Errorf("drain BMPOOL03 DM requests: %w", err)
+	}
+	if rt.failure != nil {
+		return fmt.Errorf("runtime lost its distributed lease; fail-stop result requires operator recovery before releasing resources: %w", rt.failure)
+	}
+	if rt.watchCancel != nil { rt.watchCancel() }
+	if rt.watchDone != nil { <-rt.watchDone }
+	if rt.reader != nil {
+		if err := rt.reader.CloseDrained(ctx, true); err != nil {
+			return fmt.Errorf("close drained BMPOOL03 Reader session: %w", err)
+		}
+		rt.reader = nil
+	}
+	if rt.runtime != nil {
+		if err := rt.runtime.Close(); err != nil {
+			return fmt.Errorf("close BMPOOL03 Runtime resources: %w", err)
+		}
+		rt.runtime = nil
+	}
+	m.mu.Lock()
+	delete(m.runtimes, volumeID)
+	rt.state = RuntimeStopped
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *DynamicVolumeRuntimeManager) Shutdown(ctx context.Context) error {
+	if m == nil { return nil }
+	if ctx == nil { return errors.New("shutdown context is required") }
+	m.mu.Lock()
+	m.closed = true
+	ids := make([]string, 0, len(m.runtimes))
+	for id := range m.runtimes { ids = append(ids, id) }
+	m.mu.Unlock()
+	sort.Strings(ids)
+	var failures []error
+	for _, id := range ids {
+		if err := m.Deactivate(ctx, id); err != nil {
+			failures = append(failures, fmt.Errorf("deactivate Volume %s: %w", id, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (m *DynamicVolumeRuntimeManager) RuntimeState(volumeID string) RuntimeState {
+	if m == nil { return RuntimeCreated }
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt := m.runtimes[volumeID]; rt != nil { return rt.state }
+	return RuntimeCreated
+}
+
+func (m *DynamicVolumeRuntimeManager) ActiveVolumes() []string {
+	if m == nil { return nil }
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.runtimes))
+	for id, rt := range m.runtimes {
+		if rt.enabled && rt.state == RuntimeActive { ids = append(ids, id) }
+	}
+	sort.Strings(ids)
+	return ids
+}
