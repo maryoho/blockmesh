@@ -154,10 +154,18 @@ func (t *ReaderTable) writeLocked(r ReaderRecord) error {
 }
 
 func (t *ReaderTable) Register(slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
-	if t.coordinator!=nil {
-		unlock,err:=acquireReaderSet(t.coordinator,t.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
-	}
+	return t.RegisterContext(context.Background(),slot,nodeID,bootID,epoch,rootGeneration)
+}
+
+// RegisterContext bounds the distributed Reader-set barrier by the activation
+// context. It validates the current root under that barrier before publishing
+// the durable Reader pin, so a concurrent root commit cannot expose a stale
+// generation to a newly admitted Reader.
+func (t *ReaderTable) RegisterContext(ctx context.Context,slot uint32,nodeID,bootID string,epoch,rootGeneration uint64) error {
+	if ctx==nil{return errors.New("Reader registration context is required")}
+	unlock,err:=t.lockReaderSetContext(ctx);if err!=nil{return err};defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
+	if err:=ctx.Err();err!=nil{return err}
 	if err:=t.store.Refresh();err!=nil{return err}
 	if slot>=t.slots || nodeID=="" || bootID=="" || len(nodeID)>readerIdentitySize || len(bootID)>readerIdentitySize || epoch==0 { return ErrReaderSlot }
 	if rootGeneration!=t.store.Superblock().MappingSequence { return ErrReaderGeneration }
