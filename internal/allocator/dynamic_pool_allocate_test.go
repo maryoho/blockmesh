@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"sync"
 
 	"blockmesh/internal/btree"
 	"blockmesh/internal/format"
@@ -129,4 +130,118 @@ func TestBMPOOL03AllocateZeroPublishUsesDataViewBlockIDs(t *testing.T){
 	if !bytes.Equal(parent.b[int(dataBase):int(dataBase+format.BlockSize)],zeroed){t.Fatal("DataView block zero was not cleared before metadata publication")}
 	replayed,err:=allocator.AllocateZeroPublishTxn(context.Background(),lease,req)
 	if err!=nil||!replayed.Replayed||replayed.PhysicalStart!=0{t.Fatalf("idempotent retry=%+v err=%v",replayed,err)}
+}
+
+
+type dynamicRetireReaderCoordinator struct { mu sync.Mutex }
+func (c *dynamicRetireReaderCoordinator) LockReaderSet(string) (func(), error) {
+	c.mu.Lock()
+	return c.mu.Unlock, nil
+}
+
+func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t *testing.T) {
+	g, err := format.PlanDynamicGeometry(format.DynamicGeometryConfig{
+		DataBytes:8*format.BlockSize, MetadataBytes:64<<20, AGSizeBytes:8*format.BlockSize,
+		WALSegmentBytes:1<<20, MappingBytes:8<<20, CheckpointBytes:64<<10,
+	})
+	if err != nil { t.Fatal(err) }
+	parentBytes := poolspace.BootstrapSize+g.MetadataBytes+g.DataBytes
+	parent := newDynamicFormatMem(parentBytes)
+	dataBase := poolspace.BootstrapSize+g.MetadataBytes
+	metadata, err := poolspace.NewMetadataView(parent, []poolspace.Extent{
+		{Start:0, Length:poolspace.BootstrapSize, Kind:poolspace.Metadata},
+		{Start:poolspace.BootstrapSize, Length:g.MetadataBytes, Kind:poolspace.Metadata},
+	})
+	if err != nil { t.Fatal(err) }
+	data, err := poolspace.NewDataView(parent, []poolspace.Extent{{Start:dataBase, Length:g.DataBytes, Kind:poolspace.Data}})
+	if err != nil { t.Fatal(err) }
+	var uuid [16]byte
+	copy(uuid[:], "bm03-data-retire")
+	sb, err := format.NewDynamicSuperblock(g, uuid, 1, 1)
+	if err != nil { t.Fatal(err) }
+	if err = FormatDynamicPool(metadata, sb); err != nil { t.Fatal(err) }
+	arenaStart := g.ReservedOffset/format.PageSize
+	desc := format.DynamicVolumeDescriptor{
+		VolumeID:"bm03-data-retire-volume", AG:0, Generation:1, VolumeSequence:1,
+		MappingRootOffset:g.MappingOffset, BitmapSequence:1, OwnerEpoch:7,
+		ArenaStart:arenaStart, ArenaPages:512, RootPage:metastore.NoPage,
+		LifecycleStart:arenaStart+512, LifecyclePages:8,
+	}
+	if err = format.InitializeDynamicVolumeDescriptor(metadata, sb, 0, desc); err != nil { t.Fatal(err) }
+	if err = metadata.Sync(); err != nil { t.Fatal(err) }
+	store, err := metastore.OpenDynamicPoolVolume(metadata, sb, 0, desc.VolumeID)
+	if err != nil { t.Fatal(err) }
+	if err = metastore.FormatLifecycle(store); err != nil { t.Fatal(err) }
+	locks := &crashDistributedLocker{}
+	walLocks := &crashDistributedLocker{}
+	committer, err := wal.NewDynamicSharedCommitter(metadata, sb, 0, walLocks, "blockmesh:pool:bm03:ag:000:wal")
+	if err != nil { t.Fatal(err) }
+	coordinator := &dynamicRetireReaderCoordinator{}
+	tree, err := btree.OpenPersistentWithExternalPages(store, committer, ResolveIdempotencyPages, coordinator)
+	if err != nil { t.Fatal(err) }
+	readerStart, readerPages, err := store.ReaderTableRange()
+	if err != nil { t.Fatal(err) }
+	readers, err := metastore.NewReaderTable(store, readerStart, readerPages, committer, coordinator)
+	if err != nil { t.Fatal(err) }
+	alloc, err := NewDynamicPoolAllocator(store, tree, locks, data)
+	if err != nil { t.Fatal(err) }
+	lease := &crashOwnerLease{resource:"volume:"+desc.VolumeID, epoch:desc.OwnerEpoch}
+
+	first, err := alloc.AllocateZeroPublishTxn(context.Background(), lease, AllocateRequest{
+		IdempotencyKey:[16]byte{0x61}, Fingerprint:[32]byte{0xa1},
+		LogicalStart:3, BlockCount:1, Operation:1,
+	})
+	if err != nil { t.Fatal(err) }
+	oldRoot := tree.RootGeneration()
+	if err = readers.Register(0, "reader-node", "reader-boot", 1, oldRoot); err != nil { t.Fatal(err) }
+	oldData := bytes.Repeat([]byte{0x6d}, int(format.BlockSize))
+	if n, e := data.WriteAt(oldData, int64(first.PhysicalStart*format.BlockSize)); e != nil || n != len(oldData) {
+		t.Fatalf("seed source block n=%d err=%v", n, e)
+	}
+	if err = data.Sync(); err != nil { t.Fatal(err) }
+
+	second, err := alloc.AllocateZeroPublishTxn(context.Background(), lease, AllocateRequest{
+		IdempotencyKey:[16]byte{0x62}, Fingerprint:[32]byte{0xa2},
+		LogicalStart:3, BlockCount:1, Operation:1,
+	})
+	if err != nil { t.Fatal(err) }
+	if second.PhysicalStart == first.PhysicalStart { t.Fatal("COW reused source block before Reader-safe reclamation") }
+	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
+		t.Fatalf("old Reader must pin COW source: reclaimed=%d err=%v", got, err)
+	}
+	bitmap := make([]byte, g.BitmapPaddedBytes)
+	if _, err = metadata.ReadAt(bitmap, int64(g.BitmapOffset+format.PageSize)); err != nil { t.Fatal(err) }
+	if bitmap[0]&0x03 != 0x03 { t.Fatalf("source block was freed while Reader pinned it: %08b", bitmap[0]) }
+
+	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
+	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 1 {
+		t.Fatalf("advanced Reader should release COW source: reclaimed=%d err=%v", got, err)
+	}
+	if _, err = metadata.ReadAt(bitmap, int64(g.BitmapOffset+format.PageSize)); err != nil { t.Fatal(err) }
+	if bitmap[0]&0x01 != 0 || bitmap[0]&0x02 == 0 {
+		t.Fatalf("atomic COW reclaim bitmap mismatch: %08b", bitmap[0])
+	}
+
+	_, err = alloc.DiscardTxn(context.Background(), lease, AllocateRequest{
+		IdempotencyKey:[16]byte{0x63}, Fingerprint:[32]byte{0xa3},
+		LogicalStart:3, BlockCount:1, Operation:3,
+	})
+	if err != nil { t.Fatal(err) }
+	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
+		t.Fatalf("Reader pinned at pre-discard root must delay discard reclaim: reclaimed=%d err=%v", got, err)
+	}
+	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
+	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 1 {
+		t.Fatalf("advanced Reader should release discarded block: reclaimed=%d err=%v", got, err)
+	}
+	if _, err = metadata.ReadAt(bitmap, int64(g.BitmapOffset+format.PageSize)); err != nil { t.Fatal(err) }
+	if bitmap[0]&0x03 != 0 { t.Fatalf("discarded block remains allocated after safe reclaim: %08b", bitmap[0]) }
+
+	// A fresh open must resolve any remaining external idempotency pages and
+	// accept the empty Data Retire index after the WAL-published collection.
+	store2, err := metastore.OpenDynamicPoolVolume(metadata, sb, 0, desc.VolumeID)
+	if err != nil { t.Fatal(err) }
+	tree2, err := btree.OpenPersistentWithExternalPages(store2, committer, ResolveIdempotencyPages, coordinator)
+	if err != nil { t.Fatalf("reopen after Data Retire collection: %v", err) }
+	if len(tree2.Snapshot()) == 0 { t.Fatal("idempotency indexes disappeared during collection") }
 }
