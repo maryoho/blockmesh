@@ -181,6 +181,31 @@ func TestPutBatchWithImagesCommitsExtrasAndRootTogether(t *testing.T) {
 	if got,err:=reopenedTree.Get(20);err!=nil||got!=200{t.Fatalf("reopen Get(20)=%d err=%v",got,err)}
 }
 
+
+func TestDeleteBatchWithReservedPagesPublishesDeletesAndIndexTogether(t *testing.T) {
+	dev:=newMemoryDevice(128)
+	store,err:=metastore.Format(dev,metastore.Layout{VolumeID:"delete-batch",TotalPages:128,ArenaStart:2,ArenaPages:124,LifecycleStart:126,LifecyclePages:2})
+	if err!=nil { t.Fatal(err) }
+	if err=metastore.FormatLifecycle(store);err!=nil { t.Fatal(err) }
+	committer:=memoryCommitter{dev:dev}
+	tree,err:=OpenPersistent(store,committer);if err!=nil { t.Fatal(err) }
+	for _,item:=range []Item{{Key:10,Value:100},{Key:20,Value:200},{Key:30,Value:300}} {
+		if err=tree.Put(item.Key,item.Value);err!=nil { t.Fatal(err) }
+	}
+	reservation,ids,err:=tree.ReserveExternalPages(1);if err!=nil { t.Fatal(err) }
+	page:=metastore.Page{ID:ids[0],Type:0x777,Payload:[]byte("discard-idempotency")}
+	if err=tree.DeleteBatchWithReservedArenaPages([]uint64{10,20},[]Item{{Key:9999,Value:ids[0]}},
+		reservation,[]metastore.Page{page},nil);err!=nil { t.Fatal(err) }
+	for _,key:=range []uint64{10,20} {
+		if _,err=tree.Get(key);!errors.Is(err,ErrKeyNotFound) { t.Fatalf("deleted key %d remains: %v",key,err) }
+	}
+	if got,e:=tree.Get(30);e!=nil||got!=300 { t.Fatalf("unrelated key changed: %d %v",got,e) }
+	if got,e:=tree.Get(9999);e!=nil||got!=ids[0] { t.Fatalf("index update not published: %d %v",got,e) }
+	reopened,err:=OpenPersistent(store,committer);if err!=nil { t.Fatal(err) }
+	if _,err=reopened.Get(10);!errors.Is(err,ErrKeyNotFound) { t.Fatalf("delete did not survive reopen: %v",err) }
+	if got,e:=reopened.Get(9999);e!=nil||got!=ids[0] { t.Fatalf("index not durable: %d %v",got,e) }
+}
+
 func TestPutGetReplaceDeleteAndReopen(t *testing.T) {
 	store, tree, dev := newTree(t, 1024)
 	for i := uint64(0); i < 270; i++ {
