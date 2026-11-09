@@ -50,9 +50,7 @@ func TestNextDataRetireIndexKeyWrapsInsideReservedNamespace(t *testing.T) {
 	if got := nextDataRetireIndexKey(dataRetireIndexLimit - 1); got != dataRetireNamespace {
 		t.Fatalf("probe wrapped to %#x, want namespace start %#x", got, dataRetireNamespace)
 	}
-	if got := nextDataRetireIndexKey(dataRetireIndexNamespaceLast()); got != dataRetireIndexNamespaceLast()+1 {
-		t.Fatalf("probe advanced to %#x unexpectedly", got)
+	if got := nextDataRetireIndexKey(dataRetireIndexLimit - 2); got != dataRetireIndexLimit-1 {
+		t.Fatalf("probe advanced to %#x, want final namespace key %#x", got, dataRetireIndexLimit-1)
 	}
 }
-
-func dataRetireIndexNamespaceLast() uint64 { return dataRetireIndexLimit - 2 }
