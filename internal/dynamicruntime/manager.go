@@ -218,14 +218,10 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 		}
 		rt.runtime, rt.reader, openErr = m.cfg.OpenReadOnly(ctx, spec)
 		if openErr != nil {
-			if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
-			if rt.runtime != nil { _ = rt.runtime.Close() }
-			return fmt.Errorf("open BMPOOL03 RO runtime: %w", openErr)
+			return m.retainPartialActivation(ctx, rt, fmt.Errorf("open BMPOOL03 RO runtime: %w", openErr))
 		}
 		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil || rt.runtime.Spec != spec {
-			if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
-			if rt.runtime != nil { _ = rt.runtime.Close() }
-			return errors.New("BMPOOL03 RO opener returned nil Runtime or Reader session")
+			return m.retainPartialActivation(ctx, rt, errors.New("BMPOOL03 RO opener returned nil or mismatched Runtime/Reader session"))
 		}
 	}
 
@@ -269,6 +265,21 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 	rt.state = RuntimeActive
 	m.mu.Unlock()
 	return nil
+}
+
+// retainPartialActivation keeps partially opened resources registered when
+// cleanup cannot complete. It never drops a Reader lease or parent LUN silently.
+func (m *DynamicVolumeRuntimeManager) retainPartialActivation(ctx context.Context, rt *managedRuntime, cause error) error {
+	if rt == nil || (rt.runtime == nil && rt.reader == nil) {
+		return cause
+	}
+	rt.stopping = true
+	rt.state = RuntimeFailed
+	m.mu.Lock()
+	m.runtimes[rt.spec.VolumeID] = rt
+	m.mu.Unlock()
+	cleanupErr := m.deactivateLocked(ctx, rt.spec.VolumeID, rt)
+	return errors.Join(cause, cleanupErr)
 }
 
 func (m *DynamicVolumeRuntimeManager) checkHealth(rt *managedRuntime) error {
