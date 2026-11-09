@@ -28,6 +28,8 @@ type DynamicVolumeDescriptor struct {
 	LifecycleStart uint64
 	LifecyclePages uint64
 	OwnerRecordStart uint64
+	ReaderTableStart uint64
+	ReaderTablePages uint32
 }
 
 func(d DynamicVolumeDescriptor)Encode()([]byte,error){
@@ -52,6 +54,8 @@ func(d DynamicVolumeDescriptor)Encode()([]byte,error){
 	binary.LittleEndian.PutUint64(b[152:160],d.LifecycleStart)
 	binary.LittleEndian.PutUint64(b[160:168],d.LifecyclePages)
 	binary.LittleEndian.PutUint64(b[168:176],d.OwnerRecordStart)
+	binary.LittleEndian.PutUint64(b[176:184],d.ReaderTableStart)
+	binary.LittleEndian.PutUint32(b[184:188],d.ReaderTablePages)
 	binary.LittleEndian.PutUint32(b[dynamicVolumeDescriptorCRC:],crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli))
 	return b,nil
 }
@@ -62,13 +66,13 @@ func DecodeDynamicVolumeDescriptor(b []byte)(DynamicVolumeDescriptor,error){
 		crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli)!=binary.LittleEndian.Uint32(b[dynamicVolumeDescriptorCRC:]){return d,ErrVolumeDescriptor}
 	name:=b[56:120];end:=len(name);for i,c:=range name{if c==0{end=i;break}}
 	for _,c:=range name[end:]{if c!=0{return d,ErrVolumeDescriptor}}
-	for _,c:=range b[176:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
+	for _,c:=range b[188:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
 	d=DynamicVolumeDescriptor{VolumeID:string(name[:end]),AG:binary.LittleEndian.Uint32(b[12:16]),Generation:binary.LittleEndian.Uint64(b[16:24]),
 		VolumeSequence:binary.LittleEndian.Uint64(b[24:32]),MappingRootOffset:binary.LittleEndian.Uint64(b[32:40]),
 		BitmapSequence:binary.LittleEndian.Uint64(b[40:48]),OwnerEpoch:binary.LittleEndian.Uint64(b[48:56]),
 		ArenaStart:binary.LittleEndian.Uint64(b[120:128]),ArenaPages:binary.LittleEndian.Uint64(b[128:136]),
 		RootPage:binary.LittleEndian.Uint64(b[136:144]),MappingSequence:binary.LittleEndian.Uint64(b[144:152]),
-		LifecycleStart:binary.LittleEndian.Uint64(b[152:160]),LifecyclePages:binary.LittleEndian.Uint64(b[160:168]),OwnerRecordStart:binary.LittleEndian.Uint64(b[168:176])}
+		LifecycleStart:binary.LittleEndian.Uint64(b[152:160]),LifecyclePages:binary.LittleEndian.Uint64(b[160:168]),OwnerRecordStart:binary.LittleEndian.Uint64(b[168:176]),ReaderTableStart:binary.LittleEndian.Uint64(b[176:184]),ReaderTablePages:binary.LittleEndian.Uint32(b[184:188])}
 	if _,err:=d.Encode();err!=nil{return DynamicVolumeDescriptor{},err}
 	return d,nil
 }
@@ -88,11 +92,19 @@ func(d DynamicVolumeDescriptor)ValidatePool(sb DynamicSuperblock)error{
 	if d.RootPage!=^uint64(0)&&(d.RootPage<d.ArenaStart||d.RootPage-d.ArenaStart>=d.ArenaPages){return ErrVolumeDescriptor}
 	if d.OwnerRecordStart!=0{
 		if d.OwnerRecordStart<reservedStart||d.OwnerRecordStart>totalPages||
-			OwnerRecordPages>totalPages-d.OwnerRecordStart||
-			ReaderTablePages>totalPages-d.OwnerRecordStart-OwnerRecordPages{return ErrVolumeDescriptor}
+			OwnerRecordPages>totalPages-d.OwnerRecordStart{return ErrVolumeDescriptor}
 		expected:=d.ArenaStart+d.ArenaPages
 		if d.LifecyclePages!=0{expected=d.LifecycleStart+d.LifecyclePages}
 		if d.OwnerRecordStart!=expected{return ErrVolumeDescriptor}
+	}
+	if d.ReaderTableStart==0 {
+		if d.ReaderTablePages!=0{return ErrVolumeDescriptor}
+	} else {
+		if d.OwnerRecordStart==0 || d.ReaderTablePages!=uint32(ReaderTablePages) ||
+			d.ReaderTableStart!=d.OwnerRecordStart+OwnerRecordPages ||
+			d.ReaderTableStart>totalPages || uint64(d.ReaderTablePages)>totalPages-d.ReaderTableStart {
+			return ErrVolumeDescriptor
+		}
 	}
 	return nil
 }
@@ -109,12 +121,23 @@ func DynamicVolumeDescriptorPairOffset(sb DynamicSuperblock,index uint32)(uint64
 
 func InitializeDynamicVolumeDescriptor(w io.WriterAt,sb DynamicSuperblock,index uint32,d DynamicVolumeDescriptor)error{
 	if w==nil{return errors.New("nil BMPOOL03 Volume Descriptor writer")}
-	// Reserve the two durable OwnerRecord pages followed by the fixed Reader
-	// Table extent for every newly initialized BMPOOL03 Volume. Older v3
-	// descriptors with OwnerRecordStart==0 remain readable but cannot join RO.
+	// Reserve the two durable OwnerRecord pages for new BMPOOL03 Volumes.
+	// The fixed Reader Table extent is optional on very small metadata devices;
+	// RO activation remains disabled there rather than invalidating the Pool.
+	totalPages:=sb.Geometry.MetadataBytes/PageSize
 	if d.OwnerRecordStart==0 {
-		d.OwnerRecordStart=d.ArenaStart+d.ArenaPages
-		if d.LifecyclePages!=0 { d.OwnerRecordStart=d.LifecycleStart+d.LifecyclePages }
+		candidate:=d.ArenaStart+d.ArenaPages
+		if d.LifecyclePages!=0 { candidate=d.LifecycleStart+d.LifecyclePages }
+		if candidate<=totalPages && OwnerRecordPages<=totalPages-candidate {
+			d.OwnerRecordStart=candidate
+		}
+	}
+	if d.OwnerRecordStart!=0 && d.ReaderTableStart==0 && d.ReaderTablePages==0 {
+		candidate:=d.OwnerRecordStart+OwnerRecordPages
+		if candidate<=totalPages && ReaderTablePages<=totalPages-candidate {
+			d.ReaderTableStart=candidate
+			d.ReaderTablePages=uint32(ReaderTablePages)
+		}
 	}
 	if err:=d.ValidatePool(sb);err!=nil{return err}
 	pair,err:=DynamicVolumeDescriptorPairOffset(sb,index);if err!=nil{return err}
