@@ -67,7 +67,7 @@ func (s *ReaderSession) checkLeaseLocked() error {
 // RequestSnapshot revalidates the durable Reader slot and sanlock lease
 // before each metadata lookup, returning only the root generation pinned by
 // this session.
-func (s *ReaderSession) RequestSnapshot(ctx context.Context) (uint64,uint64,error) {
+func (s *ReaderSession) RequestSnapshotContext(ctx context.Context) (uint64,uint64,error) {
 	if s==nil || ctx==nil { return 0,0,errors.New("Reader session and request context are required") }
 	s.mu.Lock()
 	defer s.mu.Unlock()
