@@ -602,7 +602,7 @@ func (t *Tree) publishCOWWithReservedPages(root *cowNode, items []Item, arenaPag
 	sequence := sb.MappingSequence + 1
 	oldPages := append([]uint64(nil), t.pages...)
 	if t.journal != nil {
-		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence, arenaPages, extra, supplied)
+		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence, arenaPages, extra, supplied, nil)
 	}
 	var newPages []uint64
 	if root != nil {
@@ -702,5 +702,17 @@ func excludePageIDs(ids, excluded []uint64) []uint64 {
 	for _, id := range excluded { set[id] = struct{}{} }
 	out := make([]uint64, 0, len(ids))
 	for _, id := range ids { if _, ok := set[id]; !ok { out = append(out, id) } }
+	return out
+}
+
+func appendUniquePageIDs(dst, src []uint64) []uint64 {
+	seen := make(map[uint64]struct{}, len(dst)+len(src))
+	out := make([]uint64, 0, len(dst)+len(src))
+	for _, id := range dst {
+		if _, ok := seen[id]; !ok { seen[id] = struct{}{}; out = append(out, id) }
+	}
+	for _, id := range src {
+		if _, ok := seen[id]; !ok { seen[id] = struct{}{}; out = append(out, id) }
+	}
 	return out
 }
