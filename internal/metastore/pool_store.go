@@ -108,6 +108,27 @@ func (s *Store) OwnerRecordRange() (uint64, uint64, error) {
 // descriptors that consumed the entire slot do not have this facility.
 func (s *Store) ReaderTableRange() (uint64, uint32, error) {
 	if s == nil || !s.poolBacked { return 0, 0, ErrGeometry }
+	if s.dynamicPool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		start := s.dynamicDescriptor.OwnerRecordStart
+		if start == 0 || start > s.dynamicSB.Geometry.MetadataBytes/PageSize {
+			return 0, 0, ErrGeometry
+		}
+		start += format.OwnerRecordPages
+		pages := format.ReaderTablePages
+		total := s.dynamicSB.Geometry.MetadataBytes/PageSize
+		if start > total || pages > total-start {
+			return 0, 0, ErrGeometry
+		}
+		if start < s.dynamicDescriptor.ArenaStart+s.dynamicDescriptor.ArenaPages {
+			return 0, 0, ErrGeometry
+		}
+		if s.dynamicDescriptor.LifecyclePages != 0 && start < s.dynamicDescriptor.LifecycleStart+s.dynamicDescriptor.LifecyclePages {
+			return 0, 0, ErrGeometry
+		}
+		return start, uint32(pages), nil
+	}
 	reservedBytes := s.poolSB.MetadataSize - s.poolSB.ReservedOffset
 	slotBytes := (reservedBytes / uint64(format.MaxVolumeDescriptors)) / PageSize * PageSize
 	slotPages := slotBytes / PageSize
