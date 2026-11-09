@@ -602,7 +602,15 @@ func (t *Tree) publishCOWWithReservedPages(root *cowNode, items []Item, arenaPag
 	sequence := sb.MappingSequence + 1
 	oldPages := append([]uint64(nil), t.pages...)
 	if t.journal != nil {
-		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence, arenaPages, extra, supplied, nil)
+		// External records removed from the new root must leave the
+		// in-memory external-page pin set and enter PersistentArena's durable
+		// metadata Retire Queue in the same WAL transaction. Dropping this
+		// argument would keep deleted Data Retire pages pinned until restart.
+		var retiredIDs []uint64
+		for _, ids := range retiredExternal {
+			retiredIDs = append(retiredIDs, ids...)
+		}
+		return t.publishCOWWithWAL(root, items, oldPages, sequence, sb.MappingSequence, arenaPages, extra, supplied, retiredIDs)
 	}
 	var newPages []uint64
 	if root != nil {
