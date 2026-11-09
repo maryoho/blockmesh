@@ -434,6 +434,7 @@ func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.
 	}
 	if !ioDrained { return 0, metastore.ErrUnsafeReclaim }
 	if err := ctx.Err(); err != nil { return 0, err }
+	if err := a.store.Refresh(); err != nil { return 0, err }
 	sb, err := a.store.DynamicPoolSuperblock()
 	if err != nil { return 0, err }
 	desc, err := a.store.DynamicPoolDescriptor()
@@ -451,6 +452,8 @@ func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.
 	if err = ctx.Err(); err != nil { return 0, err }
 	if !ownerLease.Valid() { return 0, errors.New("Owner lease lost before Data Retire collection") }
 	if err = a.store.Refresh(); err != nil { return 0, err }
+	sb, err = a.store.DynamicPoolSuperblock()
+	if err != nil { return 0, err }
 	desc, err = a.store.DynamicPoolDescriptor()
 	if err != nil { return 0, err }
 	if desc.OwnerEpoch != epoch.Epoch() || desc.VolumeID != ownerLease.Resource()[len("volume:"):] ||
