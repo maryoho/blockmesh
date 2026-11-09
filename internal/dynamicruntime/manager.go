@@ -212,7 +212,7 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 			if rt.runtime != nil { _ = rt.runtime.Close() }
 			return fmt.Errorf("open BMPOOL03 RO runtime: %w", openErr)
 		}
-		if rt.runtime == nil || rt.reader == nil {
+		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil {
 			if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
 			if rt.runtime != nil { _ = rt.runtime.Close() }
 			return errors.New("BMPOOL03 RO opener returned nil Runtime or Reader session")
@@ -240,7 +240,7 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 		return errors.Join(fmt.Errorf("admit BMPOOL03 DM requests: %w", err), cleanupErr)
 	}
 	if err := check(); err != nil {
-		_ = m.cfg.Gate.FailStop(context.Background(), spec, err)
+		m.failStop(rt, err)
 		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
 		return errors.Join(err, cleanupErr)
 	}
