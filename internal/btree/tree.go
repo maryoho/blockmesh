@@ -344,6 +344,48 @@ func (t *Tree) putBatchWithArenaPages(updates []Item, arenaPages []metastore.Pag
 }
 
 
+// DeleteBatchWithImagesRetireExternal removes index entries and commits
+// fixed-LBA after-images in the same COW/WAL root transaction. External Arena
+// page IDs removed from the index are retired with the old root, not leaked or
+// returned to the allocator before Reader generations have advanced.
+func (t *Tree) DeleteBatchWithImagesRetireExternal(keys []uint64, extra []metastore.PageImage, retireExternal []uint64) error {
+	if t == nil || t.persistentArena == nil || t.journal == nil {
+		return metastore.ErrPersistentArenaRequired
+	}
+	if len(keys) == 0 || len(retireExternal) == 0 {
+		return metastore.ErrInvalidPageSet
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	next := append([]Item(nil), t.items...)
+	var root *cowNode
+	if t.root != metastore.NoPage {
+		var err error
+		root, err = loadCowNode(t.store, t.root)
+		if err != nil { return err }
+	}
+	for _, key := range keys {
+		i := sort.Search(len(next), func(i int) bool { return next[i].Key >= key })
+		if i == len(next) || next[i].Key != key { return ErrKeyNotFound }
+		if root == nil { return ErrCorruptTree }
+		var changed bool
+		var err error
+		root, changed, err = deleteCOW(t.store, root, key)
+		if err != nil { return err }
+		if !changed { return ErrCorruptTree }
+		next = append(next[:i], next[i+1:]...)
+		for root != nil && !root.leaf && len(root.children) == 1 {
+			child := root.children[0].node
+			if child == nil {
+				child, err = loadCowNode(t.store, root.children[0].id)
+				if err != nil { return err }
+			}
+			root = child
+		}
+	}
+	return t.publishCOWWithReservedPages(root, next, nil, extra, nil, retireExternal)
+}
+
  // DeleteBatchWithReservedArenaPages removes a set of logical mappings and
  // publishes caller-supplied index updates, immutable Arena pages and the new
  // root in one COW/WAL transaction. It is used by idempotent discard so the
