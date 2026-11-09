@@ -549,7 +549,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  cursor:=0
  rootID,pages,err:=persistCOWImages(root,cowIDs,&cursor,sequence);if err!=nil{return err}
  if cursor!=len(cowIDs){return fmt.Errorf("internal error: used %d of %d reserved COW pages",cursor,len(cowIDs))}
- newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
+ newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,excludePageIDs(oldPages,t.externalPages),newPages)
  newPages=append(newPages,retainedExternal...)
  for i:=range arenaPages {
   id:=ids[i]
