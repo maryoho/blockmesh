@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+type ReaderGate interface {
+	PrepareReader(context.Context, string, uint64, uint64) (uint64, error)
+	EnableReader(context.Context, string, uint64, uint64, uint64) error
+	FenceReader(context.Context, string, uint64, uint64) error
+}
+
 type Gate interface {
 	// FenceCurrent closes and drains whichever target instance is currently
 	// loaded. It is used after SAN fencing but before WAL recovery.
@@ -82,11 +88,93 @@ func (g DMSetupGate) message(ctx context.Context, device, command string, epoch,
 	_, err := r.Run(ctx, b, "message", device, "0", message)
 	return err
 }
+type statusSnapshot struct {
+	ownerEpoch uint64
+	readerEpoch uint64
+	rootGeneration uint64
+	instance uint64
+	readOnly bool
+}
+
+func (g DMSetupGate) statusSnapshot(ctx context.Context, device string) (statusSnapshot, error) {
+	var s statusSnapshot
+	if err := validDevice(ctx, device); err != nil { return s, err }
+	r, b := g.runner()
+	out, err := r.Run(ctx, b, "status", device)
+	if err != nil { return s, err }
+	var instanceFound, ownerFound, readerFound, rootFound, readOnlyFound bool
+	for _, field := range strings.Fields(string(out)) {
+		switch {
+		case strings.HasPrefix(field, "instance="):
+			v, e := strconv.ParseUint(strings.TrimPrefix(field, "instance="), 16, 64)
+			if e != nil || v == 0 { return s, errors.New("invalid DM target instance ID") }
+			s.instance, instanceFound = v, true
+		case strings.HasPrefix(field, "epoch="):
+			v, e := strconv.ParseUint(strings.TrimPrefix(field, "epoch="), 10, 64)
+			if e != nil { return s, errors.New("invalid DM OwnerEpoch") }
+			s.ownerEpoch, ownerFound = v, true
+		case strings.HasPrefix(field, "reader_epoch="):
+			v, e := strconv.ParseUint(strings.TrimPrefix(field, "reader_epoch="), 10, 64)
+			if e != nil { return s, errors.New("invalid DM ReaderEpoch") }
+			s.readerEpoch, readerFound = v, true
+		case strings.HasPrefix(field, "root_generation="):
+			v, e := strconv.ParseUint(strings.TrimPrefix(field, "root_generation="), 10, 64)
+			if e != nil { return s, errors.New("invalid DM RootGeneration") }
+			s.rootGeneration, rootFound = v, true
+		case strings.HasPrefix(field, "readonly="):
+			v := strings.TrimPrefix(field, "readonly=")
+			if v != "0" && v != "1" { return s, errors.New("invalid DM read-only state") }
+			s.readOnly, readOnlyFound = v == "1", true
+		}
+	}
+	if !instanceFound || !ownerFound { return s, errors.New("DM status lacks target instance or OwnerEpoch") }
+	if s.readOnly && (!readerFound || !rootFound || s.readerEpoch == 0 || s.rootGeneration == 0) {
+		return s, errors.New("DM read-only status lacks ReaderEpoch or RootGeneration")
+	}
+	if readOnlyFound == false { s.readOnly = false }
+	return s, nil
+}
+
+func (g DMSetupGate) readerMessage(ctx context.Context, device, command string, epoch, root, instance uint64, includeRoot bool) error {
+	if err := validDevice(ctx, device); err != nil { return err }
+	if epoch == 0 || instance == 0 || (includeRoot && root == 0) { return errors.New("ReaderEpoch, RootGeneration and target instance must be nonzero") }
+	r, b := g.runner()
+	message := fmt.Sprintf("%s %d", command, epoch)
+	if includeRoot { message += fmt.Sprintf(" %d", root) }
+	message += fmt.Sprintf(" %x", instance)
+	_, err := r.Run(ctx, b, "message", device, "0", message)
+	return err
+}
+
+func (g DMSetupGate) PrepareReader(ctx context.Context, device string, epoch, root uint64) (uint64, error) {
+	if epoch == 0 || root == 0 { return 0, errors.New("ReaderEpoch and RootGeneration must be nonzero") }
+	s, err := g.statusSnapshot(ctx, device)
+	if err != nil { return 0, err }
+	if s.readOnly && epoch <= s.readerEpoch { return 0, errors.New("ReaderEpoch must exceed the current DM ReaderEpoch") }
+	if !s.readOnly && s.ownerEpoch != 0 {
+		// A live local RW Owner cannot be converted into a Reader in place.
+		return 0, errors.New("DM target still has an OwnerEpoch; fence/deactivate RW before RO")
+	}
+	if err = g.readerMessage(ctx, device, "reader_prepare", epoch, root, s.instance, true); err != nil { return 0, err }
+	return s.instance, nil
+}
+
+func (g DMSetupGate) EnableReader(ctx context.Context, device string, epoch, root, instance uint64) error {
+	return g.readerMessage(ctx, device, "reader_enable", epoch, root, instance, true)
+}
+
+func (g DMSetupGate) FenceReader(ctx context.Context, device string, epoch, instance uint64) error {
+	return g.readerMessage(ctx, device, "reader_fence", epoch, 0, instance, false)
+}
+
 func (g DMSetupGate) FenceCurrent(ctx context.Context, device string) error {
-	epoch, instance, err := g.status(ctx, device)
+	s, err := g.statusSnapshot(ctx, device)
 	if err != nil { return err }
-	if epoch == 0 { return nil }
-	return g.message(ctx, device, "owner_fence", epoch, instance)
+	if s.readOnly {
+		return g.FenceReader(ctx, device, s.readerEpoch, s.instance)
+	}
+	if s.ownerEpoch == 0 { return nil }
+	return g.message(ctx, device, "owner_fence", s.ownerEpoch, s.instance)
 }
 func (g DMSetupGate) Prepare(ctx context.Context, device string, epoch uint64) (uint64, error) {
 	if err := validEpoch(epoch); err != nil { return 0, err }
@@ -105,3 +193,4 @@ func (g DMSetupGate) Drain(ctx context.Context, device string, epoch, instance u
 	return g.Fence(ctx, device, epoch, instance)
 }
 var _ Gate = DMSetupGate{}
+var _ ReaderGate = DMSetupGate{}
