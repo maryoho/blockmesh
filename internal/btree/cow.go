@@ -490,7 +490,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  if pageCount==0 {
   rootID:=metastore.NoPage;if root!=nil {rootID=root.id}
   var newPages []uint64;if root!=nil {newPages=collectCowPages(root)}
-  newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
+  newPages=retainOpaqueSubtreePages(root,excludePageIDs(oldPages,t.externalPages),newPages)
   newPages=append(newPages,retainedExternal...)
   var err error
   committed:=false
@@ -695,4 +695,12 @@ func externalPageIDs(pages []metastore.Page) []uint64 {
  ids:=make([]uint64,len(pages))
  for i,p:=range pages {ids[i]=p.ID}
  return ids
+}
+
+func excludePageIDs(ids, excluded []uint64) []uint64 {
+	set := make(map[uint64]struct{}, len(excluded))
+	for _, id := range excluded { set[id] = struct{}{} }
+	out := make([]uint64, 0, len(ids))
+	for _, id := range ids { if _, ok := set[id]; !ok { out = append(out, id) } }
+	return out
 }
