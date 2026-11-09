@@ -3,6 +3,7 @@ package metastore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"blockmesh/internal/fence"
@@ -27,6 +28,7 @@ type ReaderSession struct {
 	closed bool
 	prUnregistered bool
 	tableClosed bool
+	tableRegistered bool
 }
 
 func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volume.ReaderLeaseConfig,
@@ -40,18 +42,20 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 	rootPage := rootSnapshot.RootPage
 	lease, err := leaseConfig.AcquireReader(ctx, table.store.Superblock().VolumeID, slot, nodeID, bootID, epoch, onLeaseLost)
 	if err != nil { return nil, err }
+	session := &ReaderSession{table:table,lease:lease,registrar:registrar,slot:slot,nodeID:nodeID,bootID:bootID,
+		epoch:epoch,rootGeneration:rootGeneration,rootPage:rootPage}
 	if err = registrar.RegisterReader(ctx,nodeID,bootID); err != nil {
-		cleanupErr:=registrar.UnregisterReader(ctx,nodeID,bootID)
-		if cleanupErr==nil { _ = lease.Close() }
-		return nil, errors.Join(err,cleanupErr)
+		cleanupErr:=session.CloseDrained(context.WithoutCancel(ctx),true)
+		if cleanupErr!=nil { return session,errors.Join(fmt.Errorf("register Reader SCSI PR keys: %w",err),cleanupErr) }
+		return nil,err
 	}
 	if err = table.RegisterContext(ctx, slot, nodeID, bootID, epoch, rootGeneration); err != nil {
-		cleanupErr:=registrar.UnregisterReader(ctx,nodeID,bootID)
-		if cleanupErr==nil { _ = lease.Close() }
-		return nil, errors.Join(err,cleanupErr)
+		cleanupErr:=session.CloseDrained(context.WithoutCancel(ctx),true)
+		if cleanupErr!=nil { return session,errors.Join(fmt.Errorf("publish durable Reader slot: %w",err),cleanupErr) }
+		return nil,err
 	}
-	return &ReaderSession{table:table,lease:lease,registrar:registrar,slot:slot,nodeID:nodeID,bootID:bootID,epoch:epoch,rootGeneration:rootGeneration,rootPage:rootPage},nil
-}
+	session.tableRegistered=true
+	return session,nil
 
 func (s *ReaderSession) checkLeaseLocked() error {
 	if s == nil || s.closed { return errors.New("reader session is closed") }
@@ -112,7 +116,7 @@ func (s *ReaderSession) CloseDrained(ctx context.Context, ioDrained bool) error 
 		if err:=s.registrar.UnregisterReader(ctx,s.nodeID,s.bootID);err!=nil{return err}
 		s.prUnregistered=true
 	}
-	if !s.tableClosed {
+	if s.tableRegistered && !s.tableClosed {
 		if err := s.table.CloseDrained(s.slot,s.nodeID,s.bootID,s.epoch,true); err != nil { return err }
 		s.tableClosed=true
 	}
