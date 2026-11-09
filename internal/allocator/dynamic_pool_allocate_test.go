@@ -235,11 +235,15 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	pendingTree, e := btree.OpenPersistentWithExternalPages(pendingStore, committer, ResolveIdempotencyPages, coordinator)
 	if e != nil { t.Fatalf("reopen with pending Data Retire record: %v", e) }
 	pendingRecords := 0
+	var retiredRecordPage uint64
 	for _, item := range pendingTree.Snapshot() {
 		if item.Key < g.TotalBlocks || item.Key>>63 != 0 { continue }
 		page, readErr := pendingStore.ReadPage(item.Value)
 		if readErr != nil { t.Fatal(readErr) }
-		if page.Type == DataRetireRecordPageType { pendingRecords++ }
+		if page.Type == DataRetireRecordPageType {
+			pendingRecords++
+			retiredRecordPage = item.Value
+		}
 	}
 	if pendingRecords != 1 { t.Fatalf("recovered pending Data Retire records=%d, want 1", pendingRecords) }
 	if _, err := alloc.CollectDataRetired(context.Background(), lease, readers, false); !errors.Is(err, metastore.ErrUnsafeReclaim) {
@@ -295,8 +299,20 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 			t.Fatalf("retry uncommitted Data Retire transaction reclaimed=%d err=%v", got, collectErr)
 		}
 	}
-	// The Data Retire record page itself was retired by the same root
-	// transaction. Advance past that deletion root and reclaim it through the
+	// Removing the Data Retire index must also unpin its immutable Arena page
+	// and append that page to the PersistentArena lifecycle queue in the same
+	// root transaction. Otherwise repeated COW/Discard cycles leak Arena pages
+	// until the next process restart.
+	foundMetadataRetire := false
+	for _, batch := range tree.RetiredPages() {
+		for _, id := range batch.PageIDs {
+			if id == retiredRecordPage { foundMetadataRetire = true }
+		}
+	}
+	if !foundMetadataRetire {
+		t.Fatalf("deleted Data Retire record page %d was not queued for metadata reclamation", retiredRecordPage)
+	}
+	// Advance past that deletion root and reclaim the record page through the
 	// PersistentArena lifecycle queue.
 	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
 	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
