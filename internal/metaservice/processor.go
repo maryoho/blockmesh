@@ -14,6 +14,7 @@ var (
  ErrRetry=errors.New("request should be retried")
  ErrFenced=errors.New("request rejected by fencing state")
  ErrInvalid=errors.New("request is invalid")
+ ErrMutationPathUnavailable=errors.New("BMPOOL03 mutation path is not yet integrated")
 )
 
 // Processor must enforce request identity and epoch admission. AllocateZeroPublish
