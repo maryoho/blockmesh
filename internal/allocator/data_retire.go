@@ -94,30 +94,52 @@ func dataRetireIndexKey(r DataRetireRecord, totalBlocks uint64) (uint64, error) 
 	return dataRetireNamespace + uint64(h)%available, nil
 }
 
+// nextDataRetireIndexKey advances a linear-probe cursor and wraps only
+// inside the reserved Data Retire namespace. Keeping this operation separate
+// makes the namespace-boundary behavior directly testable.
+func nextDataRetireIndexKey(key uint64) uint64 {
+	key++
+	if key >= dataRetireIndexLimit {
+		return dataRetireNamespace
+	}
+	return key
+}
+
 func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord, totalBlocks uint64) ([]DataRetireRecord, error) {
-	if totalBlocks >= dataRetireNamespace { return nil, ErrDataRetireRecord }
+	if tree == nil || totalBlocks >= dataRetireNamespace {
+		return nil, ErrDataRetireRecord
+	}
 	out := make([]DataRetireRecord, len(ranges))
 	used := make(map[uint64]struct{}, len(ranges))
-	for i, r := range ranges {
-		key, err := dataRetireIndexKey(r, totalBlocks)
-		if err != nil { return nil, err }
-		for probes := uint64(0); probes < 1<<20; probes++ {
-			if _, exists := used[key]; exists {
-				key++
-				continue
-			}
-			if _, err := tree.Get(key); errors.Is(err, btree.ErrKeyNotFound) {
-				break
-			} else if err != nil {
-				return nil, err
-			}
-			key++
-			if key >= dataRetireIndexLimit { key = dataRetireNamespace }
-			if probes == (1<<20)-1 { return nil, ErrDataRetireRecord }
+	const maxProbes = uint64(1 << 20)
+	for i, record := range ranges {
+		key, err := dataRetireIndexKey(record, totalBlocks)
+		if err != nil {
+			return nil, err
 		}
-		r.IndexKey = key
+		reserved := false
+		for probes := uint64(0); probes < maxProbes; probes++ {
+			_, inBatch := used[key]
+			if !inBatch {
+				_, lookupErr := tree.Get(key)
+				switch {
+				case errors.Is(lookupErr, btree.ErrKeyNotFound):
+					reserved = true
+				case lookupErr != nil:
+					return nil, lookupErr
+				}
+			}
+			if reserved {
+				break
+			}
+			key = nextDataRetireIndexKey(key)
+		}
+		if !reserved {
+			return nil, ErrDataRetireRecord
+		}
+		record.IndexKey = key
 		used[key] = struct{}{}
-		out[i] = r
+		out[i] = record
 	}
 	return out, nil
 }
