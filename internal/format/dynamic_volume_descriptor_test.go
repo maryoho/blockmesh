@@ -40,5 +40,7 @@ func TestInitializeDynamicVolumeDescriptorCopies(t *testing.T){
 	pair,err:=DynamicVolumeDescriptorPairOffset(sb,2);if err!=nil{t.Fatal(err)}
 	a,err:=DecodeDynamicVolumeDescriptor(w.b[pair:pair+PageSize]);if err!=nil{t.Fatal(err)}
 	b,err:=DecodeDynamicVolumeDescriptor(w.b[pair+PageSize:pair+2*PageSize]);if err!=nil{t.Fatal(err)}
-	if a!=d||b!=d{t.Fatal("descriptor copies differ")}
+	want:=d
+	want.OwnerRecordStart=d.LifecycleStart+d.LifecyclePages
+	if a!=want||b!=want{t.Fatalf("descriptor copies differ: a=%+v b=%+v want=%+v",a,b,want)}
 }
