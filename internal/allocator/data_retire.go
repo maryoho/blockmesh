@@ -79,9 +79,9 @@ func BuildDataRetirePage(id, pageGeneration uint64, r DataRetireRecord) (metasto
 	return metastore.Page{ID:id, Type:DataRetireRecordPageType, Generation:pageGeneration, Payload:payload}, nil
 }
 
-// dataRetireIndexKey hashes the immutable range identity into the high-bit
-// external-page namespace. The caller probes on collision against the live
-// B+Tree, so it cannot overwrite an idempotency index entry.
+// dataRetireIndexKey hashes the immutable range identity into the stable
+// reserved low-bit interval. This interval is disjoint from logical Mapping
+// keys and high-bit idempotency keys, and remains fixed across Pool expansion.
 func dataRetireIndexKey(r DataRetireRecord, totalBlocks uint64) (uint64, error) {
 	if totalBlocks >= dataRetireNamespace { return 0, ErrDataRetireRecord }
 	var b [24]byte
