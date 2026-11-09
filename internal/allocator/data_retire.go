@@ -35,7 +35,7 @@ type DataRetireRecord struct {
 }
 
 func (r DataRetireRecord) EncodePayload() ([]byte, error) {
-	if r.IndexKey == 0 || r.IndexKey >= dataRetireNamespace || r.RetireGeneration == 0 ||
+	if r.IndexKey == 0 || r.IndexKey >= dataRetireNamespace ||
 		r.BlockCount == 0 || r.PhysicalStart > math.MaxUint64-uint64(r.BlockCount) {
 		return nil, ErrDataRetireRecord
 	}
@@ -124,9 +124,9 @@ func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord, totalBlo
 // dataRetireRanges compacts old physical block IDs into non-overlapping
 // contiguous ranges. It rejects duplicates and preserves the AG boundary.
 func dataRetireRanges(physical []uint64, generation uint64, agSizeBlocks uint64) ([]DataRetireRecord, error) {
-	if generation == 0 || agSizeBlocks == 0 { return nil, ErrDataRetireRecord }
 	ids := append([]uint64(nil), physical...)
 	if len(ids) == 0 { return nil, nil }
+	if agSizeBlocks == 0 { return nil, ErrDataRetireRecord }
 	// A Volume Descriptor is bound to one AG. Cross-AG extents would require a
 	// multi-journal atomic transaction, which BMPOOL03 intentionally forbids.
 	for i := range ids {
