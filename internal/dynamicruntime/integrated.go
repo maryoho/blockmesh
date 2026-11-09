@@ -29,9 +29,15 @@ func NewIntegratedDynamicVolumeRuntimeManager(backend *Backend, ownerCoordinator
 	if backend.cfg.ReaderLease.Locker!=nil && backend.cfg.ReaderLease.Locker!=sanlock {
 		return nil,errors.New("BMPOOL03 ReaderLeaseConfig must use the same SanlockLocker instance")
 	}
+	if backend.cfg.ReaderLease.ResourceFor==nil {
+		return nil,errors.New("production BMPOOL03 Runtime requires a Reader sanlock resource resolver")
+	}
+	if backend.cfg.ReaderRegistrar==nil {
+		return nil,errors.New("production BMPOOL03 Runtime requires a SAN SCSI PR ReaderRegistrar")
+	}
 	readerCoordinator,ok:=backend.cfg.ReaderCoordinator.(*metastore.DistributedReaderCoordinator)
-	if !ok || readerCoordinator.Locker!=backend.cfg.Locker {
-		return nil,errors.New("production BMPOOL03 Runtime requires DistributedReaderCoordinator using the Backend distributed locker")
+	if !ok || readerCoordinator.Locker!=backend.cfg.Locker || readerCoordinator.ResourceFor==nil {
+		return nil,errors.New("production BMPOOL03 Runtime requires DistributedReaderCoordinator using the Backend distributed locker and a Reader-set resource resolver")
 	}
 	ownerAdapter,err:=NewOwnerCoordinatorAdapter(ownerCoordinator)
 	if err!=nil{return nil,err}
