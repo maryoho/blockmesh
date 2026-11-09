@@ -239,15 +239,40 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	if bitmap[0]&0x03 != 0x03 { t.Fatalf("source block was freed while Reader pinned it: %08b", bitmap[0]) }
 
 	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
-	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 1 {
-		t.Fatalf("advanced Reader should release COW source: reclaimed=%d err=%v", got, err)
+	// Inject a failure while the WAL applies the Bitmap after-image. The
+	// collector must report an ambiguous outcome; WAL recovery must replay both
+	// the queue deletion and Bitmap clear, never just one of them.
+	parent.failWriteAt = int64(g.BitmapOffset+format.PageSize)
+	if _, err = alloc.CollectDataRetired(context.Background(), lease, readers, true); !errors.Is(err, ErrAllocationOutcomeUnknown) {
+		t.Fatalf("Bitmap apply failure must be reported as ambiguous: %v", err)
 	}
+	if !parent.failed { t.Fatal("Bitmap after-image failure injection did not fire") }
+	parent.failWriteAt = -1
+	if err = committer.Recover(); err != nil { t.Fatalf("recover Data Retire/Bitmap WAL transaction: %v", err) }
+
+	// Reopen every metadata object after recovery. The committed WAL transaction
+	// must have removed the queue entry and freed the source bit atomically.
+	store, err = metastore.OpenDynamicPoolVolume(metadata, sb, 0, desc.VolumeID)
+	if err != nil { t.Fatal(err) }
+	tree, err = btree.OpenPersistentWithExternalPages(store, committer, ResolveIdempotencyPages, coordinator)
+	if err != nil { t.Fatalf("reopen recovered Data Retire root: %v", err) }
+	readers, err = metastore.NewReaderTable(store, readerStart, readerPages, committer, coordinator)
+	if err != nil { t.Fatal(err) }
+	alloc, err = NewDynamicPoolAllocator(store, tree, locks, data)
+	if err != nil { t.Fatal(err) }
 	if _, err = metadata.ReadAt(bitmap, int64(g.BitmapOffset+format.PageSize)); err != nil { t.Fatal(err) }
 	if bitmap[0]&0x01 != 0 || bitmap[0]&0x02 == 0 {
-		t.Fatalf("atomic COW reclaim bitmap mismatch: %08b", bitmap[0])
+		t.Fatalf("WAL recovery did not atomically apply COW reclaim bitmap: %08b", bitmap[0])
 	}
-	// The Data Retire record page was retired by the same root transaction.
-	// Advance past that deletion root and collect it through PersistentArena.
+	for _, item := range tree.Snapshot() {
+		if item.Key < format.DynamicRetireIndexKeyStart || item.Key >= format.DynamicRetireIndexKeyLimit { continue }
+		page, readErr := store.ReadPage(item.Value)
+		if readErr != nil { t.Fatal(readErr) }
+		if page.Type == DataRetireRecordPageType { t.Fatal("Data Retire queue entry survived committed Bitmap release") }
+	}
+	// The Data Retire record page itself was retired by the same root
+	// transaction. Advance past that deletion root and reclaim it through the
+	// PersistentArena lifecycle queue.
 	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
 	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
 		t.Fatalf("metadata-only retire collection reclaimed=%d err=%v", got, err)
