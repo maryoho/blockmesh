@@ -42,6 +42,27 @@ func TestDMSetupGateFenceCurrentClosesCurrentTargetAndLeavesFreshTargetClosed(t 
 	if err:=g.FenceCurrent(context.Background(),"/dev/mapper/bm-vol");err!=nil{t.Fatal(err)}
 	if len(r.calls)!=1{t.Fatalf("fresh target should only need one status read: %+v",r.calls)}
 }
+func TestDMSetupGateReaderEpochMessagesAndFenceCurrent(t *testing.T) {
+	r:=&fakeRunner{status:"0 100 blockmesh instance=ab epoch=0 gate=0 fenced=0 inflight=0 readonly=1 reader_epoch=9 root_generation=44 reader_gate=1"}
+	g:=DMSetupGate{Runner:r,Binary:"/sbin/dmsetup"}
+	ctx:=context.Background()
+	instance,err:=g.PrepareReader(ctx,"/dev/mapper/bm-ro",10,45)
+	if err!=nil{t.Fatal(err)}
+	if instance!=0xab{t.Fatalf("instance=%x",instance)}
+	if err=g.EnableReader(ctx,"/dev/mapper/bm-ro",10,45,instance);err!=nil{t.Fatal(err)}
+	if err=g.FenceReader(ctx,"/dev/mapper/bm-ro",10,instance);err!=nil{t.Fatal(err)}
+	want:=[]call{
+		{name:"/sbin/dmsetup",args:[]string{"status","/dev/mapper/bm-ro"}},
+		{name:"/sbin/dmsetup",args:[]string{"message","/dev/mapper/bm-ro","0","reader_prepare 10 45 ab"}},
+		{name:"/sbin/dmsetup",args:[]string{"message","/dev/mapper/bm-ro","0","reader_enable 10 45 ab"}},
+		{name:"/sbin/dmsetup",args:[]string{"message","/dev/mapper/bm-ro","0","reader_fence 10 ab"}},
+	}
+	if !reflect.DeepEqual(r.calls,want){t.Fatalf("calls=%+v want=%+v",r.calls,want)}
+	r.calls=nil
+	if err=g.FenceCurrent(ctx,"/dev/mapper/bm-ro");err!=nil{t.Fatal(err)}
+	if len(r.calls)!=2||r.calls[1].args[3]!="reader_fence 9 ab"{t.Fatalf("FenceCurrent did not select Reader gate: %+v",r.calls)}
+}
+
 func TestDMSetupGateRejectsMissingOrInvalidInstance(t *testing.T){
 	for _,status:=range []string{"0 100 blockmesh epoch=0 gate=0","0 100 blockmesh instance=0 epoch=0","0 100 blockmesh instance=xyz epoch=0"}{
 		r:=&fakeRunner{status:status};g:=DMSetupGate{Runner:r}
