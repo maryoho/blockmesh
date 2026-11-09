@@ -28,11 +28,15 @@ struct bm_target {
 	wait_queue_head_t drain_wait;
 	atomic_t inflight_bios;
 	u64 owner_epoch;
+	u64 reader_epoch;
+	u64 root_generation;
 	u64 instance_id;
 	u64 queue_cookie;
 	u32 queue_id;
 	u8 volume_id[16], node_id[16], boot_id[16];
 	bool gate_open;
+	bool reader_gate_open;
+	bool read_only;
 	bool fenced;
 };
 struct bm_bio_ctx { bool tracked; };
@@ -43,7 +47,8 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 	struct bm_uapi_request request = { };
 	unsigned long flags;
 	u64 logical_sector = 0, logical_block = 0, sector_offset = 0, blocks = 0;
-	u64 epoch;
+	u64 epoch, reader_epoch, root_generation;
+	bool read_only;
 	u32 block_count = 0;
 	bool write = op_is_write(bio_op(bio)) || bio_op(bio) == REQ_OP_DISCARD ||
 		     bio_op(bio) == REQ_OP_FLUSH;
@@ -52,16 +57,26 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 
 	pb->tracked = false;
 	spin_lock_irqsave(&bm->state_lock, flags);
-	if (!bm->owner_epoch || bm->fenced || (write && !bm->gate_open)) {
+	read_only = bm->read_only;
+	if (bm->fenced ||
+	    (read_only && (!bm->reader_gate_open || !bm->reader_epoch || write)) ||
+	    (!read_only && (!bm->owner_epoch || (write && !bm->gate_open)))) {
 		spin_unlock_irqrestore(&bm->state_lock, flags);
 		return DM_MAPIO_KILL;
 	}
 	epoch = bm->owner_epoch;
+	reader_epoch = bm->reader_epoch;
+	root_generation = bm->root_generation;
 	atomic_inc(&bm->inflight_bios);
 	pb->tracked = true;
 	spin_unlock_irqrestore(&bm->state_lock, flags);
 
-	request.owner_epoch = cpu_to_le64(epoch);
+	if (read_only) {
+		request.reader_epoch = cpu_to_le64(reader_epoch);
+		request.root_generation = cpu_to_le64(root_generation);
+	} else {
+		request.owner_epoch = cpu_to_le64(epoch);
+	}
 	memcpy(request.volume_id, bm->volume_id, sizeof(request.volume_id));
 	memcpy(request.node_id, bm->node_id, sizeof(request.node_id));
 	memcpy(request.boot_id, bm->boot_id, sizeof(request.boot_id));
@@ -156,7 +171,7 @@ static int bm_owner_prepare(struct bm_target *bm, const char *arg, const char *i
 	/* bm_message serializes all control transitions with control_lock. */
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch <= bm->owner_epoch) ret = -ESTALE;
-	else { bm->owner_epoch = epoch; bm->fenced = false; ret = 0; }
+	else { bm->owner_epoch = epoch; bm->reader_epoch = 0; bm->root_generation = 0; bm->read_only = false; bm->reader_gate_open = false; bm->fenced = false; ret = 0; }
 	spin_unlock_irqrestore(&bm->state_lock, flags);
 	return ret;
 }
@@ -172,7 +187,7 @@ static int bm_owner_enable(struct bm_target *bm, const char *arg, const char *in
 	if (instance != bm->instance_id) return -ESTALE;
 	spin_lock_irqsave(&bm->state_lock, flags);
 	if (epoch != bm->owner_epoch) ret = -ESTALE;
-	else if (bm->fenced || bm->gate_open || atomic_read(&bm->inflight_bios)) ret = -EPERM;
+	else if (bm->fenced || bm->read_only || bm->gate_open || atomic_read(&bm->inflight_bios)) ret = -EPERM;
 	else { bm->gate_open = true; ret = 0; }
 	spin_unlock_irqrestore(&bm->state_lock, flags);
 	return ret;
@@ -191,6 +206,7 @@ static int bm_owner_fence(struct bm_target *bm, const char *arg, const char *ins
 	if (epoch < bm->owner_epoch) ret = -ESTALE;
 	else {
 		bm->gate_open = false;
+		bm->reader_gate_open = false;
 		bm->fenced = true;
 		if (epoch > bm->owner_epoch) bm->owner_epoch = epoch;
 		ret = 0;
@@ -199,6 +215,88 @@ static int bm_owner_fence(struct bm_target *bm, const char *arg, const char *ins
 	if (!ret) bm_wait_for_drain(bm);
 	return ret;
 }
+/* reader_prepare installs a generation-pinned, read-only identity while closed. */
+static int bm_reader_prepare(struct bm_target *bm, const char *epoch_arg,
+			     const char *root_arg, const char *instance_arg)
+{
+	u64 epoch, root, instance;
+	unsigned long flags;
+	int ret = kstrtou64(epoch_arg, 10, &epoch);
+	if (ret || !epoch) return -EINVAL;
+	ret = kstrtou64(root_arg, 10, &root);
+	if (ret || !root) return -EINVAL;
+	ret = kstrtou64(instance_arg, 16, &instance);
+	if (ret || !instance) return -EINVAL;
+	if (instance != bm->instance_id) return -ESTALE;
+	spin_lock_irqsave(&bm->state_lock, flags);
+	if (epoch <= bm->reader_epoch) {
+		spin_unlock_irqrestore(&bm->state_lock, flags);
+		return -ESTALE;
+	}
+	bm->gate_open = false;
+	bm->reader_gate_open = false;
+	bm->fenced = true;
+	spin_unlock_irqrestore(&bm->state_lock, flags);
+	bm_wait_for_drain(bm);
+	spin_lock_irqsave(&bm->state_lock, flags);
+	if (epoch <= bm->reader_epoch) ret = -ESTALE;
+	else {
+		bm->owner_epoch = 0;
+		bm->reader_epoch = epoch;
+		bm->root_generation = root;
+		bm->read_only = true;
+		bm->fenced = false;
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&bm->state_lock, flags);
+	return ret;
+}
+
+static int bm_reader_enable(struct bm_target *bm, const char *epoch_arg,
+			    const char *root_arg, const char *instance_arg)
+{
+	u64 epoch, root, instance;
+	unsigned long flags;
+	int ret = kstrtou64(epoch_arg, 10, &epoch);
+	if (ret || !epoch) return -EINVAL;
+	ret = kstrtou64(root_arg, 10, &root);
+	if (ret || !root) return -EINVAL;
+	ret = kstrtou64(instance_arg, 16, &instance);
+	if (ret || !instance) return -EINVAL;
+	if (instance != bm->instance_id) return -ESTALE;
+	spin_lock_irqsave(&bm->state_lock, flags);
+	if (!bm->read_only || bm->reader_epoch != epoch ||
+	    bm->root_generation != root) ret = -ESTALE;
+	else if (bm->fenced || bm->reader_gate_open ||
+		 atomic_read(&bm->inflight_bios)) ret = -EPERM;
+	else { bm->reader_gate_open = true; ret = 0; }
+	spin_unlock_irqrestore(&bm->state_lock, flags);
+	return ret;
+}
+
+static int bm_reader_fence(struct bm_target *bm, const char *epoch_arg,
+			   const char *instance_arg)
+{
+	u64 epoch, instance;
+	unsigned long flags;
+	int ret = kstrtou64(epoch_arg, 10, &epoch);
+	if (ret || !epoch) return -EINVAL;
+	ret = kstrtou64(instance_arg, 16, &instance);
+	if (ret || !instance) return -EINVAL;
+	if (instance != bm->instance_id) return -ESTALE;
+	spin_lock_irqsave(&bm->state_lock, flags);
+	if (!bm->read_only || epoch != bm->reader_epoch) ret = -ESTALE;
+	else {
+		bm->reader_gate_open = false;
+		bm->gate_open = false;
+		bm->fenced = true;
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&bm->state_lock, flags);
+	if (!ret) bm_wait_for_drain(bm);
+	return ret;
+}
+
 static int bm_message(struct dm_target *ti, unsigned int argc, char **argv,
 		      char *result, unsigned int maxlen)
 {
@@ -209,6 +307,9 @@ static int bm_message(struct dm_target *ti, unsigned int argc, char **argv,
 	if (argc == 3 && !strcmp(argv[0], "owner_prepare")) ret = bm_owner_prepare(bm, argv[1], argv[2]);
 	else if (argc == 3 && !strcmp(argv[0], "owner_enable")) ret = bm_owner_enable(bm, argv[1], argv[2]);
 	else if (argc == 3 && !strcmp(argv[0], "owner_fence")) ret = bm_owner_fence(bm, argv[1], argv[2]);
+	else if (argc == 4 && !strcmp(argv[0], "reader_prepare")) ret = bm_reader_prepare(bm, argv[1], argv[2], argv[3]);
+	else if (argc == 4 && !strcmp(argv[0], "reader_enable")) ret = bm_reader_enable(bm, argv[1], argv[2], argv[3]);
+	else if (argc == 3 && !strcmp(argv[0], "reader_fence")) ret = bm_reader_fence(bm, argv[1], argv[2]);
 	mutex_unlock(&bm->control_lock);
 	return ret;
 }
@@ -218,7 +319,8 @@ static void bm_status(struct dm_target *ti, status_type_t type,
 	struct bm_target *bm = ti->private;
 	unsigned long flags;
 	u64 epoch;
-	bool open, fenced;
+	bool open, reader_open, read_only, fenced;
+	u64 reader_epoch, root_generation;
 	int inflight;
 	unsigned int sz = 0;
 	(void)status_flags;
@@ -233,12 +335,16 @@ static void bm_status(struct dm_target *ti, status_type_t type,
 	}
 	spin_lock_irqsave(&bm->state_lock, flags);
 	epoch = bm->owner_epoch; open = bm->gate_open; fenced = bm->fenced;
+	reader_open = bm->reader_gate_open; read_only = bm->read_only;
+	reader_epoch = bm->reader_epoch; root_generation = bm->root_generation;
 	inflight = atomic_read(&bm->inflight_bios);
 	spin_unlock_irqrestore(&bm->state_lock, flags);
-	DMEMIT("instance=%016llx epoch=%llu gate=%u fenced=%u inflight=%d queue=%u cookie=%016llx",
+	DMEMIT("instance=%016llx epoch=%llu gate=%u fenced=%u inflight=%d queue=%u cookie=%016llx readonly=%u reader_epoch=%llu root_generation=%llu reader_gate=%u",
 	       (unsigned long long)bm->instance_id, (unsigned long long)epoch,
 	       open ? 1 : 0, fenced ? 1 : 0, inflight, bm->queue_id,
-	       (unsigned long long)bm->queue_cookie);
+	       (unsigned long long)bm->queue_cookie, read_only ? 1 : 0,
+	       (unsigned long long)reader_epoch, (unsigned long long)root_generation,
+	       reader_open ? 1 : 0);
 }
 static int bm_iterate_devices(struct dm_target *ti, iterate_devices_callout_fn fn, void *data)
 {
@@ -249,6 +355,7 @@ static void bm_dtr(struct dm_target *ti)
 {
 	struct bm_target *bm = ti->private;
 	bm_close_gate(bm, true);
+	bm->reader_gate_open = false;
 	bm_queue_destroy(bm->queue_id, bm->queue_cookie);
 	bm_wait_for_drain(bm);
 	dm_put_device(ti, bm->dev);
@@ -277,7 +384,8 @@ static int bm_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	mutex_init(&bm->control_lock);
 	init_waitqueue_head(&bm->drain_wait);
 	atomic_set(&bm->inflight_bios, 0);
-	bm->owner_epoch = 0; bm->gate_open = false; bm->fenced = true;
+	bm->owner_epoch = 0; bm->reader_epoch = 0; bm->root_generation = 0;
+	bm->gate_open = false; bm->reader_gate_open = false; bm->read_only = false; bm->fenced = true;
 	do { bm->instance_id = get_random_u64(); } while (!bm->instance_id);
 	ret = bm_queue_create(&bm->queue_id, &bm->queue_cookie);
 	if (ret) { ti->error = "cannot create BlockMesh queue"; kfree(bm); return ret; }
