@@ -53,3 +53,27 @@ func BenchmarkLookupContiguous(b *testing.B) {
         })
     }
 }
+
+
+// BenchmarkLookupMappingVector compares coalesced and highly fragmented
+// physical layouts while keeping the logical request contiguous.
+func BenchmarkLookupMappingVector(b *testing.B) {
+	for _, count := range []uint32{1, 4, 16, 64, 256} {
+		for _, fragmented := range []bool{false, true} {
+			name := fmt.Sprintf("blocks=%d/fragmented=%t", count, fragmented)
+			b.Run(name, func(b *testing.B) {
+				tree := make(testMappingTree, count)
+				for i := uint32(0); i < count; i++ {
+					physical := uint64(9000 + i)
+					if fragmented { physical = uint64(9000 + i*2) }
+					tree[1000+uint64(i)] = physical
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, err := lookupMappingVector(tree, 1000, count); err != nil { b.Fatal(err) }
+				}
+			})
+		}
+	}
+}
