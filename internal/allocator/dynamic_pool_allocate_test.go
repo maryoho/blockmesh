@@ -209,6 +209,27 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	})
 	if err != nil { t.Fatal(err) }
 	if second.PhysicalStart == first.PhysicalStart { t.Fatal("COW reused source block before Reader-safe reclamation") }
+	copied := make([]byte, format.BlockSize)
+	if n, e := data.ReadAt(copied, int64(second.PhysicalStart*format.BlockSize)); e != nil || n != len(copied) || !bytes.Equal(copied, oldData) {
+		t.Fatalf("COW copy did not preserve source data: n=%d err=%v", n, e)
+	}
+	// Reopen before collection: the pending Data Retire record must be found
+	// through the reserved B+Tree index namespace after process recovery.
+	pendingStore, e := metastore.OpenDynamicPoolVolume(metadata, sb, 0, desc.VolumeID)
+	if e != nil { t.Fatal(e) }
+	pendingTree, e := btree.OpenPersistentWithExternalPages(pendingStore, committer, ResolveIdempotencyPages, coordinator)
+	if e != nil { t.Fatalf("reopen with pending Data Retire record: %v", e) }
+	pendingRecords := 0
+	for _, item := range pendingTree.Snapshot() {
+		if item.Key < g.TotalBlocks || item.Key>>63 != 0 { continue }
+		page, readErr := pendingStore.ReadPage(item.Value)
+		if readErr != nil { t.Fatal(readErr) }
+		if page.Type == DataRetireRecordPageType { pendingRecords++ }
+	}
+	if pendingRecords != 1 { t.Fatalf("recovered pending Data Retire records=%d, want 1", pendingRecords) }
+	if _, err := alloc.CollectDataRetired(context.Background(), lease, readers, false); !errors.Is(err, metastore.ErrUnsafeReclaim) {
+		t.Fatalf("collector must reject missing I/O drain proof: %v", err)
+	}
 	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
 		t.Fatalf("old Reader must pin COW source: reclaimed=%d err=%v", got, err)
 	}
