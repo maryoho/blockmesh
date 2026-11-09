@@ -70,8 +70,6 @@ func (g *DMRequestGate) EnableRequestsGuarded(ctx context.Context, spec metastor
 		if err!=nil { return fmt.Errorf("prepare DM RW OwnerEpoch gate: %w",err) }
 		session.instance=instance
 	case metastore.VolumeRuntimeReadOnly:
-		reader,ok:=interface{}(rt).(interface{ RootGeneration() uint64 })
-		_ = reader
 		if rt.RootGeneration==0 || spec.ReaderEpoch==0 { return ErrReaderHealthRequired }
 		session.epoch=spec.ReaderEpoch
 		session.rootGeneration=rt.RootGeneration
