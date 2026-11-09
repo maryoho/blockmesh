@@ -42,8 +42,8 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 		if errors.Is(err, allocator.ErrAllocationOutcomeUnknown) {
 			// A committed-vs-uncommitted WAL result cannot be guessed. Fence and
 			// drain this runtime before allowing recovery/reopen to decide it.
-			drainErr := p.manager.Deactivate(context.Background(), snapshot.Spec.VolumeID)
-			return Result{}, errors.Join(ErrRetry, err, drainErr)
+			stopErr := p.poisonAndScheduleDeactivation(snapshot.Spec.VolumeID, err)
+			return Result{}, errors.Join(ErrRetry, err, stopErr)
 		}
 		if errors.Is(err, allocator.ErrLogicalRangeMapped) {
 			return Result{}, fmt.Errorf("%w: allocate request targets an already mapped logical block: %v", ErrInvalid, err)
@@ -62,8 +62,8 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 	if !rt.Owner.Valid() || rt.Owner.Epoch() != req.OwnerEpoch {
 		// Publication may have completed, but the Owner proof is no longer
 		// valid. Do not report success to a caller under a lost epoch.
-		drainErr := p.manager.Deactivate(context.Background(), snapshot.Spec.VolumeID)
-		return Result{}, errors.Join(ErrFenced, drainErr)
+		stopErr := p.poisonAndScheduleDeactivation(snapshot.Spec.VolumeID, errors.New("Owner lease lost after mutation publication"))
+		return Result{}, errors.Join(ErrFenced, stopErr)
 	}
 	return Result{Mapping: &uapi.Mapping{LogicalBlock: allocation.LogicalStart, PhysicalBlock: allocation.PhysicalStart, BlockCount: allocation.BlockCount}, RootGeneration: rt.Tree.RootGeneration()}, nil
 }
@@ -82,4 +82,16 @@ func allocationFingerprint(req uapi.Request) [32]byte {
 	binary.LittleEndian.PutUint16(word[:2], uint16(req.Operation))
 	b = append(b, word[:2]...)
 	return sha256.Sum256(b)
+}
+
+
+// poisonAndScheduleDeactivation closes admission synchronously, then drains
+// asynchronously. The current request must be allowed to publish its error
+// completion before Deactivate waits for all in-flight DM requests.
+func (p *DynamicPoolRuntimeProcessor) poisonAndScheduleDeactivation(volumeID string, cause error) error {
+	stopErr := p.manager.PoisonAndStopRequests(context.Background(), volumeID, cause)
+	go func() {
+		_ = p.manager.Deactivate(context.Background(), volumeID)
+	}()
+	return stopErr
 }
