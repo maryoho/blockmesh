@@ -393,7 +393,8 @@ func (m *DynamicVolumeRuntimeManager) CollectDataRetired(ctx context.Context, vo
 	}
 	rt := m.runtimes[volumeID]
 	if rt == nil || rt.runtime == nil || rt.spec.Mode != metastore.VolumeRuntimeReadWrite ||
-		rt.state != RuntimeActive || !rt.enabled || rt.stopping || rt.failure != nil || rt.poisoned != nil {
+		rt.state != RuntimeActive || !rt.enabled || rt.stopping || rt.failure != nil || rt.poisoned != nil ||
+		rt.runtime.Readers == nil || rt.runtime.Allocator == nil || rt.runtime.Owner == nil {
 		m.mu.Unlock()
 		return 0, ErrRuntimeStopping
 	}
