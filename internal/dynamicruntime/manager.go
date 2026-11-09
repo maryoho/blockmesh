@@ -79,6 +79,7 @@ type managedRuntime struct {
 	watchDone chan struct{}
 	failure error
 	lossCause error
+	failStopOnce sync.Once
 }
 
 type DynamicVolumeRuntimeManager struct {
@@ -310,13 +311,15 @@ func (m *DynamicVolumeRuntimeManager) watchRuntime(ctx context.Context, rt *mana
 
 func (m *DynamicVolumeRuntimeManager) failStop(rt *managedRuntime, cause error) {
 	if rt == nil { return }
-	err := m.cfg.Gate.FailStop(context.Background(), rt.spec, cause)
-	m.mu.Lock()
-	rt.state = RuntimeLeaseLost
-	rt.enabled = false
-	rt.lossCause = cause
-	rt.failure = err
-	m.mu.Unlock()
+	rt.failStopOnce.Do(func() {
+		err := m.cfg.Gate.FailStop(context.Background(), rt.spec, cause)
+		m.mu.Lock()
+		rt.state = RuntimeLeaseLost
+		rt.enabled = false
+		rt.lossCause = cause
+		rt.failure = err
+		m.mu.Unlock()
+	})
 }
 
 // Deactivate closes admission and drains all in-flight requests before releasing
@@ -345,14 +348,14 @@ func (m *DynamicVolumeRuntimeManager) deactivateLocked(ctx context.Context, volu
 	if err := m.cfg.Gate.DrainRequests(ctx, volumeID); err != nil {
 		return fmt.Errorf("drain BMPOOL03 DM requests: %w", err)
 	}
+	if rt.watchCancel != nil { rt.watchCancel() }
+	if rt.watchDone != nil { <-rt.watchDone }
 	m.mu.Lock()
 	failStopErr := rt.failure
 	m.mu.Unlock()
 	if failStopErr != nil {
 		return fmt.Errorf("runtime lease loss could not be safely fail-stopped; retaining all resources: %w", failStopErr)
 	}
-	if rt.watchCancel != nil { rt.watchCancel() }
-	if rt.watchDone != nil { <-rt.watchDone }
 	if rt.reader != nil {
 		if err := rt.reader.CloseDrained(ctx, true); err != nil {
 			return fmt.Errorf("close drained BMPOOL03 Reader session: %w", err)
