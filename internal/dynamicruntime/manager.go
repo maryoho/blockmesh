@@ -537,6 +537,34 @@ func (m *DynamicVolumeRuntimeManager) ResolveRequest(ctx context.Context,volumeI
 	return out,nil
 }
 
+
+ // PoisonAndStopRequests atomically makes the Runtime unavailable to new
+ // ResolveRequest calls, then closes DM admission without waiting for the
+ // current request to complete. The caller may schedule Deactivate afterward;
+ // synchronous DrainRequests from inside an in-flight request would deadlock
+ // waiting for that request's own completion.
+func (m *DynamicVolumeRuntimeManager) PoisonAndStopRequests(ctx context.Context, volumeID string, cause error) error {
+	if m == nil || ctx == nil || strings.TrimSpace(volumeID) == "" {
+		return errors.New("manager, context and Volume ID are required")
+	}
+	if cause == nil {
+		cause = errors.New("runtime poisoned after an uncertain mutation outcome")
+	}
+	m.mu.Lock()
+	rt := m.runtimes[volumeID]
+	if rt != nil {
+		rt.poisoned = errors.Join(rt.poisoned, cause)
+		rt.enabled = false
+		rt.stopping = true
+		rt.state = RuntimeStopping
+	}
+	m.mu.Unlock()
+	if rt == nil {
+		return ErrRuntimeStopping
+	}
+	return m.cfg.Gate.StopRequests(ctx, volumeID)
+}
+
 func (m *DynamicVolumeRuntimeManager) RuntimeState(volumeID string) RuntimeState {
 	if m == nil { return RuntimeCreated }
 	m.mu.Lock()
