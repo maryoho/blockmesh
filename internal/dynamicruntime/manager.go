@@ -160,16 +160,19 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 	defer m.inflight.Done()
 	m.mu.Lock()
 	if current := m.runtimes[spec.VolumeID]; current != nil {
-		m.mu.Unlock()
 		if current.stopping || current.state == RuntimeLeaseLost || current.state == RuntimeFailed {
+			m.mu.Unlock()
 			return ErrRuntimeStopping
 		}
 		if current.spec != spec {
+			m.mu.Unlock()
 			return ErrRuntimeConflict
 		}
 		if current.state == RuntimeActive {
+			m.mu.Unlock()
 			return nil
 		}
+		m.mu.Unlock()
 		return ErrRuntimeStopping
 	}
 	m.mu.Unlock()
@@ -340,7 +343,10 @@ func (m *DynamicVolumeRuntimeManager) Deactivate(ctx context.Context, volumeID s
 
 func (m *DynamicVolumeRuntimeManager) deactivateLocked(ctx context.Context, volumeID string, rt *managedRuntime) error {
 	m.mu.Lock()
-	if !rt.stopping { rt.stopping = true; rt.state = RuntimeStopping }
+	if !rt.stopping {
+		rt.stopping = true
+		if rt.state != RuntimeLeaseLost { rt.state = RuntimeStopping }
+	}
 	m.mu.Unlock()
 	if err := m.cfg.Gate.StopRequests(ctx, volumeID); err != nil {
 		return fmt.Errorf("stop BMPOOL03 DM request admission: %w", err)
