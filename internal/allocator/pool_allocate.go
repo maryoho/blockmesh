@@ -462,7 +462,7 @@ func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.
 	var records []DataRetireRecord
 	var keys, pageIDs []uint64
 	for _, item := range a.tree.Snapshot() {
-		if item.Key>>63 != 0 || item.Key < sb.Geometry.TotalBlocks { continue }
+		if item.Key < format.DynamicRetireIndexKeyStart || item.Key >= format.DynamicRetireIndexKeyLimit { continue }
 		page, readErr := a.store.ReadPage(item.Value)
 		if readErr != nil { return 0, fmt.Errorf("read external Arena page %d: %w", item.Value, readErr) }
 		if page.Type != DataRetireRecordPageType { continue }
