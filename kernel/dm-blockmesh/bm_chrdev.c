@@ -248,7 +248,7 @@ static void bm_finish_pending(struct bm_pending *p,
 			      u32 mapping_count)
 {
 	struct bio *bio = p->bio;
-	struct bm_bio_segment segments[BM_UAPI_MAX_BATCH];
+	struct bm_bio_segment *segments = NULL;
 	u16 code = le16_to_cpu(completion->code);
 	u64 request_end, cursor;
 	u32 i, nr_segments = 0;
@@ -286,6 +286,10 @@ static void bm_finish_pending(struct bm_pending *p,
 		goto io_error;
 	cursor += p->sector_offset;
 	request_end = cursor + bio_sectors(bio);
+
+	segments = kcalloc(mapping_count, sizeof(*segments), GFP_NOIO);
+	if (!segments)
+		goto io_error;
 
 	/* Validate and translate the complete vector before submitting any child. */
 	for (i = 0; i < mapping_count; i++) {
@@ -360,9 +364,11 @@ static void bm_finish_pending(struct bm_pending *p,
 		part->bi_iter.bi_sector = segments[i].sector;
 		submit_bio_noacct(part);
 	}
+	kfree(segments);
 	kfree(p);
 	return;
 io_error:
+	kfree(segments);
 	bio_io_error(bio);
 	kfree(p);
 }

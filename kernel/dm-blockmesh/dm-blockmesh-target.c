@@ -97,6 +97,13 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 			ret = -E2BIG;
 			goto fail;
 		}
+		/* Metadata discard retires whole 4MiB mappings. Do not silently
+		 * widen a partial discard into a full-block discard. */
+		if (bio_op(bio) == REQ_OP_DISCARD &&
+		    (sector_offset || bio_sectors(bio) % BM_UAPI_BLOCK_SECTORS)) {
+			ret = -EOPNOTSUPP;
+			goto fail;
+		}
 		block_count = (u32)blocks;
 		request.logical_start = cpu_to_le64(logical_block);
 		request.block_count = cpu_to_le32(block_count);
@@ -346,6 +353,14 @@ static void bm_status(struct dm_target *ti, status_type_t type,
 	       (unsigned long long)reader_epoch, (unsigned long long)root_generation,
 	       reader_open ? 1 : 0);
 }
+static void bm_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	(void)ti;
+	/* Logical discard is supported only at allocator-block granularity. */
+	limits->discard_granularity = BM_UAPI_BLOCK_SECTORS << SECTOR_SHIFT;
+	limits->discard_alignment = 0;
+}
+
 static int bm_iterate_devices(struct dm_target *ti, iterate_devices_callout_fn fn, void *data)
 {
 	struct bm_target *bm = ti->private;
@@ -409,6 +424,7 @@ static struct target_type bm_target = {
 	.name = "blockmesh", .version = {1, 0, 0}, .module = THIS_MODULE,
 	.ctr = bm_ctr, .dtr = bm_dtr, .map = bm_map, .end_io = bm_end_io,
 	.message = bm_message, .status = bm_status, .iterate_devices = bm_iterate_devices,
+	.io_hints = bm_io_hints,
 };
 static int __init bm_init(void)
 {
