@@ -347,11 +347,14 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 	if err = ctx.Err(); err != nil { return result, err }
 	if !ownerLease.Valid() { return result, errors.New("Owner lease lost before discard") }
 	if err = a.store.Refresh(); err != nil { return result, err }
+	sb, err = a.store.DynamicPoolSuperblock()
+	if err != nil { return result, err }
 	desc, err = a.store.DynamicPoolDescriptor()
 	if err != nil { return result, err }
 	if desc.OwnerEpoch != epoch.Epoch() || desc.VolumeID != ownerLease.Resource()[len("volume:"):] {
 		return result, errors.New("Volume Descriptor changed while waiting for discard AG lock")
 	}
+	if desc.MappingSequence == math.MaxUint64 { return result, errors.New("Mapping root generation exhausted") }
 	hash := IdempotencyHash(req.IdempotencyKey)
 	head, lookupErr := a.tree.Get(hash)
 	if lookupErr == nil {
