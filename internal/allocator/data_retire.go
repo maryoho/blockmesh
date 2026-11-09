@@ -130,6 +130,7 @@ func dataRetireRanges(physical []uint64, generation uint64, agSizeBlocks uint64)
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	out := make([]DataRetireRecord, 0)
 	for i := 0; i < len(ids); {
+		if i > 0 && ids[i] == ids[i-1] { return nil, ErrDataRetireRecord }
 		start := ids[i]
 		ag := uint32(start / agSizeBlocks)
 		end := i + 1
