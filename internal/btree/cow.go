@@ -480,13 +480,18 @@ func retiredPageIDs(oldPages,newPages []uint64) []uint64 {
  return retired
 }
 
-func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64, arenaPages []metastore.Page, extra []metastore.PageImage, supplied *metastore.Reservation) error {
+func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64, sequence, oldGeneration uint64, arenaPages []metastore.Page, extra []metastore.PageImage, supplied *metastore.Reservation, retiredExternal []uint64) error {
  pageCount:=countDirty(root)
+ oldPages = appendUniquePageIDs(oldPages, t.externalPages)
+ retiredSet := make(map[uint64]struct{}, len(retiredExternal))
+ for _, id := range retiredExternal { retiredSet[id] = struct{}{} }
+ retainedExternal := make([]uint64, 0, len(t.externalPages))
+ for _, id := range t.externalPages { if _, retire := retiredSet[id]; !retire { retainedExternal = append(retainedExternal, id) } }
  if pageCount==0 {
   rootID:=metastore.NoPage;if root!=nil {rootID=root.id}
   var newPages []uint64;if root!=nil {newPages=collectCowPages(root)}
   newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
-  newPages=append(newPages,t.externalPages...)
+  newPages=append(newPages,retainedExternal...)
   var err error
   committed:=false
   reservation:=supplied
@@ -518,7 +523,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
    if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages: %w",err)}
   }
   t.items=append([]Item(nil),items...);t.pages,t.root=newPages,rootID
-  t.externalPages=append(t.externalPages,externalPageIDs(arenaPages)...)
+  t.externalPages=append(retainedExternal,externalPageIDs(arenaPages)...)
   return nil
  }
  reservation:=supplied
@@ -545,7 +550,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
  rootID,pages,err:=persistCOWImages(root,cowIDs,&cursor,sequence);if err!=nil{return err}
  if cursor!=len(cowIDs){return fmt.Errorf("internal error: used %d of %d reserved COW pages",cursor,len(cowIDs))}
  newPages:=collectCowPages(root);newPages=retainOpaqueSubtreePages(root,oldPages,newPages)
- newPages=append(newPages,t.externalPages...)
+ newPages=append(newPages,retainedExternal...)
  for i:=range arenaPages {
   id:=ids[i]
   if supplied==nil {id=ids[pageCount+i];arenaPages[i].ID=id} else if arenaPages[i].ID!=id {return metastore.ErrInvalidPageSet}
@@ -589,7 +594,7 @@ func (t *Tree) publishCOWWithArenaPages(root *cowNode, items []Item, arenaPages 
 	return t.publishCOWWithReservedPages(root,items,arenaPages,extra,nil)
 }
 
-func (t *Tree) publishCOWWithReservedPages(root *cowNode, items []Item, arenaPages []metastore.Page, extra []metastore.PageImage, supplied *metastore.Reservation) error {
+func (t *Tree) publishCOWWithReservedPages(root *cowNode, items []Item, arenaPages []metastore.Page, extra []metastore.PageImage, supplied *metastore.Reservation, retiredExternal ...[]uint64) error {
 	sb := t.store.Superblock()
 	if sb.MappingSequence == ^uint64(0) {
 		return fmt.Errorf("B+Tree mapping sequence exhausted")
