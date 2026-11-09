@@ -579,7 +579,7 @@ func (t *Tree) publishCOWWithWAL(root *cowNode, items []Item, oldPages []uint64,
   if err=t.retireSuperseded(oldPages,newPages,oldGeneration);err!=nil{return fmt.Errorf("record retired B+Tree pages after WAL root publication: %w",err)}
  }
  t.items=append([]Item(nil),items...);t.root,t.pages=rootID,newPages
- t.externalPages=append(t.externalPages,externalPageIDs(arenaPages)...)
+ t.externalPages=append(retainedExternal,externalPageIDs(arenaPages)...)
  return nil
 }
 func (t *Tree) publishCOW(root *cowNode, items []Item) error {
