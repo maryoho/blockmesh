@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 	"math"
 	"sort"
 
@@ -162,7 +163,7 @@ func unreferencedPhysicalBlocks(tree *btree.Tree, logicalStart uint64, blockCoun
 }
 
 // PlanDynamicBitmapFree is the single-range compatibility wrapper.
-func PlanDynamicBitmapFree(r metastore.Device, sb format.DynamicSuperblock, ag uint32, startBlock uint64, count uint32) ([]metastore.PageImage, error) {
+func PlanDynamicBitmapFree(r io.ReaderAt, sb format.DynamicSuperblock, ag uint32, startBlock uint64, count uint32) ([]metastore.PageImage, error) {
 	return PlanDynamicBitmapFreeRanges(r, sb, ag, []DataRetireRecord{{AG:ag, PhysicalStart:startBlock, BlockCount:count}})
 }
 
@@ -170,7 +171,7 @@ func PlanDynamicBitmapFree(r metastore.Device, sb format.DynamicSuperblock, ag u
 // set of retired extents in the same AG. It validates every bit before clearing
 // any bit, rejects overlaps/double frees, and emits each touched bitmap page
 // exactly once plus the descriptor checksum/sequence page.
-func PlanDynamicBitmapFreeRanges(r metastore.Device, sb format.DynamicSuperblock, ag uint32, ranges []DataRetireRecord) ([]metastore.PageImage, error) {
+func PlanDynamicBitmapFreeRanges(r io.ReaderAt, sb format.DynamicSuperblock, ag uint32, ranges []DataRetireRecord) ([]metastore.PageImage, error) {
 	if r == nil || sb.Validate() != nil || len(ranges) == 0 { return nil, ErrDataRetireRecord }
 	g := sb.Geometry
 	agBlocks, err := g.AGBlocks(ag)
