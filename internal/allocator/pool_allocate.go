@@ -365,6 +365,7 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 	} else { return result, fmt.Errorf("lookup discard idempotency index: %w", lookupErr) }
 
 	keys := make([]uint64, 0, req.BlockCount)
+	var retiredCandidates []uint64
 	var firstPhysical uint64
 	foundPhysical := false
 	for i:=uint64(0); i<uint64(req.BlockCount); i++ {
@@ -372,14 +373,23 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 		physical, e := a.tree.Get(logical)
 		if e == nil {
 			keys = append(keys, logical)
+			retiredCandidates = append(retiredCandidates, physical)
 			if !foundPhysical { firstPhysical, foundPhysical = physical, true }
 		} else if !errors.Is(e, btree.ErrKeyNotFound) {
 			return result, fmt.Errorf("lookup discard logical block %d: %w", logical, e)
 		}
 	}
-	reservation, ids, err := a.tree.ReserveExternalPages(1)
-	if err != nil { return result, fmt.Errorf("reserve discard idempotency record page: %w", err) }
-	if len(ids) != 1 {
+	retiredCandidates = unreferencedPhysicalBlocks(a.tree, req.LogicalStart, req.BlockCount, retiredCandidates)
+	retireRecords, err := dataRetireRanges(retiredCandidates, desc.MappingSequence, sb.Geometry.AGSizeBlocks)
+	if err != nil { return result, fmt.Errorf("plan discard Data Retire ranges: %w", err) }
+	for _, retired := range retireRecords {
+		if retired.AG != desc.AG { return result, errors.New("discard source block belongs to another AG; cross-AG atomic retirement is not supported") }
+	}
+	retireRecords, err = reserveDataRetireKeys(a.tree, retireRecords)
+	if err != nil { return result, fmt.Errorf("reserve discard Data Retire index keys: %w", err) }
+	reservation, ids, err := a.tree.ReserveExternalPages(uint64(1+len(retireRecords)))
+	if err != nil { return result, fmt.Errorf("reserve discard idempotency and Data Retire pages: %w", err) }
+	if len(ids) != 1+len(retireRecords) {
 		_ = a.tree.AbortReservedArenaPages(reservation)
 		return result, metastore.ErrInvalidPageSet
 	}
@@ -393,8 +403,17 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 		Operation:req.Operation,OwnerEpoch:desc.OwnerEpoch}
 	page, err := BuildIdempotencyRecordPage(ids[0],desc.Generation+1,record)
 	if err != nil { return abort(err) }
-	if err = a.tree.DeleteBatchWithReservedArenaPages(keys, []btree.Item{{Key:hash,Value:ids[0]}},
-		reservation, []metastore.Page{page}, nil); err != nil {
+	arenaPages := make([]metastore.Page, 0, len(ids))
+	arenaPages = append(arenaPages, page)
+	updates := []btree.Item{{Key:hash,Value:ids[0]}}
+	for i, retired := range retireRecords {
+		retirePage, buildErr := BuildDataRetirePage(ids[i+1], desc.Generation+1, retired)
+		if buildErr != nil { return abort(buildErr) }
+		arenaPages = append(arenaPages, retirePage)
+		updates = append(updates, btree.Item{Key:retired.IndexKey, Value:ids[i+1]})
+	}
+	if err = a.tree.DeleteBatchWithReservedArenaPages(keys, updates,
+		reservation, arenaPages, nil); err != nil {
 		if isKnownPreCommitAllocationError(err) { return result, fmt.Errorf("publish discard transaction: %w",err) }
 		return result, fmt.Errorf("%w: publish discard transaction: %v",ErrAllocationOutcomeUnknown,err)
 	}
