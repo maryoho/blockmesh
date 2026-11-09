@@ -93,22 +93,26 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 	if spec.Mode != metastore.VolumeRuntimeReadWrite || spec.VolumeID == "" || spec.NodeID == "" || spec.BootID == "" {
 		return nil, errors.New("BMPOOL03 RW activation requires Volume, Node, Boot and RW mode")
 	}
+	closeOwnerOnError := func(cause error) (*Runtime,error) {
+		if owner==nil { return nil,cause }
+		if closeErr:=owner.Close();closeErr!=nil {
+			return &Runtime{Spec:spec,Owner:owner},errors.Join(cause,fmt.Errorf("retain Owner lease after failed close: %w",closeErr))
+		}
+		return nil,cause
+	}
 	if owner == nil || !owner.Valid() || owner.Epoch() == 0 || owner.VolumeID() != spec.VolumeID ||
 		owner.Resource() != "volume:"+spec.VolumeID || !owner.ReservationVerified() ||
 		!owner.PreviousOwnerFenced() || !owner.OldOwnerIODrained() {
-		if owner != nil { _ = owner.Close() }
-		return nil, ErrOwnerProof
+		return closeOwnerOnError(ErrOwnerProof)
 	}
 	record := owner.OwnerRecord()
 	if record.VolumeID != spec.VolumeID || record.NodeID != spec.NodeID || record.BootID != spec.BootID || record.Epoch != owner.Epoch() {
-		_ = owner.Close()
-		return nil, errors.New("P3 OwnerRecord identity does not match BMPOOL03 activation request")
+		return closeOwnerOnError(errors.New("P3 OwnerRecord identity does not match BMPOOL03 activation request"))
 	}
 
 	parent, err := b.cfg.OpenDevice(ctx, spec)
 	if err != nil {
-		_ = owner.Close()
-		return nil, fmt.Errorf("open parent Pool LUN: %w", err)
+		return closeOwnerOnError(fmt.Errorf("open parent Pool LUN: %w", err))
 	}
 	rt := &Runtime{Spec: spec, Parent: parent, Owner: owner, Committers: make(map[uint32]*wal.DynamicSharedCommitter)}
 	cleanup := func(cause error) (*Runtime, error) {
