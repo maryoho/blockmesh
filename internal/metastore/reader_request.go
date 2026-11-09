@@ -1,9 +1,3 @@
-// RequestSnapshot preserves the legacy ReaderSession interface. New code
-// that has a request context should use RequestSnapshotContext.
-func (s *ReaderSession) RequestSnapshot() (uint64,uint64,error) {
-	return s.RequestSnapshotContext(context.Background())
-}
-
 package metastore
 
 import (
@@ -12,6 +6,12 @@ import (
 	"fmt"
 	"time"
 )
+
+// RequestSnapshot preserves the legacy ReaderSession interface. New code
+// that has a request context should use RequestSnapshotContext.
+func (s *ReaderSession) RequestSnapshot() (uint64,uint64,error) {
+	return s.RequestSnapshotContext(context.Background())
+}
 
 func (t *ReaderTable) ValidateActive(slot uint32, nodeID, bootID string, epoch, rootGeneration uint64) error {
 	if t == nil { return errors.New("nil Reader Table") }
