@@ -153,7 +153,7 @@ func (t *Tree) Refresh() error {
 		return errors.New("cannot refresh B+Tree with outstanding metadata reservations")
 	}
 	if t.readerCoordinator!=nil {
-		unlock,err:=acquireReaderSet(t.readerCoordinator,t.store.Superblock().VolumeID)
+		unlock,err:=t.readerCoordinator.LockReaderSet(t.store.Superblock().VolumeID)
 		if err!=nil{return err}
 		defer unlock()
 	}
