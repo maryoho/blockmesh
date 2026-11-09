@@ -31,7 +31,7 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 	}
 
 	fingerprint := allocationFingerprint(req)
-	_, err := rt.Allocator.AllocateZeroPublishTxn(ctx, rt.Owner, allocator.AllocateRequest{
+	allocation, err := rt.Allocator.AllocateZeroPublishTxn(ctx, rt.Owner, allocator.AllocateRequest{
 		IdempotencyKey: req.IdempotencyKey,
 		Fingerprint: fingerprint,
 		LogicalStart: req.LogicalStart,
@@ -65,7 +65,7 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 		drainErr := p.manager.Deactivate(context.Background(), snapshot.Spec.VolumeID)
 		return Result{}, errors.Join(ErrFenced, drainErr)
 	}
-	return Result{RootGeneration: rt.Tree.RootGeneration()}, nil
+	return Result{Mapping: &uapi.Mapping{LogicalBlock: allocation.LogicalStart, PhysicalBlock: allocation.PhysicalStart, BlockCount: allocation.BlockCount}, RootGeneration: rt.Tree.RootGeneration()}, nil
 }
 
 // allocationFingerprint binds an idempotency key to the complete immutable
