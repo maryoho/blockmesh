@@ -288,6 +288,97 @@ func copyPhysicalBlock(ctx context.Context, dev DataDevice, source, destination 
 	return nil
 }
 
+
+ // DiscardTxn atomically removes logical mappings and publishes a durable
+ // idempotency record. Physical bitmap bits are deliberately retained: they
+ // may still be referenced by RO Readers pinned to an older RootGeneration.
+ // Physical reclamation is delegated to the Reader-generation-aware data
+ // retire collector and is never performed by this foreground transaction.
+func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, req AllocateRequest) (AllocateResult, error) {
+	var result AllocateResult
+	if a == nil || !a.dynamic || a.store == nil || a.tree == nil || a.locks == nil {
+		return result, ErrPoolAllocatorUnavailable
+	}
+	if ctx == nil || ownerLease == nil || !ownerLease.Valid() ||
+		req.IdempotencyKey == ([16]byte{}) || req.Fingerprint == ([32]byte{}) ||
+		req.BlockCount == 0 || req.Operation == 0 {
+		return result, ErrIdempotencyRecord
+	}
+	sb, err := a.store.DynamicPoolSuperblock()
+	if err != nil { return result, err }
+	desc, err := a.store.DynamicPoolDescriptor()
+	if err != nil { return result, err }
+	if ownerLease.Resource() != "volume:"+desc.VolumeID || !ownerLease.Valid() {
+		return result, errors.New("Owner lease does not match Volume Descriptor")
+	}
+	epoch, ok := ownerLease.(interface{ Epoch() uint64 })
+	if !ok || epoch.Epoch() != desc.OwnerEpoch || desc.OwnerEpoch == 0 {
+		return result, errors.New("Owner lease epoch does not match durable Volume Descriptor")
+	}
+	if req.LogicalStart >= uint64(1)<<63 || req.LogicalStart+uint64(req.BlockCount) > sb.Geometry.TotalBlocks {
+		return result, errors.New("discard logical range exceeds Pool capacity")
+	}
+	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", desc.AG))
+	if err != nil { return result, fmt.Errorf("acquire AG %d lock: %w", desc.AG, err) }
+	defer unlock()
+	if err = ctx.Err(); err != nil { return result, err }
+	if !ownerLease.Valid() { return result, errors.New("Owner lease lost before discard") }
+	if err = a.store.Refresh(); err != nil { return result, err }
+	desc, err = a.store.DynamicPoolDescriptor()
+	if err != nil { return result, err }
+	if desc.OwnerEpoch != epoch.Epoch() || desc.VolumeID != ownerLease.Resource()[len("volume:"):] {
+		return result, errors.New("Volume Descriptor changed while waiting for discard AG lock")
+	}
+	hash := IdempotencyHash(req.IdempotencyKey)
+	head, lookupErr := a.tree.Get(hash)
+	if lookupErr == nil {
+		record, found, e := LookupIdempotencyRecord(a.store, head, req.IdempotencyKey, req.Fingerprint)
+		if e != nil { return result, e }
+		if found {
+			return AllocateResult{LogicalStart:record.LogicalStart, PhysicalStart:record.PhysicalStart,
+				BlockCount:record.BlockCount, OwnerEpoch:record.OwnerEpoch, Replayed:true}, nil
+		}
+	} else if errors.Is(lookupErr, btree.ErrKeyNotFound) { head = 0
+	} else { return result, fmt.Errorf("lookup discard idempotency index: %w", lookupErr) }
+
+	keys := make([]uint64, 0, req.BlockCount)
+	var firstPhysical uint64
+	foundPhysical := false
+	for i:=uint64(0); i<uint64(req.BlockCount); i++ {
+		logical := req.LogicalStart+i
+		physical, e := a.tree.Get(logical)
+		if e == nil {
+			keys = append(keys, logical)
+			if !foundPhysical { firstPhysical, foundPhysical = physical, true }
+		} else if !errors.Is(e, btree.ErrKeyNotFound) {
+			return result, fmt.Errorf("lookup discard logical block %d: %w", logical, e)
+		}
+	}
+	reservation, ids, err := a.tree.ReserveExternalPages(1)
+	if err != nil { return result, fmt.Errorf("reserve discard idempotency record page: %w", err) }
+	if len(ids) != 1 {
+		_ = a.tree.AbortReservedArenaPages(reservation)
+		return result, metastore.ErrInvalidPageSet
+	}
+	abort := func(cause error) (AllocateResult,error) {
+		if e:=a.tree.AbortReservedArenaPages(reservation); e!=nil { return result, errors.Join(cause,e) }
+		return result,cause
+	}
+	if desc.Generation == math.MaxUint64 { return abort(errors.New("Volume metadata generation exhausted")) }
+	record := IdempotencyRecord{NextPage:head,Key:req.IdempotencyKey,Fingerprint:req.Fingerprint,
+		LogicalStart:req.LogicalStart,PhysicalStart:firstPhysical,BlockCount:req.BlockCount,
+		Operation:req.Operation,OwnerEpoch:desc.OwnerEpoch}
+	page, err := BuildIdempotencyRecordPage(ids[0],desc.Generation+1,record)
+	if err != nil { return abort(err) }
+	if err = a.tree.DeleteBatchWithReservedArenaPages(keys, []btree.Item{{Key:hash,Value:ids[0]}},
+		reservation, []metastore.Page{page}, nil); err != nil {
+		if isKnownPreCommitAllocationError(err) { return result, fmt.Errorf("publish discard transaction: %w",err) }
+		return result, fmt.Errorf("%w: publish discard transaction: %v",ErrAllocationOutcomeUnknown,err)
+	}
+	return AllocateResult{LogicalStart:req.LogicalStart,PhysicalStart:firstPhysical,
+		BlockCount:req.BlockCount,OwnerEpoch:desc.OwnerEpoch},nil
+}
+
 // poolDataView translates Pool-relative byte offsets into the backing data
 // device's DataStartSector-relative range.
 type poolDataView struct {
