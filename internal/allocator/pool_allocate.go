@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 
 	"blockmesh/internal/btree"
@@ -161,13 +162,18 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		head = 0
 	}
 
-	// Refuse accidental remapping. A logical address is published exactly once
-	// by this allocator; overwrite/COW semantics belong to a separate operation.
+	// Capture the currently published physical mapping. Mapped blocks are
+	// copied to the newly allocated extent before the root switch; unmapped
+	// blocks remain zero-filled. The original physical blocks stay allocated
+	// until the Reader-generation-aware data-retire collector reclaims them.
+	oldPhysical := make([]uint64, req.BlockCount)
+	oldMapped := make([]bool, req.BlockCount)
 	for i:=uint64(0); i<uint64(req.BlockCount); i++ {
-		if _, err := a.tree.Get(req.LogicalStart+i); err == nil {
-			return result, fmt.Errorf("%w: logical block %d", ErrLogicalRangeMapped, req.LogicalStart+i)
-		} else if !errors.Is(err, btree.ErrKeyNotFound) {
-			return result, fmt.Errorf("lookup logical block %d: %w", req.LogicalStart+i, err)
+		value, lookupErr := a.tree.Get(req.LogicalStart+i)
+		if lookupErr == nil {
+			oldPhysical[i], oldMapped[i] = value, true
+		} else if !errors.Is(lookupErr, btree.ErrKeyNotFound) {
+			return result, fmt.Errorf("lookup logical block %d: %w", req.LogicalStart+i, lookupErr)
 		}
 	}
 
@@ -198,6 +204,17 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	}
 	if err = ZeroBlocks(ctx, view, physical, req.BlockCount); err != nil {
 		return abortReservation(fmt.Errorf("zero newly allocated data blocks: %w", err))
+	}
+	for i, mapped := range oldMapped {
+		if !mapped { continue }
+		if err = copyPhysicalBlock(ctx, view, oldPhysical[i], physical+uint64(i)); err != nil {
+			return abortReservation(fmt.Errorf("COW copy logical block %d from physical block %d: %w", req.LogicalStart+uint64(i), oldPhysical[i], err))
+		}
+	}
+	// ZeroBlocks syncs the initial zero image; copied old data must also reach
+	// stable storage before the mapping transaction can become visible.
+	if err = view.Sync(); err != nil {
+		return abortReservation(fmt.Errorf("sync COW destination data: %w", err))
 	}
 	if !ownerLease.Valid() {
 		return abortReservation(errors.New("Volume Owner lease lost after data zeroing and before metadata publication"))
@@ -233,6 +250,42 @@ func isKnownPreCommitAllocationError(err error) bool {
 		errors.Is(err,metastore.ErrInvalidPageSet) ||
 		errors.Is(err,metastore.ErrArenaFull) ||
 		errors.Is(err,btree.ErrCorruptTree)
+}
+
+
+const cowCopyChunkSize = 1 << 20
+
+// copyPhysicalBlock preserves the full old 4MiB block before the original BIO
+// is redirected to the new extent. The DataView is fragmented but presents a
+// contiguous logical ReaderAt/WriterAt address space.
+func copyPhysicalBlock(ctx context.Context, dev DataDevice, source, destination uint64) error {
+	reader, ok := dev.(io.ReaderAt)
+	if !ok { return errors.New("COW requires a DataView implementing io.ReaderAt") }
+	if source > math.MaxUint64/format.BlockSize || destination > math.MaxUint64/format.BlockSize {
+		return errors.New("COW physical block offset overflow")
+	}
+	srcOff, dstOff := source*format.BlockSize, destination*format.BlockSize
+	if dev.Size() < 0 || srcOff > uint64(dev.Size()) || format.BlockSize > uint64(dev.Size())-srcOff ||
+		dstOff > uint64(dev.Size()) || format.BlockSize > uint64(dev.Size())-dstOff {
+		return errors.New("COW source or destination block exceeds DataView")
+	}
+	buf := make([]byte, cowCopyChunkSize)
+	for done := uint64(0); done < format.BlockSize; {
+		if err := ctx.Err(); err != nil { return err }
+		n := uint64(len(buf)); if format.BlockSize-done < n { n = format.BlockSize-done }
+		read, err := reader.ReadAt(buf[:int(n)], int64(srcOff+done))
+		if err != nil && !(errors.Is(err, io.EOF) && read == int(n)) { return err }
+		if read != int(n) { return io.ErrUnexpectedEOF }
+		written := 0
+		for written < int(n) {
+			m, writeErr := dev.WriteAt(buf[written:int(n)], int64(dstOff+done)+int64(written))
+			written += m
+			if writeErr != nil { return writeErr }
+			if m == 0 { return io.ErrShortWrite }
+		}
+		done += n
+	}
+	return nil
 }
 
 // poolDataView translates Pool-relative byte offsets into the backing data
