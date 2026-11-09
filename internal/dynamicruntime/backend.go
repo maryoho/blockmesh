@@ -229,11 +229,14 @@ func (b *Backend) OpenReadOnly(ctx context.Context, spec metastore.VolumeRuntime
 		return nil, nil, errors.New("BMPOOL03 RO activation requires SCSI PR ReaderRegistrar and distributed ReaderCoordinator")
 	}
 	leaseConfig := b.cfg.ReaderLease
-	if leaseConfig.Locker == nil {
-		sanlock, ok := b.cfg.Locker.(*lock.SanlockLocker)
-		if !ok { return nil, nil, errors.New("BMPOOL03 Reader lease requires the configured distributed SanlockLocker") }
-		leaseConfig.Locker = sanlock
+	sanlock, ok := b.cfg.Locker.(*lock.SanlockLocker)
+	if !ok || sanlock == nil {
+		return nil, nil, errors.New("BMPOOL03 Reader lease requires the configured distributed SanlockLocker")
 	}
+	if leaseConfig.Locker != nil && leaseConfig.Locker != sanlock {
+		return nil, nil, errors.New("BMPOOL03 Reader and WAL/Owner paths must use the same SanlockLocker instance")
+	}
+	leaseConfig.Locker = sanlock
 	if leaseConfig.ResourceFor == nil {
 		return nil, nil, errors.New("BMPOOL03 Reader lease resource resolver is required")
 	}
