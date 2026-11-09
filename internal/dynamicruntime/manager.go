@@ -32,7 +32,7 @@ type ReadOnlySession interface {
 	Slot() uint32
 	Epoch() uint64
 	RootGeneration() uint64
-	RequestSnapshot() (rootPage, rootGeneration uint64, err error)
+	RequestSnapshot(context.Context) (rootPage, rootGeneration uint64, err error)
 }
 
 // ReadOnlyRuntimeOpener must open BMPOOL03 views from one Bootstrap generation,
@@ -468,10 +468,10 @@ type RuntimeRequestSnapshot struct {
 // ResolveRequest performs the userspace half of BMPOOL03 request admission.
 // RW requests are checked against the durable BMDVOL03 OwnerEpoch. RO requests
 // must match the durable Reader slot and its exact pinned RootGeneration.
-func (m *DynamicVolumeRuntimeManager) ResolveRequest(volumeID,nodeID,bootID string,
+func (m *DynamicVolumeRuntimeManager) ResolveRequest(ctx context.Context,volumeID,nodeID,bootID string,
 	ownerEpoch,readerEpoch,rootGeneration uint64) (RuntimeRequestSnapshot,error) {
 	var out RuntimeRequestSnapshot
-	if m==nil || strings.TrimSpace(volumeID)=="" || strings.TrimSpace(nodeID)=="" || strings.TrimSpace(bootID)=="" {
+	if m==nil || ctx==nil || ctx.Err()!=nil || strings.TrimSpace(volumeID)=="" || strings.TrimSpace(nodeID)=="" || strings.TrimSpace(bootID)=="" {
 		return out,metastore.ErrRuntimeRequestInvalid
 	}
 	m.mu.Lock()
@@ -516,7 +516,7 @@ func (m *DynamicVolumeRuntimeManager) ResolveRequest(volumeID,nodeID,bootID stri
 			return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestInvalid
 		}
 		if rt.reader==nil || rt.reader.Epoch()!=readerEpoch { return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch }
-		root,generation,err:=rt.reader.RequestSnapshot()
+		root,generation,err:=rt.reader.RequestSnapshot(ctx)
 		if err!=nil {
 			if errors.Is(err,metastore.ErrReaderLeaseLost)||errors.Is(err,metastore.ErrReaderIdentity) {
 				return RuntimeRequestSnapshot{},errors.Join(metastore.ErrRuntimeRequestFenced,err)
