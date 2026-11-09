@@ -27,7 +27,7 @@ func TestDrainPublishesMapping(t *testing.T){
  q:=fixture(t,uapi.OpLookupBatch,5)
  n,w,e:=q.Drain(context.Background(),ProcessorFunc(func(_ context.Context,r uapi.Request)(Result,error){
   if r.RequestID!=5{t.Fatalf("request %+v",r)}
-  return Result{&uapi.Mapping{LogicalBlock:40,PhysicalBlock:900,BlockCount:2}},nil
+  return Result{Mapping:&uapi.Mapping{LogicalBlock:40,PhysicalBlock:900,BlockCount:2}},nil
  }),4)
  if e!=nil||n!=1||w!=1{t.Fatalf("n=%d w=%d err=%v",n,w,e)}
  if binary.LittleEndian.Uint32(q.CompletionControl[4:8])!=1{t.Fatal("completion tail not published")}
