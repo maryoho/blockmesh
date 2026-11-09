@@ -23,7 +23,7 @@ jobs:
         run: go vet ./...
       - name: Benchmark smoke
         run: |
-          go test ./internal/metaservice -run '^$' -bench 'Benchmark(QueueMemoryDrain|LookupContiguous)$' -benchtime=100ms -benchmem
+          go test ./internal/metaservice -run '^$' -bench 'Benchmark(QueueMemoryDrain|LookupContiguous|LookupMappingVector)$' -benchtime=100ms -benchmem
 
   kernel-build:
     runs-on: ubuntu-22.04
