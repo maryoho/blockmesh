@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"blockmesh/internal/allocator"
 	"blockmesh/internal/btree"
@@ -64,6 +65,7 @@ type Runtime struct {
 	Tree *btree.Tree
 	Allocator *allocator.PoolAllocator
 	Owner OwnerLease
+	closeMu sync.Mutex
 	closed bool
 }
 
@@ -204,14 +206,40 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 }
 
 func (r *Runtime) closeResources() error {
-	if r == nil || r.closed { return nil }
+	if r == nil { return nil }
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+	if r.closed { return nil }
+
+	// Keep the parent LUN and Owner lease pinned until both logical views have
+	// closed successfully. Stop at the first error so a caller can retry the
+	// exact unsafe boundary without releasing resources underneath live views.
+	if r.Metadata != nil {
+		if err := r.Metadata.Close(); err != nil {
+			return fmt.Errorf("close BMPOOL03 MetadataView: %w", err)
+		}
+		r.Metadata = nil
+	}
+	if r.Data != nil {
+		if err := r.Data.Close(); err != nil {
+			return fmt.Errorf("close BMPOOL03 DataView: %w", err)
+		}
+		r.Data = nil
+	}
+	if r.Owner != nil {
+		if err := r.Owner.Close(); err != nil {
+			return fmt.Errorf("release BMPOOL03 Owner lease: %w", err)
+		}
+		r.Owner = nil
+	}
+	if r.Parent != nil {
+		if err := r.Parent.Close(); err != nil {
+			return fmt.Errorf("close BMPOOL03 parent LUN: %w", err)
+		}
+		r.Parent = nil
+	}
 	r.closed = true
-	var errs []error
-	if r.Metadata != nil { errs = append(errs, r.Metadata.Close()) }
-	if r.Data != nil { errs = append(errs, r.Data.Close()) }
-	if r.Owner != nil { errs = append(errs, r.Owner.Close()) }
-	if r.Parent != nil { errs = append(errs, r.Parent.Close()) }
-	return errors.Join(errs...)
+	return nil
 }
 
 func (r *Runtime) Close() error { return r.closeResources() }
