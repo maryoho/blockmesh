@@ -73,8 +73,10 @@ func(q *QueueMemory) Drain(ctx context.Context,p Processor,limit int)(consumed,p
    enc,e:=result.Mapping.MarshalBinary();if e!=nil{err=e;return}
    off:=int(po);copy(q.Payload[off:off+uapi.MappingSize],enc);mc,pb=1,uapi.MappingSize
   }
+  responseGeneration:=req.RootGeneration
+  if code==uapi.CodeOK && result.RootGeneration!=0 { responseGeneration=result.RootGeneration }
   c:=uapi.Completion{Code:code,RequestID:req.RequestID,QueueGeneration:req.QueueGeneration,
-   OwnerEpoch:req.OwnerEpoch,RootGeneration:req.RootGeneration,PayloadOffset:po,MappingCount:mc,PayloadBytes:pb}
+   OwnerEpoch:req.OwnerEpoch,RootGeneration:responseGeneration,PayloadOffset:po,MappingCount:mc,PayloadBytes:pb}
   enc,e:=c.MarshalBinary();if e!=nil{err=e;return}
   off:=int(cs)*uapi.CompletionSize;copy(q.CompletionRing[off:off+uapi.CompletionSize],enc)
   // Completion is visible before request head acknowledges consumption.
