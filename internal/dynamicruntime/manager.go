@@ -195,12 +195,22 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 			return fmt.Errorf("acquire fenced P3 Owner lease: %w", err)
 		}
 		if owner == nil || !owner.Valid() || owner.Epoch() == 0 || owner.VolumeID() != spec.VolumeID {
-			if owner != nil { return errors.Join(ErrOwnerProof, owner.Close()) }
+			if owner==nil{return ErrOwnerProof}
+			closeErr:=owner.Close()
+			if closeErr!=nil {
+				rt.runtime=&Runtime{Spec:spec,Owner:owner}
+				return m.retainPartialActivation(ctx,rt,errors.Join(ErrOwnerProof,closeErr))
+			}
 			return ErrOwnerProof
 		}
 		monitor, ok := owner.(interface{ Lost() <-chan error })
 		if !ok || monitor.Lost() == nil {
-			return errors.Join(ErrOwnerMonitorRequired, owner.Close())
+			closeErr:=owner.Close()
+			if closeErr!=nil {
+				rt.runtime=&Runtime{Spec:spec,Owner:owner}
+				return m.retainPartialActivation(ctx,rt,errors.Join(ErrOwnerMonitorRequired,closeErr))
+			}
+			return ErrOwnerMonitorRequired
 		}
 		rt.runtime, openErr = m.cfg.OpenReadWrite.OpenReadWrite(ctx, spec, owner)
 		// Backend.OpenReadWrite takes ownership of owner and closes it on failure.
@@ -215,7 +225,12 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 			rt.runtime.Owner.VolumeID() != spec.VolumeID {
 			cause := errors.New("BMPOOL03 backend returned a runtime with mismatched spec or Owner lease")
 			if rt.runtime != nil { return m.retainPartialActivation(ctx, rt, cause) }
-			return errors.Join(cause, owner.Close())
+			closeErr:=owner.Close()
+			if closeErr!=nil {
+				rt.runtime=&Runtime{Spec:spec,Owner:owner}
+				return m.retainPartialActivation(ctx,rt,errors.Join(cause,closeErr))
+			}
+			return cause
 		}
 		if monitor, ok := rt.runtime.Owner.(interface{ Lost() <-chan error }); !ok || monitor.Lost() == nil {
 			return m.retainPartialActivation(ctx, rt, ErrOwnerMonitorRequired)
