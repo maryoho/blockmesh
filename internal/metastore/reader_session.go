@@ -64,6 +64,27 @@ func (s *ReaderSession) Heartbeat() error {
 	return s.table.Heartbeat(s.slot,s.nodeID,s.bootID,s.epoch,s.rootGeneration)
 }
 
+// Slot, Epoch and RootGeneration expose the identity pinned by this live
+// Reader session. They are consumed by the DM read-only admission adapter.
+func (s *ReaderSession) Slot() uint32 {
+	if s == nil { return 0 }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.slot
+}
+func (s *ReaderSession) Epoch() uint64 {
+	if s == nil { return 0 }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epoch
+}
+func (s *ReaderSession) RootGeneration() uint64 {
+	if s == nil { return 0 }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rootGeneration
+}
+
 // AdvanceGeneration must be called after Tree.Refresh and after all I/O that
 // can reference the previous root generation has completed.
 func (s *ReaderSession) AdvanceGeneration(newGeneration uint64, oldGenerationIOsDrained bool) error {
