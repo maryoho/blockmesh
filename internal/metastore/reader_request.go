@@ -1,6 +1,13 @@
+// RequestSnapshot preserves the legacy ReaderSession interface. New code
+// that has a request context should use RequestSnapshotContext.
+func (s *ReaderSession) RequestSnapshot() (uint64,uint64,error) {
+	return s.RequestSnapshotContext(context.Background())
+}
+
 package metastore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
