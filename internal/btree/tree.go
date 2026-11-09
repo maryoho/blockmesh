@@ -53,6 +53,7 @@ type Tree struct {
 	externalPageResolver ExternalPageResolver
 	externalPages []uint64
 	root   uint64
+	rootGeneration uint64
 }
 
 // Open loads and validates the published tree, then reconstructs the
@@ -71,7 +72,7 @@ func openTree(store *metastore.Store, allowPersistent bool, journals ...metastor
 	sb := store.Superblock()
 	if sb.LifecyclePages != 0 && !allowPersistent { return nil, ErrPersistentArenaRequired }
 	if sb.LifecyclePages == 0 && allowPersistent { return nil, metastore.ErrLifecycleUnformatted }
-	t := &Tree{store: store, root: sb.RootPage, retire: metastore.NewRetireQueue()}
+	t := &Tree{store: store, root: sb.RootPage, rootGeneration: sb.MappingSequence, retire: metastore.NewRetireQueue()}
 	if len(journals) == 1 {
 		if journals[0] == nil {
 			return nil, errors.New("nil WAL committer")
@@ -130,6 +131,15 @@ func OpenPersistentWithExternalPages(store *metastore.Store, journal metastore.C
 	return t, nil
 }
 
+// RootGeneration returns the MappingSequence of the root currently loaded
+// into this Tree. It is used to register and advance durable Reader pins.
+func (t *Tree) RootGeneration() uint64 {
+	if t == nil { return 0 }
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.rootGeneration
+}
+
 // Refresh reloads the currently published root for an online-consistent
 // reader. Call it before advancing that reader's durable Root Generation.
 // Refresh is intended for read-only trees; outstanding local reservations
@@ -157,6 +167,7 @@ func (t *Tree) Refresh() error {
 	persistent,err:=metastore.NewPersistentArena(t.store,live,t.journal,t.readerCoordinator)
 	if err!=nil{return fmt.Errorf("rebuild persistent Arena after refresh: %w",err)}
 	t.root=fresh.root
+	t.rootGeneration=t.store.Superblock().MappingSequence
 	t.items=append([]Item(nil),fresh.items...)
 	t.pages=append([]uint64(nil),fresh.pages...)
 	t.externalPages=external
