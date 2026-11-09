@@ -18,7 +18,8 @@ const (
 	dataRetireMagic = "BMDRET01"
 	dataRetireVersion = uint32(1)
 	dataRetirePayloadSize = 48
-	dataRetireNamespace = uint64(1) << 63
+	dataRetireNamespace = format.DynamicRetireIndexKeyStart
+	dataRetireIndexLimit = format.DynamicRetireIndexKeyLimit
 )
 
 var ErrDataRetireRecord = errors.New("invalid persistent Data Retire record")
@@ -35,7 +36,7 @@ type DataRetireRecord struct {
 }
 
 func (r DataRetireRecord) EncodePayload() ([]byte, error) {
-	if r.IndexKey == 0 || r.IndexKey >= dataRetireNamespace ||
+	if r.IndexKey == 0 || r.IndexKey < dataRetireNamespace || r.IndexKey >= dataRetireIndexLimit ||
 		r.BlockCount == 0 || r.PhysicalStart > math.MaxUint64-uint64(r.BlockCount) {
 		return nil, ErrDataRetireRecord
 	}
@@ -89,8 +90,8 @@ func dataRetireIndexKey(r DataRetireRecord, totalBlocks uint64) (uint64, error) 
 	binary.LittleEndian.PutUint64(b[12:20], r.PhysicalStart)
 	binary.LittleEndian.PutUint32(b[20:24], r.BlockCount)
 	h := crc32.Checksum(b[:], castagnoli)
-	available := dataRetireNamespace-totalBlocks
-	return totalBlocks + uint64(h)%available, nil
+	available := dataRetireIndexLimit-dataRetireNamespace
+	return dataRetireNamespace + uint64(h)%available, nil
 }
 
 func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord, totalBlocks uint64) ([]DataRetireRecord, error) {
@@ -111,7 +112,7 @@ func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord, totalBlo
 				return nil, err
 			}
 			key++
-			if key >= dataRetireNamespace { key = totalBlocks }
+			if key >= dataRetireIndexLimit { key = dataRetireNamespace }
 			if probes == (1<<20)-1 { return nil, ErrDataRetireRecord }
 		}
 		r.IndexKey = key
