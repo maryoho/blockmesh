@@ -201,11 +201,24 @@ func ResolveIdempotencyPages(store *metastore.Store, items []btree.Item) ([]uint
 	for _, item := range items {
 		if item.Key>>63 == 0 { continue }
 		if item.Value == 0 || item.Value == metastore.NoPage { return nil, ErrIdempotencyRecord }
+		page, err := store.ReadPage(item.Value)
+		if err != nil { return nil, err }
+		if page.Type == DataRetireRecordPageType {
+			record, decodeErr := DecodeDataRetireRecordPayload(page.Payload)
+			if decodeErr != nil || record.IndexKey != item.Key { return nil, ErrDataRetireRecord }
+			if _, ok := seen[item.Value]; ok { return nil, ErrDataRetireRecord }
+			seen[item.Value] = struct{}{}
+			live = append(live, item.Value)
+			continue
+		}
+		if page.Type != IdempotencyRecordPageType { return nil, ErrIdempotencyRecord }
 		for pageID := item.Value; pageID != 0; {
 			if pageID == metastore.NoPage { return nil, ErrIdempotencyRecord }
 			if _, ok := seen[pageID]; ok { return nil, ErrIdempotencyRecord }
-			page, err := store.ReadPage(pageID)
-			if err != nil { return nil, err }
+			if pageID != item.Value {
+				page, err = store.ReadPage(pageID)
+				if err != nil { return nil, err }
+			}
 			if page.Type != IdempotencyRecordPageType { return nil, ErrIdempotencyRecord }
 			record, err := DecodeIdempotencyRecordPayload(page.Payload)
 			if err != nil { return nil, err }
