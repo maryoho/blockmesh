@@ -78,6 +78,7 @@ type managedRuntime struct {
 	watchCancel context.CancelFunc
 	watchDone chan struct{}
 	failure error
+	lossCause error
 }
 
 type DynamicVolumeRuntimeManager struct {
@@ -86,6 +87,7 @@ type DynamicVolumeRuntimeManager struct {
 	runtimes map[string]*managedRuntime
 	volumeLocks map[string]*sync.Mutex
 	closed bool
+	inflight sync.WaitGroup
 }
 
 func NewDynamicVolumeRuntimeManager(cfg ManagerConfig) (*DynamicVolumeRuntimeManager, error) {
@@ -152,6 +154,10 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 		m.mu.Unlock()
 		return ErrManagerClosed
 	}
+	m.inflight.Add(1)
+	m.mu.Unlock()
+	defer m.inflight.Done()
+	m.mu.Lock()
 	if current := m.runtimes[spec.VolumeID]; current != nil {
 		m.mu.Unlock()
 		if current.stopping || current.state == RuntimeLeaseLost || current.state == RuntimeFailed {
@@ -221,7 +227,8 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 	if m.closed {
 		m.mu.Unlock()
 		watchCancel()
-		<-rt.watchDone // watcher is started below; avoid publishing into a closed manager.
+		if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
+		if rt.runtime != nil { _ = rt.runtime.Close() }
 		return ErrManagerClosed
 	}
 	m.runtimes[spec.VolumeID] = rt
@@ -307,7 +314,8 @@ func (m *DynamicVolumeRuntimeManager) failStop(rt *managedRuntime, cause error) 
 	m.mu.Lock()
 	rt.state = RuntimeLeaseLost
 	rt.enabled = false
-	rt.failure = errors.Join(cause, err)
+	rt.lossCause = cause
+	rt.failure = err
 	m.mu.Unlock()
 }
 
@@ -337,8 +345,11 @@ func (m *DynamicVolumeRuntimeManager) deactivateLocked(ctx context.Context, volu
 	if err := m.cfg.Gate.DrainRequests(ctx, volumeID); err != nil {
 		return fmt.Errorf("drain BMPOOL03 DM requests: %w", err)
 	}
-	if rt.failure != nil {
-		return fmt.Errorf("runtime lost its distributed lease; fail-stop result requires operator recovery before releasing resources: %w", rt.failure)
+	m.mu.Lock()
+	failStopErr := rt.failure
+	m.mu.Unlock()
+	if failStopErr != nil {
+		return fmt.Errorf("runtime lease loss could not be safely fail-stopped; retaining all resources: %w", failStopErr)
 	}
 	if rt.watchCancel != nil { rt.watchCancel() }
 	if rt.watchDone != nil { <-rt.watchDone }
@@ -369,6 +380,12 @@ func (m *DynamicVolumeRuntimeManager) Shutdown(ctx context.Context) error {
 	ids := make([]string, 0, len(m.runtimes))
 	for id := range m.runtimes { ids = append(ids, id) }
 	m.mu.Unlock()
+	wait := make(chan struct{})
+	go func() { m.inflight.Wait(); close(wait) }()
+	select {
+	case <-wait:
+	case <-ctx.Done(): return ctx.Err()
+	}
 	sort.Strings(ids)
 	var failures []error
 	for _, id := range ids {
