@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 
+	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
 )
 
