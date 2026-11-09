@@ -134,6 +134,26 @@ func TestBMPOOL03AllocateZeroPublishUsesDataViewBlockIDs(t *testing.T){
 }
 
 
+type failAtDynamicMetadataDevice struct {
+	wal.DynamicMetadataDevice
+	failAt int64
+	failed bool
+}
+
+func (d *failAtDynamicMetadataDevice) WriteAt(p []byte, off int64) (int, error) {
+	if !d.failed && off >= 0 && off <= d.failAt && int64(len(p)) > d.failAt-off {
+		prefix := int(d.failAt-off)
+		if prefix > 0 {
+			n, err := d.DynamicMetadataDevice.WriteAt(p[:prefix], off)
+			if err != nil { return n, err }
+			if n != prefix { return n, errors.New("short write before injected metadata failure") }
+		}
+		d.failed = true
+		return prefix, errors.New("injected WAL target apply failure")
+	}
+	return d.DynamicMetadataDevice.WriteAt(p, off)
+}
+
 type dynamicRetireReaderCoordinator struct { mu sync.Mutex }
 func (c *dynamicRetireReaderCoordinator) LockReaderSet(string) (func(), error) {
 	c.mu.Lock()
@@ -242,12 +262,12 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	// Inject a failure while the WAL applies the Bitmap after-image. The
 	// collector must report an ambiguous outcome; WAL recovery must replay both
 	// the queue deletion and Bitmap clear, never just one of them.
-	parent.failWriteAt = int64(g.BitmapOffset+format.PageSize)
+	fault := &failAtDynamicMetadataDevice{DynamicMetadataDevice:metadata, failAt:int64(g.BitmapOffset+format.PageSize)}
+	committer.Device = fault
 	if _, err = alloc.CollectDataRetired(context.Background(), lease, readers, true); !errors.Is(err, ErrAllocationOutcomeUnknown) {
 		t.Fatalf("Bitmap apply failure must be reported as ambiguous: %v", err)
 	}
-	if !parent.failed { t.Fatal("Bitmap after-image failure injection did not fire") }
-	parent.failWriteAt = -1
+	if !fault.failed { t.Fatal("Bitmap after-image failure injection did not fire") }
 	if err = committer.Recover(); err != nil { t.Fatalf("recover Data Retire/Bitmap WAL transaction: %v", err) }
 
 	// Reopen every metadata object after recovery. The committed WAL transaction
