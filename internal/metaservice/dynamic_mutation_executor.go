@@ -69,16 +69,12 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 }
 
 // allocationFingerprint binds an idempotency key to the complete immutable
-// request identity and allocation range. RequestID and QueueGeneration are
-// intentionally excluded so a transport retry can replay the same operation.
+// request identity and allocation range. OwnerEpoch, NodeID, BootID, RequestID and QueueGeneration are intentionally
+// excluded: the same durable operation must replay after an Owner takeover.
 func allocationFingerprint(req uapi.Request) [32]byte {
-	b := make([]byte, 0, 16*3+8*3+4+2)
+	b := make([]byte, 0, 16+8+4+2)
 	b = append(b, req.VolumeID[:]...)
-	b = append(b, req.NodeID[:]...)
-	b = append(b, req.BootID[:]...)
 	var word [8]byte
-	binary.LittleEndian.PutUint64(word[:], req.OwnerEpoch)
-	b = append(b, word[:]...)
 	binary.LittleEndian.PutUint64(word[:], req.LogicalStart)
 	b = append(b, word[:]...)
 	binary.LittleEndian.PutUint32(word[:4], req.BlockCount)
