@@ -343,6 +343,72 @@ func (t *Tree) putBatchWithArenaPages(updates []Item, arenaPages []metastore.Pag
 	return t.publishCOWWithReservedPages(root,next,arenaPages,extra,reservation)
 }
 
+
+ // DeleteBatchWithReservedArenaPages removes a set of logical mappings and
+ // publishes caller-supplied index updates, immutable Arena pages and the new
+ // root in one COW/WAL transaction. It is used by idempotent discard so the
+ // mapping deletion and replay record cannot become visible separately.
+func (t *Tree) DeleteBatchWithReservedArenaPages(keys []uint64, updates []Item,
+	reservation *metastore.Reservation, arenaPages []metastore.Page, extra []metastore.PageImage) error {
+	if t == nil || reservation == nil || len(arenaPages) == 0 {
+		return metastore.ErrInvalidPageSet
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	next := append([]Item(nil), t.items...)
+	var root *cowNode
+	if t.root != metastore.NoPage {
+		var err error
+		root, err = loadCowNode(t.store, t.root)
+		if err != nil { return err }
+	}
+	for _, key := range keys {
+		i := sort.Search(len(next), func(i int) bool { return next[i].Key >= key })
+		if i == len(next) || next[i].Key != key { continue }
+		if root == nil { return ErrCorruptTree }
+		var changed bool
+		var err error
+		root, changed, err = deleteCOW(t.store, root, key)
+		if err != nil { return err }
+		if !changed { return ErrCorruptTree }
+		next = append(next[:i], next[i+1:]...)
+		for root != nil && !root.leaf && len(root.children) == 1 {
+			child := root.children[0].node
+			if child == nil {
+				child, err = loadCowNode(t.store, root.children[0].id)
+				if err != nil { return err }
+			}
+			root = child
+		}
+	}
+	for _, update := range updates {
+		i := sort.Search(len(next), func(i int) bool { return next[i].Key >= update.Key })
+		if i < len(next) && next[i].Key == update.Key {
+			if next[i].Value == update.Value { continue }
+			next[i].Value = update.Value
+		} else {
+			next = append(next, Item{})
+			copy(next[i+1:], next[i:])
+			next[i] = update
+		}
+		if root == nil {
+			root = &cowNode{level: 0, leaf: true, dirty: true, items: []Item{{Key:update.Key, Value:update.Value}}}
+			continue
+		}
+		roots, changed, err := insertCOW(t.store, root, update.Key, update.Value)
+		if err != nil { return err }
+		if !changed { continue }
+		if len(roots) == 1 { root = roots[0] } else {
+			children := make([]cowChild, len(roots))
+			for i, child := range roots {
+				children[i] = cowChild{id:child.id, minKey:child.minKey(), level:child.level, node:child}
+			}
+			root = &cowNode{level:roots[0].level+1, dirty:true, children:children}
+		}
+	}
+	return t.publishCOWWithReservedPages(root, next, arenaPages, extra, reservation)
+}
+
 // Delete removes key and returns ErrKeyNotFound when it does not exist.
 func (t *Tree) Delete(key uint64) error {
 	t.mu.Lock()
