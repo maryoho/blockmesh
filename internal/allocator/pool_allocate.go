@@ -77,10 +77,12 @@ func NewDynamicPoolAllocator(store *metastore.Store, tree *btree.Tree, locks loc
 	return &PoolAllocator{store:store,tree:tree,locks:locks,data:data,dynamic:true},nil
 }
 
-// AllocateZeroPublishTxn performs the complete allocation protocol:
-// reserve bitmap range -> reserve immutable idempotency page -> zero data and
-// flush the data LUN -> atomically publish bitmap, Mapping, idempotency index,
-// record page, lifecycle state and Volume root in one AG WAL transaction.
+// AllocateZeroPublishTxn performs the BMPOOL03 write-COW protocol: reserve a
+// fresh physical range, zero it, copy each previously mapped full 4MiB block
+// into its replacement (unmapped blocks remain zero), sync the DataView, then
+// atomically publish Bitmap + Mapping + idempotency index + record + root in
+// one AG WAL transaction. The caller's original BIO is submitted only after
+// this function returns the committed replacement mapping.
 //
 // On an ambiguous WAL error the metadata reservation is intentionally kept
 // pinned. The caller must fence/stop this Volume, recover its AG WAL, and reopen
