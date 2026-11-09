@@ -126,15 +126,18 @@ func TestDynamicVolumeAllocatorGrowVolumeRelocatesLifecycle(t *testing.T){
 	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
 	committer:=dynamicVolumeTestCommitter{dev}
 	d,err:=a.AllocateVolume(0,dynamicVolumeDescriptor(sb,"grow-volume"),committer);if err!=nil{t.Fatal(err)}
-	lifecycle:=make([]byte,d.LifecyclePages*format.PageSize)
-	for i:=range lifecycle{lifecycle[i]=byte(i*13+5)}
-	if _,err=dev.WriteAt(lifecycle,int64(d.LifecycleStart*format.PageSize));err!=nil{t.Fatal(err)}
+	auxPages:=d.LifecyclePages+format.OwnerRecordPages+uint64(d.ReaderTablePages)
+	aux:=make([]byte,auxPages*format.PageSize)
+	for i:=range aux{aux[i]=byte(i*13+5)}
+	if _,err=dev.WriteAt(aux,int64(d.LifecycleStart*format.PageSize));err!=nil{t.Fatal(err)}
 	if err=dev.Sync();err!=nil{t.Fatal(err)}
 	next,_,err:=a.GrowVolume(0,16,committer);if err!=nil{t.Fatal(err)}
-	if next.ArenaPages!=d.ArenaPages+16||next.LifecycleStart!=d.LifecycleStart+16{t.Fatalf("unexpected grown descriptor: %+v",next)}
-	got:=make([]byte,len(lifecycle))
+	if next.ArenaPages!=d.ArenaPages+16||next.LifecycleStart!=d.LifecycleStart+16||
+		next.OwnerRecordStart!=d.OwnerRecordStart+16||next.ReaderTableStart!=d.ReaderTableStart+16||
+		next.ReaderTablePages!=d.ReaderTablePages{t.Fatalf("unexpected grown descriptor: old=%+v next=%+v",d,next)}
+	got:=make([]byte,len(aux))
 	if _,err=dev.ReadAt(got,int64(next.LifecycleStart*format.PageSize));err!=nil{t.Fatal(err)}
-	if string(got)!=string(lifecycle){t.Fatal("Lifecycle pages changed during Arena growth")}
+	if string(got)!=string(aux){t.Fatal("Lifecycle/OwnerRecord/ReaderTable pages changed during Arena growth")}
 	if _,err=OpenDynamicPoolVolume(dev,sb,0,"grow-volume");err!=nil{t.Fatalf("reopen grown Volume: %v",err)}
 }
 
