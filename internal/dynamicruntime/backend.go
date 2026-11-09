@@ -12,6 +12,7 @@ import (
 	"blockmesh/internal/allocator"
 	"blockmesh/internal/btree"
 	"blockmesh/internal/device"
+	"blockmesh/internal/fence"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
 	"blockmesh/internal/metastore"
@@ -47,6 +48,9 @@ type Config struct {
 	OpenDevice func(context.Context, metastore.VolumeRuntimeSpec) (device.Device, error)
 	Locker lock.DistributedLocker
 	WALResourceForAG func(poolUUID [16]byte, ag uint32) string
+	ReaderLease volume.ReaderLeaseConfig
+	ReaderRegistrar fence.ReaderRegistrar
+	ReaderCoordinator metastore.ReaderCoordinator
 }
 
 // Runtime owns every object opened from one Bootstrap Extent Map generation.
@@ -203,6 +207,124 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 		return cleanup(errors.New("BMDVOL03 OwnerEpoch publication did not match the live fenced Owner lease"))
 	}
 	return rt, nil
+}
+
+// OpenReadOnly opens BMPOOL03 metadata without acquiring the exclusive
+// Owner resource or replaying WAL. A live Reader session pins the committed
+// MappingSequence before the Runtime is returned to the manager.
+func (b *Backend) OpenReadOnly(ctx context.Context, spec metastore.VolumeRuntimeSpec,
+	onLeaseLost func(error)) (_ *Runtime, _ ReadOnlySession, retErr error) {
+	if b == nil || ctx == nil || spec.Mode != metastore.VolumeRuntimeReadOnly ||
+		spec.VolumeID == "" || spec.NodeID == "" || spec.BootID == "" ||
+		spec.ReaderEpoch == 0 || onLeaseLost == nil {
+		return nil, nil, errors.New("BMPOOL03 RO activation requires backend, context, identity, ReaderEpoch and fail-stop callback")
+	}
+	if b.cfg.ReaderRegistrar == nil || b.cfg.ReaderCoordinator == nil {
+		return nil, nil, errors.New("BMPOOL03 RO activation requires SCSI PR ReaderRegistrar and distributed ReaderCoordinator")
+	}
+	leaseConfig := b.cfg.ReaderLease
+	if leaseConfig.Locker == nil {
+		sanlock, ok := b.cfg.Locker.(*lock.SanlockLocker)
+		if !ok { return nil, nil, errors.New("BMPOOL03 Reader lease requires the configured distributed SanlockLocker") }
+		leaseConfig.Locker = sanlock
+	}
+	if leaseConfig.ResourceFor == nil {
+		return nil, nil, errors.New("BMPOOL03 Reader lease resource resolver is required")
+	}
+
+	parent, err := b.cfg.OpenDevice(ctx, spec)
+	if err != nil { return nil, nil, fmt.Errorf("open parent Pool LUN for RO: %w", err) }
+	rt := &Runtime{Spec: spec, Parent: parent, Committers: make(map[uint32]*wal.DynamicSharedCommitter)}
+	fail := func(cause error, reader *metastore.ReaderSession) (*Runtime, ReadOnlySession, error) {
+		var cleanup []error
+		if reader != nil {
+			if e := reader.CloseDrained(context.WithoutCancel(ctx), true); e != nil {
+				cleanup = append(cleanup, fmt.Errorf("close partially joined Reader session: %w", e))
+			}
+		}
+		if e := rt.Close(); e != nil { cleanup = append(cleanup, fmt.Errorf("close partial BMPOOL03 RO Runtime: %w", e)) }
+		if len(cleanup) != 0 { return rt, reader, errors.Join(cause, errors.Join(cleanup...)) }
+		return nil, nil, cause
+	}
+	if err := ctx.Err(); err != nil { return fail(err, nil) }
+	bootstrap, err := poolspace.OpenBootstrap(parent)
+	if err != nil { return fail(fmt.Errorf("open BMPOOL03 Bootstrap for RO: %w", err), nil) }
+	rt.Bootstrap = bootstrap
+	record := bootstrap.Record()
+	if record.PoolUUID == ([16]byte{}) || uint64(parent.Size()) != record.DeviceBytes {
+		return fail(errors.New("BMPOOL03 RO Bootstrap identity or device capacity is invalid"), nil)
+	}
+	metadata, data, generation, err := bootstrap.OpenViews()
+	if err != nil { return fail(fmt.Errorf("open BMPOOL03 RO views: %w", err), nil) }
+	rt.Metadata, rt.Data = metadata, data
+	if metadata == nil || data == nil || metadata.Generation() != generation ||
+		data.Generation() != generation || generation != record.Generation {
+		return fail(ErrViewMismatch, nil)
+	}
+	sb, err := allocator.OpenDynamicSuperblockPair(metadata)
+	if err != nil { return fail(fmt.Errorf("open BMPOOL03 RO Superblock: %w", err), nil) }
+	if sb.PoolUUID != record.PoolUUID || sb.ViewGeneration != generation ||
+		uint64(metadata.Size()) < sb.Geometry.MetadataBytes || uint64(data.Size()) < sb.Geometry.DataBytes {
+		return fail(errors.New("BMPOOL03 RO Superblock, views and Bootstrap geometry disagree"), nil)
+	}
+	rt.Superblock = sb
+	store, err := metastore.OpenDynamicPoolVolume(metadata, sb, spec.VolumeIndex, spec.VolumeID)
+	if err != nil { return fail(fmt.Errorf("open BMPOOL03 RO Volume Descriptor: %w", err), nil) }
+	rt.Store = store
+	desc, err := store.DynamicPoolDescriptor()
+	if err != nil { return fail(err, nil) }
+	if desc.OwnerEpoch == 0 { return fail(errors.New("BMPOOL03 RO Volume has no published OwnerEpoch"), nil) }
+
+	resource := b.cfg.WALResourceForAG(sb.PoolUUID, desc.AG)
+	if resource == "" { return fail(errors.New("BMPOOL03 RO AG WAL resource is empty"), nil) }
+	committer, err := wal.NewDynamicSharedCommitter(metadata, sb, desc.AG, b.cfg.Locker, resource)
+	if err != nil { return fail(fmt.Errorf("create BMPOOL03 RO Reader Table committer: %w", err), nil) }
+	rt.Committers[desc.AG] = committer
+	rt.Committer = committer
+	start, pages, err := store.ReaderTableRange()
+	if err != nil { return fail(fmt.Errorf("resolve BMPOOL03 Reader Table range: %w", err), nil) }
+	readerTable, err := metastore.NewReaderTable(store, start, pages, committer, b.cfg.ReaderCoordinator)
+	if err != nil { return fail(fmt.Errorf("open BMPOOL03 Reader Table: %w", err), nil) }
+	reader, err := metastore.JoinReaderSession(ctx, readerTable, leaseConfig, b.cfg.ReaderRegistrar,
+		spec.ReaderSlot, spec.NodeID, spec.BootID, spec.ReaderEpoch, onLeaseLost)
+	if err != nil { return fail(fmt.Errorf("join BMPOOL03 Reader session: %w", err), nil) }
+
+	tree, err := btree.OpenPersistentWithExternalPages(store, committer, allocator.ResolveIdempotencyPages, b.cfg.ReaderCoordinator)
+	if err != nil { return fail(fmt.Errorf("open BMPOOL03 read-only B+Tree: %w", err), reader) }
+	rt.Tree = tree
+	// Registration may race a concurrent root publication. Bring the loaded
+	// tree and durable Reader pin to the same generation before returning.
+	for {
+		if err := ctx.Err(); err != nil { return fail(err, reader) }
+		treeGeneration := tree.RootGeneration()
+		readerGeneration := reader.RootGeneration()
+		if treeGeneration < readerGeneration {
+			if err := tree.Refresh(); err != nil { return fail(fmt.Errorf("refresh BMPOOL03 RO tree to Reader generation: %w", err), reader) }
+			continue
+		}
+		if treeGeneration == readerGeneration { break }
+		if err := reader.AdvanceGeneration(treeGeneration, true); err != nil {
+			if errors.Is(err, metastore.ErrReaderGeneration) { 
+				if refreshErr := tree.Refresh(); refreshErr != nil { return fail(refreshErr, reader) }
+				continue
+			}
+			return fail(fmt.Errorf("advance BMPOOL03 Reader pin to loaded tree generation: %w", err), reader)
+		}
+	}
+	rt.Descriptor, err = store.DynamicPoolDescriptor()
+	if err != nil { return fail(err, reader) }
+	return rt, reader, nil
+}
+
+// ReadOnlyOpener binds Reader sanlock lease loss directly to the supplied
+// RequestGate. The callback must synchronously close and drain the DM read gate.
+func (b *Backend) ReadOnlyOpener(gate RequestGate) ReadOnlyRuntimeOpener {
+	return func(ctx context.Context, spec metastore.VolumeRuntimeSpec) (*Runtime, ReadOnlySession, error) {
+		if gate == nil { return nil, nil, errors.New("BMPOOL03 RO RequestGate is required") }
+		return b.OpenReadOnly(ctx, spec, func(cause error) {
+			_ = gate.FailStop(context.Background(), spec, cause)
+		})
+	}
 }
 
 func (r *Runtime) closeResources() error {
