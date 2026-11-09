@@ -25,17 +25,6 @@ func (t *ReaderTable) ValidateActive(slot uint32, nodeID, bootID string, epoch, 
 	return nil
 }
 
-func (s *ReaderSession) RequestSnapshot() (rootPage, rootGeneration uint64, err error) {
-	if s == nil { return 0, 0, errors.New("nil Reader Session") }
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err = s.checkLeaseLocked(); err != nil { return 0, 0, err }
-	if err = s.table.ValidateActive(s.slot, s.nodeID, s.bootID, s.epoch, s.rootGeneration); err != nil {
-		return 0, 0, err
-	}
-	return s.rootPage, s.rootGeneration, nil
-}
-
 // AdvanceRootGeneration requires the caller to refresh the B+Tree and drain
 // all old-generation I/O before moving the durable Reader Table forward.
 func (s *ReaderSession) AdvanceRootGeneration(rootPage, newGeneration uint64, oldGenerationIOsDrained bool) error {
