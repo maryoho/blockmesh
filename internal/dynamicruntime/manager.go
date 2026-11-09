@@ -202,9 +202,15 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 		if openErr != nil {
 			return fmt.Errorf("open BMPOOL03 RW runtime: %w", openErr)
 		}
-		if rt.runtime == nil || rt.runtime.Owner == nil || rt.runtime.Owner.Epoch() != owner.Epoch() {
+		if rt.runtime == nil || rt.runtime.Owner == nil ||
+			rt.runtime.Spec != spec || rt.runtime.Owner.Epoch() != owner.Epoch() ||
+			rt.runtime.Owner.VolumeID() != spec.VolumeID {
 			if rt.runtime != nil { _ = rt.runtime.Close() } else { _ = owner.Close() }
-			return errors.New("BMPOOL03 backend returned a runtime without the acquired Owner lease")
+			return errors.New("BMPOOL03 backend returned a runtime with mismatched spec or Owner lease")
+		}
+		if monitor, ok := rt.runtime.Owner.(interface{ Lost() <-chan error }); !ok || monitor.Lost() == nil {
+			_ = rt.runtime.Close()
+			return ErrOwnerMonitorRequired
 		}
 	case metastore.VolumeRuntimeReadOnly:
 		if m.cfg.OpenReadOnly == nil {
@@ -216,7 +222,7 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 			if rt.runtime != nil { _ = rt.runtime.Close() }
 			return fmt.Errorf("open BMPOOL03 RO runtime: %w", openErr)
 		}
-		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil {
+		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil || rt.runtime.Spec != spec {
 			if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
 			if rt.runtime != nil { _ = rt.runtime.Close() }
 			return errors.New("BMPOOL03 RO opener returned nil Runtime or Reader session")
@@ -239,6 +245,9 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 	m.mu.Unlock()
 	go m.watchRuntime(watchCtx, rt)
 
+	m.mu.Lock()
+	rt.state = RuntimeAdmitting
+	m.mu.Unlock()
 	if err := m.cfg.Gate.EnableRequestsGuarded(ctx, spec, rt.runtime, check); err != nil {
 		cleanupErr := m.deactivateLocked(ctx, spec.VolumeID, rt)
 		return errors.Join(fmt.Errorf("admit BMPOOL03 DM requests: %w", err), cleanupErr)
