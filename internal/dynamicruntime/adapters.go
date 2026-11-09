@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"blockmesh/internal/metastore"
+	"blockmesh/internal/lock"
 	"blockmesh/internal/volume"
 )
 
