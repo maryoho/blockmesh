@@ -198,13 +198,9 @@ func ResolveIdempotencyPages(store *metastore.Store, items []btree.Item) ([]uint
 	if store == nil { return nil, ErrIdempotencyRecord }
 	seen := make(map[uint64]struct{})
 	var live []uint64
-	dataRetireFloor := ^uint64(0)
-	if dynamicSB, dynamicErr := store.DynamicPoolSuperblock(); dynamicErr == nil {
-		dataRetireFloor = dynamicSB.Geometry.TotalBlocks
-	}
 	for _, item := range items {
 		isIdempotency := item.Key>>63 != 0
-		isDataRetire := !isIdempotency && item.Key >= dataRetireFloor
+		isDataRetire := !isIdempotency && item.Key >= format.DynamicRetireIndexKeyStart && item.Key < format.DynamicRetireIndexKeyLimit
 		if !isIdempotency && !isDataRetire { continue }
 		if item.Value == 0 || item.Value == metastore.NoPage { return nil, ErrIdempotencyRecord }
 		page, err := store.ReadPage(item.Value)
