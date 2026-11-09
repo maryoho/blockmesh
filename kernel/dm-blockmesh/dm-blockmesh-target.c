@@ -203,7 +203,7 @@ static int bm_owner_fence(struct bm_target *bm, const char *arg, const char *ins
 	if (ret || !instance) return -EINVAL;
 	if (instance != bm->instance_id) return -ESTALE;
 	spin_lock_irqsave(&bm->state_lock, flags);
-	if (epoch < bm->owner_epoch) ret = -ESTALE;
+	if (bm->read_only || epoch < bm->owner_epoch) ret = -ESTALE;
 	else {
 		bm->gate_open = false;
 		bm->reader_gate_open = false;
