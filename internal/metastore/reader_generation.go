@@ -293,6 +293,13 @@ func (t *ReaderTable) SafeGenerationContext(ctx context.Context) (uint64,error) 
 	return t.safeGenerationLocked()
 }
 
+// HasCoordinator reports whether Reader membership operations are protected
+// by a configured Reader-set barrier. Production shared-SAN reclamation must
+// not proceed with an uncoordinated table.
+func (t *ReaderTable) HasCoordinator() bool {
+	return t != nil && t.coordinator != nil
+}
+
 // MatchesStore prevents accidentally using another Volume's Reader table to
 // authorize physical reclamation.
 func (t *ReaderTable) MatchesStore(store *Store) bool {
