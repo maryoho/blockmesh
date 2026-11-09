@@ -160,20 +160,22 @@ func unreferencedPhysicalBlocks(tree *btree.Tree, logicalStart uint64, blockCoun
 	return out
 }
 
-// PlanDynamicBitmapFree produces redo images that clear a previously allocated
-// extent. Every bit must currently be set; a double-free or cross-AG request
-// fails closed. The descriptor checksum and sequence are updated with bitmap
-// pages in the same WAL transaction.
+// PlanDynamicBitmapFree is the single-range compatibility wrapper.
 func PlanDynamicBitmapFree(r metastore.Device, sb format.DynamicSuperblock, ag uint32, startBlock uint64, count uint32) ([]metastore.PageImage, error) {
-	if r == nil || sb.Validate() != nil || count == 0 { return nil, ErrDataRetireRecord }
+	return PlanDynamicBitmapFreeRanges(r, sb, ag, []DataRetireRecord{{AG:ag, PhysicalStart:startBlock, BlockCount:count}})
+}
+
+// PlanDynamicBitmapFreeRanges creates one consistent bitmap after-image for a
+// set of retired extents in the same AG. It validates every bit before clearing
+// any bit, rejects overlaps/double frees, and emits each touched bitmap page
+// exactly once plus the descriptor checksum/sequence page.
+func PlanDynamicBitmapFreeRanges(r metastore.Device, sb format.DynamicSuperblock, ag uint32, ranges []DataRetireRecord) ([]metastore.PageImage, error) {
+	if r == nil || sb.Validate() != nil || len(ranges) == 0 { return nil, ErrDataRetireRecord }
 	g := sb.Geometry
 	agBlocks, err := g.AGBlocks(ag)
 	if err != nil { return nil, err }
 	agStart, err := g.AGStartBlock(ag)
 	if err != nil { return nil, err }
-	if startBlock < agStart || startBlock-agStart > agBlocks || uint64(count) > agBlocks-(startBlock-agStart) {
-		return nil, ErrDataRetireRecord
-	}
 	base := g.BitmapOffset + uint64(ag)*g.BitmapStride
 	desc := make([]byte, format.PageSize)
 	if err := readAtFull(r, desc, int64(base)); err != nil { return nil, err }
@@ -186,19 +188,29 @@ func PlanDynamicBitmapFree(r metastore.Device, sb format.DynamicSuperblock, ag u
 	if crc32.Checksum(bitmap, castagnoli) != binary.LittleEndian.Uint32(desc[24:28]) {
 		return nil, ErrDataRetireRecord
 	}
-	local := startBlock-agStart
-	for i := uint64(0); i < uint64(count); i++ {
-		bit := local+i
-		if bitmap[bit/8]&(1<<(bit%8)) == 0 { return nil, ErrDataRetireRecord }
+	touched := make(map[uint64]struct{})
+	seen := make(map[uint64]struct{})
+	for _, retired := range ranges {
+		if retired.AG != ag || retired.BlockCount == 0 || retired.PhysicalStart < agStart ||
+			retired.PhysicalStart-agStart > agBlocks ||
+			uint64(retired.BlockCount) > agBlocks-(retired.PhysicalStart-agStart) {
+			return nil, ErrDataRetireRecord
+		}
+		local := retired.PhysicalStart-agStart
+		for i := uint64(0); i < uint64(retired.BlockCount); i++ {
+			bit := local+i
+			if _, duplicate := seen[bit]; duplicate { return nil, ErrDataRetireRecord }
+			seen[bit] = struct{}{}
+			if bitmap[bit/8]&(1<<(bit%8)) == 0 { return nil, ErrDataRetireRecord }
+			touched[bit/(format.PageSize*8)] = struct{}{}
+		}
 	}
-	for i := uint64(0); i < uint64(count); i++ {
-		bit := local+i
-		bitmap[bit/8] &^= 1 << (bit%8)
-	}
-	firstPage := local/(format.PageSize*8)
-	lastPage := (local+uint64(count)-1)/(format.PageSize*8)
-	images := make([]metastore.PageImage, 0, int(lastPage-firstPage+2))
-	for p := firstPage; p <= lastPage; p++ {
+	for bit := range seen { bitmap[bit/8] &^= 1 << (bit%8) }
+	pages := make([]uint64, 0, len(touched))
+	for page := range touched { pages = append(pages, page) }
+	sort.Slice(pages, func(i, j int) bool { return pages[i] < pages[j] })
+	images := make([]metastore.PageImage, 0, len(pages)+1)
+	for _, p := range pages {
 		off := base+format.PageSize+p*format.PageSize
 		page := append([]byte(nil), bitmap[p*format.PageSize:(p+1)*format.PageSize]...)
 		images = append(images, metastore.PageImage{Offset:off, Data:page})
