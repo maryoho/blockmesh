@@ -113,7 +113,8 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 	rt := &Runtime{Spec: spec, Parent: parent, Owner: owner, Committers: make(map[uint32]*wal.DynamicSharedCommitter)}
 	cleanup := func(cause error) (*Runtime, error) {
 		closeErr := rt.closeResources()
-		return nil, errors.Join(cause, closeErr)
+		if closeErr != nil { return rt, errors.Join(cause, closeErr) }
+		return nil, cause
 	}
 	if err := ctx.Err(); err != nil { return cleanup(err) }
 
