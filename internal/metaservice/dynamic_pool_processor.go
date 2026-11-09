@@ -52,9 +52,7 @@ func (p *DynamicPoolRuntimeProcessor) Process(ctx context.Context,req uapi.Reque
 	case uapi.OpAllocateZeroPublish:
 		return p.executeAllocateZeroPublish(ctx, req, snapshot)
 	case uapi.OpDiscard:
-		// Discard needs a separately journaled unmap/retire transaction. It
-		// must not be emulated by clearing the bitmap or by zeroing in place.
-		return Result{}, errors.Join(ErrInvalid, ErrMutationPathUnavailable)
+		return p.executeDiscard(ctx, req, snapshot)
 	case uapi.OpFlush:
 		if snapshot.Spec.Mode!=metastore.VolumeRuntimeReadWrite||snapshot.OwnerEpoch!=req.OwnerEpoch {
 			return Result{},ErrFenced
