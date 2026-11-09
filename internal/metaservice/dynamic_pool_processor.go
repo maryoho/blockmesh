@@ -28,7 +28,7 @@ func (p *DynamicPoolRuntimeProcessor) Process(ctx context.Context,req uapi.Reque
 	if err:=ctx.Err();err!=nil{return Result{},err}
 	if err:=req.Validate();err!=nil{return Result{},fmt.Errorf("%w: %v",ErrInvalid,err)}
 	volumeID,nodeID,bootID:=uuidText(req.VolumeID),uuidText(req.NodeID),uuidText(req.BootID)
-	snapshot,err:=p.manager.ResolveRequest(volumeID,nodeID,bootID,req.OwnerEpoch,req.ReaderEpoch,req.RootGeneration)
+	snapshot,err:=p.manager.ResolveRequest(ctx,volumeID,nodeID,bootID,req.OwnerEpoch,req.ReaderEpoch,req.RootGeneration)
 	if err!=nil {
 		switch {
 		case errors.Is(err,metastore.ErrRuntimeRequestFenced),errors.Is(err,metastore.ErrVolumeRuntimeStopping):
