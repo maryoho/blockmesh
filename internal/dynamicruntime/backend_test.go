@@ -74,6 +74,7 @@ func TestOpenReadWriteRejectsReadOnlySpec(t *testing.T) {
 		},
 		Locker: testDistributedLocker{},
 		WALResourceForAG: func([16]byte, uint32) string { return "pool:uuid:ag:0:wal" },
+		ReaderCoordinator: testReaderCoordinator{},
 	})
 	if err != nil { t.Fatal(err) }
 	spec := metastore.VolumeRuntimeSpec{
