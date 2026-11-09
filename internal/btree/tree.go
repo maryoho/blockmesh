@@ -137,6 +137,19 @@ func OpenPersistentWithExternalPages(store *metastore.Store, journal metastore.C
 	return t, nil
 }
 
+// CollectRetiredWithReaders releases metadata Arena pages made unreachable
+// by COW root changes, including deleted external Data Retire record pages.
+// It uses the same durable Reader Table generation proof as physical data
+// reclamation and the PersistentArena lifecycle WAL transaction.
+func (t *Tree) CollectRetiredWithReaders(readers *metastore.ReaderTable, ioDrained bool) (int, error) {
+	if t == nil { return 0, errors.New("nil B+Tree") }
+	t.mu.RLock()
+	persistent := t.persistentArena
+	t.mu.RUnlock()
+	if persistent == nil { return 0, ErrPersistentArenaRequired }
+	return persistent.CollectWithReaders(readers, ioDrained)
+}
+
 // RootGeneration returns the MappingSequence of the root currently loaded
 // into this Tree. It is used to register and advance durable Reader pins.
 func (t *Tree) RootGeneration() uint64 {
