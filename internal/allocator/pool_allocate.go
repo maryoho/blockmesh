@@ -185,9 +185,22 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		pool,_:=a.store.PoolSuperblock();physical,bitmapImages,err=PlanBitmapAllocation(a.store,pool,ag,req.BlockCount)
 	}
 	if err != nil { return result, fmt.Errorf("plan AG bitmap allocation: %w", err) }
-	reservation, ids, err := a.tree.ReserveExternalPages(1)
-	if err != nil { return result, fmt.Errorf("reserve idempotency record page: %w", err) }
-	if len(ids) != 1 {
+	var retireRecords []DataRetireRecord
+	if a.dynamic {
+		var candidates []uint64
+		for i, mapped := range oldMapped { if mapped { candidates = append(candidates, oldPhysical[i]) } }
+		candidates = unreferencedPhysicalBlocks(a.tree, req.LogicalStart, req.BlockCount, candidates)
+		retireRecords, err = dataRetireRanges(candidates, mappingSequence, dynamicSB.Geometry.AGSizeBlocks)
+		if err != nil { return result, fmt.Errorf("plan COW Data Retire ranges: %w", err) }
+		for _, retired := range retireRecords {
+			if retired.AG != ag { return result, errors.New("COW source block belongs to another AG; cross-AG atomic retirement is not supported") }
+		}
+		retireRecords, err = reserveDataRetireKeys(a.tree, retireRecords)
+		if err != nil { return result, fmt.Errorf("reserve Data Retire index keys: %w", err) }
+	}
+	reservation, ids, err := a.tree.ReserveExternalPages(uint64(1+len(retireRecords)))
+	if err != nil { return result, fmt.Errorf("reserve idempotency and Data Retire record pages: %w", err) }
+	if len(ids) != 1+len(retireRecords) {
 		_ = a.tree.AbortReservedArenaPages(reservation)
 		return result, metastore.ErrInvalidPageSet
 	}
@@ -230,12 +243,20 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	}
 	page, err := BuildIdempotencyRecordPage(ids[0], generation+1, record)
 	if err != nil { return abortReservation(err) }
-	updates := make([]btree.Item, 0, int(req.BlockCount)+1)
+	arenaPages := make([]metastore.Page, 0, len(ids))
+	arenaPages = append(arenaPages, page)
+	updates := make([]btree.Item, 0, int(req.BlockCount)+1+len(retireRecords))
 	for i:=uint64(0); i<uint64(req.BlockCount); i++ {
 		updates = append(updates, btree.Item{Key:req.LogicalStart+i,Value:physical+i})
 	}
 	updates = append(updates, btree.Item{Key:hash,Value:ids[0]})
-	if err = a.tree.PutBatchWithReservedArenaPages(updates,reservation,[]metastore.Page{page},bitmapImages); err != nil {
+	for i, retired := range retireRecords {
+		retirePage, buildErr := BuildDataRetirePage(ids[i+1], generation+1, retired)
+		if buildErr != nil { return abortReservation(buildErr) }
+		arenaPages = append(arenaPages, retirePage)
+		updates = append(updates, btree.Item{Key:retired.IndexKey, Value:ids[i+1]})
+	}
+	if err = a.tree.PutBatchWithReservedArenaPages(updates,reservation,arenaPages,bitmapImages); err != nil {
 		if isKnownPreCommitAllocationError(err) {
 			return result, fmt.Errorf("publish allocation transaction: %w", err)
 		}
