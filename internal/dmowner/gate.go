@@ -94,6 +94,7 @@ type statusSnapshot struct {
 	rootGeneration uint64
 	instance uint64
 	readOnly bool
+	fenced bool
 }
 
 func (g DMSetupGate) statusSnapshot(ctx context.Context, device string) (statusSnapshot, error) {
@@ -125,6 +126,10 @@ func (g DMSetupGate) statusSnapshot(ctx context.Context, device string) (statusS
 			v := strings.TrimPrefix(field, "readonly=")
 			if v != "0" && v != "1" { return s, errors.New("invalid DM read-only state") }
 			s.readOnly, readOnlyFound = v == "1", true
+		case strings.HasPrefix(field, "fenced="):
+			v := strings.TrimPrefix(field, "fenced=")
+			if v != "0" && v != "1" { return s, errors.New("invalid DM fenced state") }
+			s.fenced = v == "1"
 		}
 	}
 	if !instanceFound || !ownerFound { return s, errors.New("DM status lacks target instance or OwnerEpoch") }
@@ -151,7 +156,7 @@ func (g DMSetupGate) PrepareReader(ctx context.Context, device string, epoch, ro
 	s, err := g.statusSnapshot(ctx, device)
 	if err != nil { return 0, err }
 	if s.readOnly && epoch <= s.readerEpoch { return 0, errors.New("ReaderEpoch must exceed the current DM ReaderEpoch") }
-	if !s.readOnly && s.ownerEpoch != 0 {
+	if !s.readOnly && s.ownerEpoch != 0 && !s.fenced {
 		// A live local RW Owner cannot be converted into a Reader in place.
 		return 0, errors.New("DM target still has an OwnerEpoch; fence/deactivate RW before RO")
 	}
