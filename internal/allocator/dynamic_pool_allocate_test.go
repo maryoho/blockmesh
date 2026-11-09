@@ -246,6 +246,12 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	if bitmap[0]&0x01 != 0 || bitmap[0]&0x02 == 0 {
 		t.Fatalf("atomic COW reclaim bitmap mismatch: %08b", bitmap[0])
 	}
+	// The Data Retire record page was retired by the same root transaction.
+	// Advance past that deletion root and collect it through PersistentArena.
+	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
+	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
+		t.Fatalf("metadata-only retire collection reclaimed=%d err=%v", got, err)
+	}
 
 	_, err = alloc.DiscardTxn(context.Background(), lease, AllocateRequest{
 		IdempotencyKey:[16]byte{0x63}, Fingerprint:[32]byte{0xa3},
@@ -261,6 +267,10 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	}
 	if _, err = metadata.ReadAt(bitmap, int64(g.BitmapOffset+format.PageSize)); err != nil { t.Fatal(err) }
 	if bitmap[0]&0x03 != 0 { t.Fatalf("discarded block remains allocated after safe reclaim: %08b", bitmap[0]) }
+	if err = readers.AdvanceGeneration(0, "reader-node", "reader-boot", 1, tree.RootGeneration(), true); err != nil { t.Fatal(err) }
+	if got, err := alloc.CollectDataRetired(context.Background(), lease, readers, true); err != nil || got != 0 {
+		t.Fatalf("final metadata retire collection reclaimed=%d err=%v", got, err)
+	}
 
 	// A fresh open must resolve any remaining external idempotency pages and
 	// accept the empty Data Retire index after the WAL-published collection.
