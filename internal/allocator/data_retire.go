@@ -35,7 +35,7 @@ type DataRetireRecord struct {
 }
 
 func (r DataRetireRecord) EncodePayload() ([]byte, error) {
-	if r.IndexKey&dataRetireNamespace == 0 || r.RetireGeneration == 0 ||
+	if r.IndexKey == 0 || r.IndexKey >= dataRetireNamespace || r.RetireGeneration == 0 ||
 		r.BlockCount == 0 || r.PhysicalStart > math.MaxUint64-uint64(r.BlockCount) {
 		return nil, ErrDataRetireRecord
 	}
@@ -81,21 +81,25 @@ func BuildDataRetirePage(id, pageGeneration uint64, r DataRetireRecord) (metasto
 // dataRetireIndexKey hashes the immutable range identity into the high-bit
 // external-page namespace. The caller probes on collision against the live
 // B+Tree, so it cannot overwrite an idempotency index entry.
-func dataRetireIndexKey(r DataRetireRecord) uint64 {
+func dataRetireIndexKey(r DataRetireRecord, totalBlocks uint64) (uint64, error) {
+	if totalBlocks >= dataRetireNamespace { return 0, ErrDataRetireRecord }
 	var b [24]byte
 	binary.LittleEndian.PutUint32(b[0:4], r.AG)
 	binary.LittleEndian.PutUint64(b[4:12], r.RetireGeneration)
 	binary.LittleEndian.PutUint64(b[12:20], r.PhysicalStart)
 	binary.LittleEndian.PutUint32(b[20:24], r.BlockCount)
 	h := crc32.Checksum(b[:], castagnoli)
-	return dataRetireNamespace | uint64(h)
+	available := dataRetireNamespace-totalBlocks
+	return totalBlocks + uint64(h)%available, nil
 }
 
-func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord) ([]DataRetireRecord, error) {
+func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord, totalBlocks uint64) ([]DataRetireRecord, error) {
+	if totalBlocks >= dataRetireNamespace { return nil, ErrDataRetireRecord }
 	out := make([]DataRetireRecord, len(ranges))
 	used := make(map[uint64]struct{}, len(ranges))
 	for i, r := range ranges {
-		key := dataRetireIndexKey(r)
+		key, err := dataRetireIndexKey(r, totalBlocks)
+		if err != nil { return nil, err }
 		for probes := uint64(0); probes < 1<<20; probes++ {
 			if _, exists := used[key]; exists {
 				key++
@@ -107,7 +111,7 @@ func reserveDataRetireKeys(tree *btree.Tree, ranges []DataRetireRecord) ([]DataR
 				return nil, err
 			}
 			key++
-			if key&dataRetireNamespace == 0 { key = dataRetireNamespace }
+			if key >= dataRetireNamespace { key = totalBlocks }
 			if probes == (1<<20)-1 { return nil, ErrDataRetireRecord }
 		}
 		r.IndexKey = key
