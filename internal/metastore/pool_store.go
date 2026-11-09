@@ -111,20 +111,19 @@ func (s *Store) ReaderTableRange() (uint64, uint32, error) {
 	if s.dynamicPool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		start := s.dynamicDescriptor.OwnerRecordStart
-		if start == 0 || start > s.dynamicSB.Geometry.MetadataBytes/PageSize {
-			return 0, 0, ErrGeometry
-		}
-		start += format.OwnerRecordPages
-		pages := format.ReaderTablePages
+		start := s.dynamicDescriptor.ReaderTableStart
+		pages := uint64(s.dynamicDescriptor.ReaderTablePages)
 		total := s.dynamicSB.Geometry.MetadataBytes/PageSize
-		if start > total || pages > total-start {
+		if start == 0 || pages != format.ReaderTablePages || start > total || pages > total-start {
 			return 0, 0, ErrGeometry
 		}
 		if start < s.dynamicDescriptor.ArenaStart+s.dynamicDescriptor.ArenaPages {
 			return 0, 0, ErrGeometry
 		}
 		if s.dynamicDescriptor.LifecyclePages != 0 && start < s.dynamicDescriptor.LifecycleStart+s.dynamicDescriptor.LifecyclePages {
+			return 0, 0, ErrGeometry
+		}
+		if s.dynamicDescriptor.OwnerRecordStart == 0 || start != s.dynamicDescriptor.OwnerRecordStart+format.OwnerRecordPages {
 			return 0, 0, ErrGeometry
 		}
 		return start, uint32(pages), nil
