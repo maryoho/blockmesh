@@ -142,14 +142,8 @@ type failAtDynamicMetadataDevice struct {
 
 func (d *failAtDynamicMetadataDevice) WriteAt(p []byte, off int64) (int, error) {
 	if !d.failed && off >= 0 && off <= d.failAt && int64(len(p)) > d.failAt-off {
-		prefix := int(d.failAt-off)
-		if prefix > 0 {
-			n, err := d.DynamicMetadataDevice.WriteAt(p[:prefix], off)
-			if err != nil { return n, err }
-			if n != prefix { return n, errors.New("short write before injected metadata failure") }
-		}
 		d.failed = true
-		return prefix, errors.New("injected WAL target apply failure")
+		return 0, errors.New("injected WAL target apply failure")
 	}
 	return d.DynamicMetadataDevice.WriteAt(p, off)
 }
