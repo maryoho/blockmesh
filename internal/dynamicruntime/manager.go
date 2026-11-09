@@ -189,28 +189,30 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 			return fmt.Errorf("acquire fenced P3 Owner lease: %w", err)
 		}
 		if owner == nil || !owner.Valid() || owner.Epoch() == 0 || owner.VolumeID() != spec.VolumeID {
-			if owner != nil { _ = owner.Close() }
+			if owner != nil { return errors.Join(ErrOwnerProof, owner.Close()) }
 			return ErrOwnerProof
 		}
 		monitor, ok := owner.(interface{ Lost() <-chan error })
 		if !ok || monitor.Lost() == nil {
-			_ = owner.Close()
-			return ErrOwnerMonitorRequired
+			return errors.Join(ErrOwnerMonitorRequired, owner.Close())
 		}
 		rt.runtime, openErr = m.cfg.OpenReadWrite.OpenReadWrite(ctx, spec, owner)
 		// Backend.OpenReadWrite takes ownership of owner and closes it on failure.
 		if openErr != nil {
+			if rt.runtime != nil {
+				return m.retainPartialActivation(ctx, rt, fmt.Errorf("open BMPOOL03 RW runtime: %w", openErr))
+			}
 			return fmt.Errorf("open BMPOOL03 RW runtime: %w", openErr)
 		}
 		if rt.runtime == nil || rt.runtime.Owner == nil ||
 			rt.runtime.Spec != spec || rt.runtime.Owner.Epoch() != owner.Epoch() ||
 			rt.runtime.Owner.VolumeID() != spec.VolumeID {
-			if rt.runtime != nil { _ = rt.runtime.Close() } else { _ = owner.Close() }
-			return errors.New("BMPOOL03 backend returned a runtime with mismatched spec or Owner lease")
+			cause := errors.New("BMPOOL03 backend returned a runtime with mismatched spec or Owner lease")
+			if rt.runtime != nil { return m.retainPartialActivation(ctx, rt, cause) }
+			return errors.Join(cause, owner.Close())
 		}
 		if monitor, ok := rt.runtime.Owner.(interface{ Lost() <-chan error }); !ok || monitor.Lost() == nil {
-			_ = rt.runtime.Close()
-			return ErrOwnerMonitorRequired
+			return m.retainPartialActivation(ctx, rt, ErrOwnerMonitorRequired)
 		}
 	case metastore.VolumeRuntimeReadOnly:
 		if m.cfg.OpenReadOnly == nil {
@@ -233,9 +235,9 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 	if m.closed {
 		m.mu.Unlock()
 		watchCancel()
-		if rt.reader != nil { _ = rt.reader.CloseDrained(context.Background(), true) }
-		if rt.runtime != nil { _ = rt.runtime.Close() }
-		return ErrManagerClosed
+		rt.watchCancel = nil
+		rt.watchDone = nil // watcher has not been started
+		return m.retainPartialActivation(ctx, rt, ErrManagerClosed)
 	}
 	m.runtimes[spec.VolumeID] = rt
 	m.mu.Unlock()
@@ -406,8 +408,6 @@ func (m *DynamicVolumeRuntimeManager) Shutdown(ctx context.Context) error {
 	if ctx == nil { return errors.New("shutdown context is required") }
 	m.mu.Lock()
 	m.closed = true
-	ids := make([]string, 0, len(m.runtimes))
-	for id := range m.runtimes { ids = append(ids, id) }
 	m.mu.Unlock()
 	wait := make(chan struct{})
 	go func() { m.inflight.Wait(); close(wait) }()
@@ -415,6 +415,10 @@ func (m *DynamicVolumeRuntimeManager) Shutdown(ctx context.Context) error {
 	case <-wait:
 	case <-ctx.Done(): return ctx.Err()
 	}
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.runtimes))
+	for id := range m.runtimes { ids = append(ids, id) }
+	m.mu.Unlock()
 	sort.Strings(ids)
 	var failures []error
 	for _, id := range ids {
