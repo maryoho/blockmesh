@@ -298,9 +298,10 @@ func(a *DynamicVolumeAllocator) GrowVolume(index uint32,pages uint64,committer C
 	if d.Generation==math.MaxUint64||d.VolumeSequence==math.MaxUint64||d.ArenaPages>math.MaxUint64-pages{return zero,0,errors.New("Volume Arena sequence or size exhausted")}
 	if d.ArenaStart<a.header.RegionStart{return zero,0,ErrGeometry}
 	start:=d.ArenaStart-a.header.RegionStart
-	ownerPages:=uint64(0);if d.OwnerRecordStart!=0{ownerPages=2}
-	used:=d.ArenaPages+d.LifecyclePages+ownerPages
-	if used<d.ArenaPages||start>a.header.RegionPages||used>a.header.RegionPages-start{return zero,0,ErrGeometry}
+	ownerPages:=uint64(0);if d.OwnerRecordStart!=0{ownerPages=uint64(format.OwnerRecordPages)}
+	readerPages:=uint64(d.ReaderTablePages)
+	used:=d.ArenaPages+d.LifecyclePages+ownerPages+readerPages
+	if used<d.ArenaPages||used<d.LifecyclePages||start>a.header.RegionPages||used>a.header.RegionPages-start{return zero,0,ErrGeometry}
 	end:=start+used
 	if pages>a.header.RegionPages-end{return zero,0,ErrDynamicVolumeSpace}
 	nextBitmap:=append([]byte(nil),a.bitmap...)
@@ -309,17 +310,19 @@ func(a *DynamicVolumeAllocator) GrowVolume(index uint32,pages uint64,committer C
 		nextBitmap[bit/8]|=1<<uint(bit%8)
 	}
 	next:=d;next.Generation++;next.VolumeSequence++;next.ArenaPages+=pages
-	auxPages:=next.LifecyclePages+ownerPages
+	auxPages:=next.LifecyclePages+ownerPages+readerPages
 	if auxPages!=0{
 		auxStart:=d.ArenaStart+d.ArenaPages
-		if d.LifecyclePages!=0{auxStart=d.LifecycleStart}else if ownerPages!=0{auxStart=d.OwnerRecordStart}
+		if d.LifecyclePages!=0{auxStart=d.LifecycleStart}else if ownerPages!=0{auxStart=d.OwnerRecordStart}else if readerPages!=0{auxStart=d.ReaderTableStart}
+		if auxPages>math.MaxUint64/format.PageSize||auxStart>math.MaxUint64/format.PageSize{return zero,0,ErrGeometry}
 		aux:=make([]byte,auxPages*format.PageSize)
 		if err=readFullAt(a.dev,aux,int64(auxStart*format.PageSize));err!=nil{return zero,0,err}
 		if next.LifecyclePages!=0{next.LifecycleStart=d.LifecycleStart+pages}
 		if ownerPages!=0{next.OwnerRecordStart=d.OwnerRecordStart+pages}
+		if readerPages!=0{next.ReaderTableStart=d.ReaderTableStart+pages}
 		newAuxStart:=auxStart+pages
-		if err=writeFullAt(a.dev,aux,int64(newAuxStart*format.PageSize));err!=nil{return zero,0,fmt.Errorf("relocate Volume lifecycle/OwnerRecord pages: %w",err)}
-		if err=a.dev.Sync();err!=nil{return zero,0,fmt.Errorf("sync relocated Volume lifecycle/OwnerRecord pages: %w",err)}
+		if err=writeFullAt(a.dev,aux,int64(newAuxStart*format.PageSize));err!=nil{return zero,0,fmt.Errorf("relocate Volume lifecycle/OwnerRecord/ReaderTable pages: %w",err)}
+		if err=a.dev.Sync();err!=nil{return zero,0,fmt.Errorf("sync relocated Volume lifecycle/OwnerRecord/ReaderTable pages: %w",err)}
 	}
 	if err=next.ValidatePool(a.sb);err!=nil{return zero,0,err}
 	desc,err:=next.Encode();if err!=nil{return zero,0,err}
