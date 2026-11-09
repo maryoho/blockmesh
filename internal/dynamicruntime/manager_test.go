@@ -45,6 +45,10 @@ func (r *managerTestReader) Heartbeat() error {
 	r.heartbeats++
 	return nil
 }
+func (r *managerTestReader) Slot() uint32 { return 2 }
+func (r *managerTestReader) Epoch() uint64 { return 9 }
+func (r *managerTestReader) RootGeneration() uint64 { return 1 }
+
 func (r *managerTestReader) CloseDrained(_ context.Context, drained bool) error {
 	if !drained { return errors.New("not drained") }
 	r.mu.Lock(); r.closed=true; r.mu.Unlock()
@@ -129,7 +133,7 @@ func TestDynamicVolumeRuntimeManagerReadOnlyLifecycle(t *testing.T) {
 	reader:=&managerTestReader{}
 	m,err:=NewDynamicVolumeRuntimeManager(ManagerConfig{
 		OpenReadWrite:runtimeOpenerFunc(func(context.Context,metastore.VolumeRuntimeSpec,OwnerLease)(*Runtime,error){return nil,errors.New("unexpected RW open")}),
-		OpenReadOnly:func(_ context.Context,s metastore.VolumeRuntimeSpec)(*Runtime,ReadOnlySession,error){return &Runtime{Spec:s},reader,nil},
+		OpenReadOnly:func(_ context.Context,s metastore.VolumeRuntimeSpec)(*Runtime,ReadOnlySession,error){return &Runtime{Spec:s,RootGeneration:1},reader,nil},
 		Gate:gate,
 	})
 	if err!=nil { t.Fatal(err) }
