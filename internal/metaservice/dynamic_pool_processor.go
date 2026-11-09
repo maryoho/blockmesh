@@ -53,7 +53,7 @@ func (p *DynamicPoolRuntimeProcessor) Process(ctx context.Context,req uapi.Reque
 		// P4-1.3.3 wires the BIO COW/mutation executor to the BMPOOL03
 		// DynamicPoolAllocator. Never route these writes through the legacy
 		// BMPOOL02 VolumeRuntimeManager.
-		return Result{},errors.Join(ErrRetry,ErrMutationPathUnavailable)
+		return Result{},errors.Join(ErrInvalid,ErrMutationPathUnavailable)
 	case uapi.OpFlush:
 		if snapshot.Spec.Mode!=metastore.VolumeRuntimeReadWrite||snapshot.OwnerEpoch!=req.OwnerEpoch {
 			return Result{},ErrFenced
