@@ -20,6 +20,9 @@ func (testDistributedLocker) Lock(context.Context, string) (func() error, error)
 	return func() error { return nil }, nil
 }
 
+type testReaderCoordinator struct{}
+func (testReaderCoordinator) LockReaderSet(string)(func(),error){return func(){},nil}
+
 func TestNewRequiresDistributedLockerAndResourceNaming(t *testing.T) {
 	open := func(context.Context, metastore.VolumeRuntimeSpec) (device.Device, error) {
 		return nil, errors.New("unexpected device open")
@@ -34,6 +37,7 @@ func TestNewRequiresDistributedLockerAndResourceNaming(t *testing.T) {
 		OpenDevice: open,
 		Locker: testDistributedLocker{},
 		WALResourceForAG: func([16]byte, uint32) string { return "pool:uuid:ag:0:wal" },
+		ReaderCoordinator: testReaderCoordinator{},
 	}); err != nil {
 		t.Fatalf("valid distributed configuration rejected: %v", err)
 	}
