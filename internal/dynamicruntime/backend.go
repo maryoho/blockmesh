@@ -70,6 +70,7 @@ type Runtime struct {
 	Tree *btree.Tree
 	Allocator *allocator.PoolAllocator
 	Owner OwnerLease
+	MutationMu sync.Mutex
 	closeMu sync.Mutex
 	closed bool
 }
