@@ -21,6 +21,12 @@ func TestOpenDynamicPoolVolumeAndPersistentArena(t *testing.T){
 	if err=dev.Sync();err!=nil{t.Fatal(err)}
 	store,err:=OpenDynamicPoolVolume(dev,pool,1,desc.VolumeID);if err!=nil{t.Fatal(err)}
 	if store.Superblock().ArenaStart!=arenaStart{t.Fatal("wrong dynamic Arena start")}
+	readerStart,readerPages,err:=store.ReaderTableRange()
+	if err!=nil{t.Fatalf("BMPOOL03 ReaderTableRange: %v",err)}
+	wantReaderStart:=desc.LifecycleStart+desc.LifecyclePages+format.OwnerRecordPages
+	if uint64(readerStart)!=wantReaderStart||uint64(readerPages)!=format.ReaderTablePages{
+		t.Fatalf("Reader Table range=(%d,%d), want=(%d,%d)",readerStart,readerPages,wantReaderStart,format.ReaderTablePages)
+	}
 	if err=FormatLifecycle(store);err!=nil{t.Fatal(err)}
 	committer:=testCommitter{d:dev}
 	pa,err:=NewPersistentArena(store,nil,committer);if err!=nil{t.Fatal(err)}
