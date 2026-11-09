@@ -87,7 +87,9 @@ func(d DynamicVolumeDescriptor)ValidatePool(sb DynamicSuperblock)error{
 	}
 	if d.RootPage!=^uint64(0)&&(d.RootPage<d.ArenaStart||d.RootPage-d.ArenaStart>=d.ArenaPages){return ErrVolumeDescriptor}
 	if d.OwnerRecordStart!=0{
-		if d.OwnerRecordStart<reservedStart||d.OwnerRecordStart>totalPages||2>totalPages-d.OwnerRecordStart{return ErrVolumeDescriptor}
+		if d.OwnerRecordStart<reservedStart||d.OwnerRecordStart>totalPages||
+			OwnerRecordPages>totalPages-d.OwnerRecordStart||
+			ReaderTablePages>totalPages-d.OwnerRecordStart-OwnerRecordPages{return ErrVolumeDescriptor}
 		expected:=d.ArenaStart+d.ArenaPages
 		if d.LifecyclePages!=0{expected=d.LifecycleStart+d.LifecyclePages}
 		if d.OwnerRecordStart!=expected{return ErrVolumeDescriptor}
@@ -107,6 +109,13 @@ func DynamicVolumeDescriptorPairOffset(sb DynamicSuperblock,index uint32)(uint64
 
 func InitializeDynamicVolumeDescriptor(w io.WriterAt,sb DynamicSuperblock,index uint32,d DynamicVolumeDescriptor)error{
 	if w==nil{return errors.New("nil BMPOOL03 Volume Descriptor writer")}
+	// Reserve the two durable OwnerRecord pages followed by the fixed Reader
+	// Table extent for every newly initialized BMPOOL03 Volume. Older v3
+	// descriptors with OwnerRecordStart==0 remain readable but cannot join RO.
+	if d.OwnerRecordStart==0 {
+		d.OwnerRecordStart=d.ArenaStart+d.ArenaPages
+		if d.LifecyclePages!=0 { d.OwnerRecordStart=d.LifecycleStart+d.LifecyclePages }
+	}
 	if err:=d.ValidatePool(sb);err!=nil{return err}
 	pair,err:=DynamicVolumeDescriptorPairOffset(sb,index);if err!=nil{return err}
 	a,err:=d.Encode();if err!=nil{return err}
