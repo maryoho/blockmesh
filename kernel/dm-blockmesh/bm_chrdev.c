@@ -32,6 +32,8 @@ static_assert(sizeof(struct bm_uapi_queue_query) == 40);
 static_assert(sizeof(struct bm_uapi_cancel) == 40);
 static_assert(sizeof(struct bm_uapi_abi_info) == 64);
 
+static struct bio_set bm_bioset;
+
 struct bm_service_session {
 	u64 id;
 	u64 registry_seen;
@@ -235,30 +237,35 @@ static struct bm_pending *bm_take_pending(struct bm_queue *q, u64 request_id,
 	}
 	return NULL;
 }
+struct bm_bio_segment {
+	u64 sector;
+	u32 sectors;
+};
+
 static void bm_finish_pending(struct bm_pending *p,
 			      const struct bm_uapi_completion *completion,
-			      const struct bm_uapi_mapping *mapping)
+			      const struct bm_uapi_mapping *mappings,
+			      u32 mapping_count)
 {
 	struct bio *bio = p->bio;
+	struct bm_bio_segment segments[BM_UAPI_MAX_BATCH];
 	u16 code = le16_to_cpu(completion->code);
-	u64 phys_sector, phys_block, map_logical, map_physical;
-	u32 map_count;
+	u64 request_end, cursor;
+	u32 i, nr_segments = 0;
 
 	if (code != BM_UAPI_C_OK ||
 	    le64_to_cpu(completion->owner_epoch) != p->owner_epoch)
 		goto io_error;
 	if (p->operation == BM_UAPI_OP_DISCARD) {
-		if (le32_to_cpu(completion->mapping_count) || le32_to_cpu(completion->payload_bytes))
+		if (mapping_count || le32_to_cpu(completion->payload_bytes))
 			goto io_error;
-		/* Logical discard retires metadata; never issue an early physical discard
-		 * while an RO reader may still reference the old extent. */
+		/* Retire metadata only; physical release waits for reader-safe reclaim. */
 		bio_endio(bio);
 		kfree(p);
 		return;
 	}
 	if (!p->block_count) {
-		if (le32_to_cpu(completion->mapping_count) ||
-		    le32_to_cpu(completion->payload_bytes))
+		if (mapping_count || le32_to_cpu(completion->payload_bytes))
 			goto io_error;
 		bio_set_dev(bio, p->bdev);
 		bio->bi_iter.bi_sector = p->base_sector;
@@ -266,36 +273,93 @@ static void bm_finish_pending(struct bm_pending *p,
 		kfree(p);
 		return;
 	}
-	if (!mapping || le32_to_cpu(completion->mapping_count) != 1 ||
-	    le32_to_cpu(completion->payload_bytes) != BM_UAPI_MAPPING_SIZE)
+	if (!mappings || !mapping_count || mapping_count > BM_UAPI_MAX_BATCH ||
+	    le32_to_cpu(completion->payload_bytes) !=
+		    mapping_count * BM_UAPI_MAPPING_SIZE)
 		goto io_error;
-	map_logical = le64_to_cpu(mapping->logical_block);
-	map_physical = le64_to_cpu(mapping->physical_block);
-	map_count = le32_to_cpu(mapping->block_count);
-	if (le32_to_cpu(mapping->reserved) || !map_count ||
-	    map_logical > U64_MAX - map_count ||
-	    map_physical > U64_MAX - map_count ||
-	    p->logical_start < map_logical ||
-	    p->logical_start > U64_MAX - p->block_count ||
-	    p->logical_start + p->block_count > map_logical + map_count)
+	if (p->logical_start > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS) ||
+	    p->logical_start > U64_MAX - p->block_count)
 		goto io_error;
-	phys_block = map_physical + (p->logical_start - map_logical);
-	if (phys_block > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS))
+	cursor = p->logical_start * BM_UAPI_BLOCK_SECTORS;
+	if (cursor > U64_MAX - p->sector_offset ||
+	    cursor + p->sector_offset > U64_MAX - bio_sectors(bio))
 		goto io_error;
-	if (p->base_sector > U64_MAX - p->sector_offset ||
-	    phys_block > div_u64(U64_MAX - p->base_sector - p->sector_offset, BM_UAPI_BLOCK_SECTORS))
+	cursor += p->sector_offset;
+	request_end = cursor + bio_sectors(bio);
+
+	/* Validate and translate the complete vector before submitting any child. */
+	for (i = 0; i < mapping_count; i++) {
+		u64 logical, logical_end, physical, physical_start;
+		u64 begin, finish, sector;
+		u32 count = le32_to_cpu(mappings[i].block_count);
+
+		logical = le64_to_cpu(mappings[i].logical_block);
+		physical = le64_to_cpu(mappings[i].physical_block);
+		if (le32_to_cpu(mappings[i].reserved) || !count ||
+		    logical > U64_MAX - count || physical > U64_MAX - count)
+			goto io_error;
+		if ((i == 0 && logical != p->logical_start) ||
+		    (i && logical != le64_to_cpu(mappings[i - 1].logical_block) +
+				       le32_to_cpu(mappings[i - 1].block_count)))
+			goto io_error;
+		if (logical + count > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS) ||
+		    physical + count > div_u64(p->target_sectors, BM_UAPI_BLOCK_SECTORS))
+			goto io_error;
+		logical_end = (logical + count) * BM_UAPI_BLOCK_SECTORS;
+		begin = max(cursor, logical * BM_UAPI_BLOCK_SECTORS);
+		finish = min(request_end, logical_end);
+		if (finish <= begin)
+			continue;
+		if (begin != cursor || nr_segments >= BM_UAPI_MAX_BATCH)
+			goto io_error;
+		if (physical > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS))
+			goto io_error;
+		physical_start = physical * BM_UAPI_BLOCK_SECTORS;
+		if (physical_start > U64_MAX - (begin - logical * BM_UAPI_BLOCK_SECTORS))
+			goto io_error;
+		physical_start += begin - logical * BM_UAPI_BLOCK_SECTORS;
+		if (p->base_sector > U64_MAX - physical_start)
+			goto io_error;
+		sector = p->base_sector + physical_start;
+		if (p->base_sector > U64_MAX - p->target_sectors ||
+		    sector < p->base_sector ||
+		    sector > p->base_sector + p->target_sectors ||
+		    finish - begin > p->base_sector + p->target_sectors - sector ||
+		    sector > bdev_nr_sectors(p->bdev) ||
+		    finish - begin > bdev_nr_sectors(p->bdev) - sector)
+			goto io_error;
+		segments[nr_segments].sector = sector;
+		segments[nr_segments].sectors = (u32)(finish - begin);
+		nr_segments++;
+		cursor = finish;
+		if (cursor == request_end && i + 1 < mapping_count)
+			goto io_error;
+	}
+	if (cursor != request_end || !nr_segments ||
+	    le64_to_cpu(mappings[mapping_count - 1].logical_block) +
+	    le32_to_cpu(mappings[mapping_count - 1].block_count) !=
+	    p->logical_start + p->block_count)
 		goto io_error;
-	phys_sector = p->base_sector + phys_block * BM_UAPI_BLOCK_SECTORS + p->sector_offset;
-	if (p->base_sector > U64_MAX - p->target_sectors ||
-	    phys_sector < p->base_sector ||
-	    phys_sector > p->base_sector + p->target_sectors ||
-	    bio_sectors(bio) > p->base_sector + p->target_sectors - phys_sector ||
-	    phys_sector > bdev_nr_sectors(p->bdev) ||
-	    bio_sectors(bio) > bdev_nr_sectors(p->bdev) - phys_sector)
-		goto io_error;
-	bio_set_dev(bio, p->bdev);
-	bio->bi_iter.bi_sector = phys_sector;
-	submit_bio_noacct(bio);
+
+	/*
+	 * Chain each split child to the original DM bio. The original bio is
+	 * submitted as the final segment and completes only after every child.
+	 */
+	for (i = 0; i < nr_segments; i++) {
+		struct bio *part = bio;
+		if (i + 1 < nr_segments) {
+			part = bio_split(bio, segments[i].sectors, GFP_NOIO,
+					 &bm_bioset);
+			if (!part)
+				goto io_error;
+			bio_chain(part, bio);
+		} else if (bio_sectors(bio) != segments[i].sectors) {
+			goto io_error;
+		}
+		bio_set_dev(part, p->bdev);
+		part->bi_iter.bi_sector = segments[i].sector;
+		submit_bio_noacct(part);
+	}
 	kfree(p);
 	return;
 io_error:
@@ -327,7 +391,8 @@ static int bm_consume_completions(struct bm_queue *q)
 	}
 	while (head != tail) {
 		struct bm_uapi_completion c;
-		struct bm_uapi_mapping mapping_copy, *mapping = NULL;
+		struct bm_uapi_mapping *mappings = NULL;
+		u32 mapping_count = le32_to_cpu(c.mapping_count);
 		struct bm_pending *p;
 		u32 slot = head & mask, payload_offset, payload_bytes;
 		struct bm_uapi_completion *src;
@@ -358,12 +423,12 @@ static int bm_consume_completions(struct bm_queue *q)
 			tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
 			continue;
 		}
-		if (payload_bytes) {
+		if (payload_bytes || mapping_count) {
 			u32 expected = slot * BM_UAPI_MAX_BATCH * BM_UAPI_MAPPING_SIZE;
 			u64 end = (u64)payload_offset + payload_bytes;
-			if (payload_offset != expected ||
-			    le32_to_cpu(c.mapping_count) != 1 ||
-			    payload_bytes != BM_UAPI_MAPPING_SIZE ||
+			if (!mapping_count || mapping_count > BM_UAPI_MAX_BATCH ||
+			    payload_bytes != mapping_count * BM_UAPI_MAPPING_SIZE ||
+			    payload_offset != expected ||
 			    end > (u64)entries * BM_UAPI_MAX_BATCH * BM_UAPI_MAPPING_SIZE) {
 				p = bm_take_pending(q, le64_to_cpu(c.request_id), generation);
 				head++;
@@ -379,10 +444,13 @@ static int bm_consume_completions(struct bm_queue *q)
 				tail = le32_to_cpu((__force __le32)smp_load_acquire((u32 *)&ctrl->tail));
 				continue;
 			}
-			memcpy(&mapping_copy, q->mem->area + BM_UAPI_MMAP_PAYLOAD +
-			       payload_offset, sizeof(mapping_copy));
-			mapping = &mapping_copy;
-		} else if (le32_to_cpu(c.mapping_count) != 0 || payload_offset != 0) {
+			mappings = kmemdup(q->mem->area + BM_UAPI_MMAP_PAYLOAD +
+					   payload_offset, payload_bytes, GFP_NOIO);
+			if (!mappings) {
+				mutex_unlock(&q->lock);
+				return -ENOMEM;
+			}
+		} else if (payload_offset != 0) {
 			p = bm_take_pending(q, le64_to_cpu(c.request_id), generation);
 			head++;
 			smp_store_release((u32 *)&ctrl->head,
@@ -403,7 +471,8 @@ static int bm_consume_completions(struct bm_queue *q)
 				  (__force u32)cpu_to_le32(head));
 		mutex_unlock(&q->lock);
 		if (p)
-			bm_finish_pending(p, &c, mapping);
+			bm_finish_pending(p, &c, mappings, mapping_count);
+		kfree(mappings);
 		consumed++;
 		mutex_lock(&q->lock);
 		if (!q->attached || !q->mem || q->generation != generation)
@@ -832,9 +901,18 @@ static struct miscdevice bm_miscdev = {
 
 int bm_chrdev_init(void)
 {
-	return misc_register(&bm_miscdev);
+	int ret;
+
+	ret = bioset_init(&bm_bioset, 64, 0, BIOSET_NEED_BVECS);
+	if (ret)
+		return ret;
+	ret = misc_register(&bm_miscdev);
+	if (ret)
+		bioset_exit(&bm_bioset);
+	return ret;
 }
 void bm_chrdev_exit(void)
 {
 	misc_deregister(&bm_miscdev);
+	bioset_exit(&bm_bioset);
 }
