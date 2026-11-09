@@ -398,5 +398,5 @@ func (s *poolRuntimeReaderSession) CloseDrained(ctx context.Context, drained boo
 
 func (s *poolRuntimeReaderSession) RequestSnapshot() (uint64, uint64, error) {
 	if s == nil || s.session == nil { return 0, 0, errors.New("nil Pool Reader Session") }
-	return s.session.RequestSnapshot()
+	return s.session.RequestSnapshot(context.Background())
 }
