@@ -21,6 +21,17 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 	ctx context.Context, req uapi.Request, snapshot dynamicruntime.RuntimeRequestSnapshot,
 ) (Result, error) {
 	rt := snapshot.Runtime
+	if rt == nil {
+		return Result{}, ErrFenced
+	}
+	rt.MutationMu.Lock()
+	defer rt.MutationMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Result{}, errors.Join(ErrRetry, err)
+	}
+	if err := p.manager.ValidateMutationRuntime(snapshot.Spec.VolumeID, rt); err != nil {
+		return Result{}, errors.Join(ErrFenced, err)
+	}
 	if snapshot.Spec.Mode != metastore.VolumeRuntimeReadWrite ||
 		snapshot.OwnerEpoch == 0 || snapshot.OwnerEpoch != req.OwnerEpoch ||
 		rt == nil || rt.Owner == nil || rt.Allocator == nil || rt.Tree == nil {
