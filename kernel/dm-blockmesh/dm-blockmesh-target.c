@@ -229,7 +229,8 @@ static int bm_reader_prepare(struct bm_target *bm, const char *epoch_arg,
 	if (ret || !instance) return -EINVAL;
 	if (instance != bm->instance_id) return -ESTALE;
 	spin_lock_irqsave(&bm->state_lock, flags);
-	if (epoch <= bm->reader_epoch) {
+	if (epoch <= bm->reader_epoch ||
+	    (bm->owner_epoch && !bm->fenced)) {
 		spin_unlock_irqrestore(&bm->state_lock, flags);
 		return -ESTALE;
 	}
