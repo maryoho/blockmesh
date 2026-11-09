@@ -1,7 +1,6 @@
 package metastore
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
