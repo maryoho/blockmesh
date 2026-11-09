@@ -116,7 +116,13 @@ func OpenPersistentWithExternalPages(store *metastore.Store, journal metastore.C
 	t, err := openTree(store, true, journal)
 	if err != nil { return nil, err }
 	hasExternal := false
-	for _, item := range t.items { if item.Key>>63 != 0 { hasExternal = true; break } }
+	dataRetireFloor := ^uint64(0)
+	if dynamicSB, dynamicErr := store.DynamicPoolSuperblock(); dynamicErr == nil {
+		dataRetireFloor = dynamicSB.Geometry.TotalBlocks
+	}
+	for _, item := range t.items {
+		if item.Key>>63 != 0 || item.Key >= dataRetireFloor { hasExternal = true; break }
+	}
 	if hasExternal && resolver == nil { return nil, errors.New("external-page index keys require an ExternalPageResolver") }
 	if resolver != nil {
 		t.externalPages, err = resolver(store, append([]Item(nil), t.items...))
