@@ -35,7 +35,7 @@ func TestDMRequestGateRWLifecycle(t *testing.T){
 	owner:=newManagerTestOwner(spec.VolumeID)
 	rt:=&Runtime{Spec:spec,Owner:owner}
 	checked:=false
-	if err=g.EnableRequestsGuarded(context.Background(),spec,rt,func()error{checked=true;return owner.Valid()});err!=nil{t.Fatal(err)}
+	if err=g.EnableRequestsGuarded(context.Background(),spec,rt,func()error{checked=true;if !owner.Valid(){return errors.New("owner lease lost")};return nil});err!=nil{t.Fatal(err)}
 	if !checked{t.Fatal("final health check was not called")}
 	if ownerGate.prepared!=1||ownerGate.enabled!=1{t.Fatalf("prepare/enable=%d/%d",ownerGate.prepared,ownerGate.enabled)}
 	if err=g.StopRequests(context.Background(),spec.VolumeID);err!=nil{t.Fatal(err)}
