@@ -448,7 +448,7 @@ func (m *DynamicVolumeRuntimeManager) CollectDataRetired(ctx context.Context, vo
 	}
 	m.mu.Lock()
 	if m.runtimes[volumeID] != rt || rt.stopping || rt.failure != nil || rt.poisoned != nil ||
-		rt.OwnerInvalid() {
+		rt.runtime.Owner == nil || !rt.runtime.Owner.Valid() {
 		m.mu.Unlock()
 		return failClosed(ErrRuntimeStopping)
 	}
