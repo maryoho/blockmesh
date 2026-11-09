@@ -47,6 +47,14 @@ type DynamicGeometry struct {
 	MetadataBytes     uint64
 }
 
+const (
+	// DynamicRetireIndexKeyStart/Limit reserve a stable B+Tree key interval
+	// outside the logical DataView address space. The interval does not move
+	// when the Pool grows, unlike a key range based on the current TotalBlocks.
+	DynamicRetireIndexKeyStart uint64 = 1 << 62
+	DynamicRetireIndexKeyLimit uint64 = 1 << 63
+)
+
 var ErrInvalidDynamicGeometry = errors.New("invalid BMPOOL03 dynamic geometry")
 
 // PlanDynamicGeometry derives AG and bitmap dimensions from the actual
@@ -63,6 +71,7 @@ func PlanDynamicGeometry(c DynamicGeometryConfig) (DynamicGeometry, error) {
 		return g, ErrInvalidDynamicGeometry
 	}
 	total := c.DataBytes / BlockSize
+	if total >= DynamicRetireIndexKeyStart { return g, fmt.Errorf("%w: logical block range overlaps reserved Data Retire index namespace", ErrInvalidDynamicGeometry) }
 	agSize := c.AGSizeBytes / BlockSize
 	agCount := ceilDivGeometry(total, agSize)
 	if agCount == 0 || agCount > math.MaxUint32 {
