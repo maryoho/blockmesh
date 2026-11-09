@@ -9,6 +9,7 @@ import (
 
 	"blockmesh/internal/allocator"
 	"blockmesh/internal/dynamicruntime"
+	"blockmesh/internal/metastore"
 	"blockmesh/internal/uapi"
 )
 
@@ -20,7 +21,7 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 	ctx context.Context, req uapi.Request, snapshot dynamicruntime.RuntimeRequestSnapshot,
 ) (Result, error) {
 	rt := snapshot.Runtime
-	if snapshot.Spec.Mode != 1 /* VolumeRuntimeReadWrite */ ||
+	if snapshot.Spec.Mode != metastore.VolumeRuntimeReadWrite ||
 		snapshot.OwnerEpoch == 0 || snapshot.OwnerEpoch != req.OwnerEpoch ||
 		rt == nil || rt.Owner == nil || rt.Allocator == nil || rt.Tree == nil {
 		return Result{}, ErrFenced
