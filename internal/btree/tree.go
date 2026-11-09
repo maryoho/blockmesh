@@ -152,6 +152,11 @@ func (t *Tree) Refresh() error {
 	if stats:=t.persistentArena.Stats();stats.ReservedPages!=0 {
 		return errors.New("cannot refresh B+Tree with outstanding metadata reservations")
 	}
+	if t.readerCoordinator!=nil {
+		unlock,err:=acquireReaderSet(t.readerCoordinator,t.store.Superblock().VolumeID)
+		if err!=nil{return err}
+		defer unlock()
+	}
 	if err:=t.store.Refresh();err!=nil{return err}
 	fresh,err:=openTree(t.store,true,t.journal)
 	if err!=nil{return fmt.Errorf("reload published B+Tree root: %w",err)}
@@ -167,7 +172,7 @@ func (t *Tree) Refresh() error {
 	persistent,err:=metastore.NewPersistentArena(t.store,live,t.journal,t.readerCoordinator)
 	if err!=nil{return fmt.Errorf("rebuild persistent Arena after refresh: %w",err)}
 	t.root=fresh.root
-	t.rootGeneration=t.store.Superblock().MappingSequence
+	t.rootGeneration=fresh.rootGeneration
 	t.items=append([]Item(nil),fresh.items...)
 	t.pages=append([]uint64(nil),fresh.pages...)
 	t.externalPages=external
