@@ -59,7 +59,7 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 	spin_lock_irqsave(&bm->state_lock, flags);
 	read_only = bm->read_only;
 	if (bm->fenced ||
-	    (read_only && (!bm->reader_gate_open || !bm->reader_epoch || write)) ||
+	    (read_only && (!bm->reader_gate_open || !bm->reader_epoch || bio_op(bio) != REQ_OP_READ)) ||
 	    (!read_only && (!bm->owner_epoch || (write && !bm->gate_open)))) {
 		spin_unlock_irqrestore(&bm->state_lock, flags);
 		return DM_MAPIO_KILL;
