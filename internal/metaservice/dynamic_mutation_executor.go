@@ -79,6 +79,45 @@ func (p *DynamicPoolRuntimeProcessor) executeAllocateZeroPublish(
 	return Result{Mapping: &uapi.Mapping{LogicalBlock: allocation.LogicalStart, PhysicalBlock: allocation.PhysicalStart, BlockCount: allocation.BlockCount}, RootGeneration: rt.Tree.RootGeneration()}, nil
 }
 
+
+func (p *DynamicPoolRuntimeProcessor) executeDiscard(
+	ctx context.Context, req uapi.Request, snapshot dynamicruntime.RuntimeRequestSnapshot,
+) (Result, error) {
+	rt := snapshot.Runtime
+	if rt == nil { return Result{}, ErrFenced }
+	rt.MutationMu.Lock()
+	defer rt.MutationMu.Unlock()
+	if err := ctx.Err(); err != nil { return Result{}, errors.Join(ErrRetry, err) }
+	if err := p.manager.ValidateMutationRuntime(snapshot.Spec.VolumeID, rt); err != nil {
+		return Result{}, errors.Join(ErrFenced, err)
+	}
+	if snapshot.Spec.Mode != metastore.VolumeRuntimeReadWrite || snapshot.OwnerEpoch == 0 ||
+		snapshot.OwnerEpoch != req.OwnerEpoch || rt.Owner == nil || rt.Allocator == nil || rt.Tree == nil {
+		return Result{}, ErrFenced
+	}
+	if !rt.Owner.Valid() || rt.Owner.Epoch() != req.OwnerEpoch { return Result{}, ErrFenced }
+	_, err := rt.Allocator.DiscardTxn(ctx, rt.Owner, allocator.AllocateRequest{
+		IdempotencyKey:req.IdempotencyKey, Fingerprint:allocationFingerprint(req),
+		LogicalStart:req.LogicalStart, BlockCount:req.BlockCount, Operation:uint16(req.Operation),
+	})
+	if err != nil {
+		if errors.Is(err, allocator.ErrAllocationOutcomeUnknown) {
+			stopErr := p.poisonAndScheduleDeactivation(snapshot.Spec.VolumeID, err)
+			return Result{}, errors.Join(ErrRetry, err, stopErr)
+		}
+		if errors.Is(err, allocator.ErrPoolAllocatorUnavailable) { return Result{}, errors.Join(ErrFenced,err) }
+		if errors.Is(err, context.Canceled) || errors.Is(err,context.DeadlineExceeded) {
+			return Result{}, errors.Join(ErrRetry,err)
+		}
+		return Result{}, fmt.Errorf("BMPOOL03 discard: %w",err)
+	}
+	if !rt.Owner.Valid() || rt.Owner.Epoch()!=req.OwnerEpoch {
+		stopErr:=p.poisonAndScheduleDeactivation(snapshot.Spec.VolumeID,errors.New("Owner lease lost after discard publication"))
+		return Result{},errors.Join(ErrFenced,stopErr)
+	}
+	return Result{RootGeneration:rt.Tree.RootGeneration()},nil
+}
+
 // allocationFingerprint binds an idempotency key to the complete immutable
 // request identity and allocation range. OwnerEpoch, NodeID, BootID, RequestID and QueueGeneration are intentionally
 // excluded: the same durable operation must replay after an Owner takeover.
