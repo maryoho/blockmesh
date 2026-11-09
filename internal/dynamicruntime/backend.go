@@ -64,6 +64,7 @@ type Runtime struct {
 	Superblock format.DynamicSuperblock
 	Store *metastore.Store
 	Descriptor format.DynamicVolumeDescriptor
+	RootGeneration uint64
 	Committers map[uint32]*wal.DynamicSharedCommitter
 	Committer *wal.DynamicSharedCommitter
 	Tree *btree.Tree
@@ -313,6 +314,8 @@ func (b *Backend) OpenReadOnly(ctx context.Context, spec metastore.VolumeRuntime
 	}
 	rt.Descriptor, err = store.DynamicPoolDescriptor()
 	if err != nil { return fail(err, reader) }
+	rt.RootGeneration = reader.RootGeneration()
+	if rt.RootGeneration != tree.RootGeneration() { return fail(errors.New("BMPOOL03 RO Tree and Reader pin generation diverged"), reader) }
 	return rt, reader, nil
 }
 
