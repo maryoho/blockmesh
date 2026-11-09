@@ -363,11 +363,43 @@ func (t *Tree) DeleteBatchWithImagesRetireExternal(keys []uint64, extra []metast
 	if t == nil || t.persistentArena == nil || t.journal == nil {
 		return metastore.ErrPersistentArenaRequired
 	}
-	if len(keys) == 0 || len(retireExternal) == 0 {
+	if len(keys) == 0 || len(retireExternal) == 0 || len(keys) != len(retireExternal) {
 		return metastore.ErrInvalidPageSet
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// This API is deliberately one-to-one: each removed external index value
+	// must be the exact Arena page retired by the same root transaction. A
+	// mismatched or duplicate page list could otherwise retire a still-indexed
+	// record or leave a deleted record permanently pinned.
+	retireSet := make(map[uint64]struct{}, len(retireExternal))
+	for _, id := range retireExternal {
+		if id == 0 || id == metastore.NoPage {
+			return metastore.ErrInvalidPageSet
+		}
+		if _, exists := retireSet[id]; exists {
+			return metastore.ErrInvalidPageSet
+		}
+		retireSet[id] = struct{}{}
+	}
+	seenKeys := make(map[uint64]struct{}, len(keys))
+	for _, key := range keys {
+		if _, exists := seenKeys[key]; exists {
+			return metastore.ErrInvalidPageSet
+		}
+		seenKeys[key] = struct{}{}
+		i := sort.Search(len(t.items), func(i int) bool { return t.items[i].Key >= key })
+		if i == len(t.items) || t.items[i].Key != key {
+			return ErrKeyNotFound
+		}
+		if _, ok := retireSet[t.items[i].Value]; !ok {
+			return metastore.ErrInvalidPageSet
+		}
+		delete(retireSet, t.items[i].Value)
+	}
+	if len(retireSet) != 0 {
+		return metastore.ErrInvalidPageSet
+	}
 	next := append([]Item(nil), t.items...)
 	var root *cowNode
 	if t.root != metastore.NoPage {
