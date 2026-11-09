@@ -136,6 +136,36 @@ func UnmarshalCompletion(b []byte) (Completion, error) {
 	c.PayloadBytes = binary.LittleEndian.Uint32(b[48:52])
 	_, err := c.MarshalBinary(); return c, err
 }
+// MarshalMappings encodes an ordered vector of logically contiguous extents.
+func MarshalMappings(mappings []Mapping) ([]byte, error) {
+	if len(mappings) == 0 || len(mappings) > MaxBatch { return nil, fmt.Errorf("mapping vector count must be in [1,%d]", MaxBatch) }
+	b := make([]byte, len(mappings)*MappingSize)
+	var previousEnd uint64
+	for i, m := range mappings {
+		encoded, err := m.MarshalBinary()
+		if err != nil { return nil, fmt.Errorf("mapping[%d]: %w", i, err) }
+		if i > 0 && m.LogicalBlock != previousEnd { return nil, fmt.Errorf("mapping[%d] is not logically contiguous", i) }
+		previousEnd = m.LogicalBlock + uint64(m.BlockCount)
+		copy(b[i*MappingSize:(i+1)*MappingSize], encoded)
+	}
+	return b, nil
+}
+
+// UnmarshalMappings decodes a logically contiguous Mapping Vector.
+func UnmarshalMappings(b []byte, count uint32) ([]Mapping, error) {
+	if count == 0 || count > MaxBatch || uint64(len(b)) != uint64(count)*MappingSize { return nil, errors.New("invalid mapping vector length") }
+	out := make([]Mapping, count)
+	var previousEnd uint64
+	for i := range out {
+		m, err := UnmarshalMapping(b[i*MappingSize:(i+1)*MappingSize])
+		if err != nil { return nil, fmt.Errorf("mapping[%d]: %w", i, err) }
+		if i > 0 && m.LogicalBlock != previousEnd { return nil, fmt.Errorf("mapping[%d] is not logically contiguous", i) }
+		previousEnd = m.LogicalBlock + uint64(m.BlockCount)
+		out[i] = m
+	}
+	return out, nil
+}
+
 func (m Mapping) MarshalBinary() ([]byte, error) {
 	if m.BlockCount == 0 || m.LogicalBlock > ^uint64(0)-uint64(m.BlockCount) || m.PhysicalBlock > ^uint64(0)-uint64(m.BlockCount) { return nil, errors.New("invalid mapping range") }
 	b := make([]byte, MappingSize)

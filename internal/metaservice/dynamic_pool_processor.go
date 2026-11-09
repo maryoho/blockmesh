@@ -46,9 +46,9 @@ func (p *DynamicPoolRuntimeProcessor) Process(ctx context.Context,req uapi.Reque
 	}
 	switch req.Operation {
 	case uapi.OpLookupBatch:
-		mapping,lookupErr:=lookupContiguous(snapshot.Runtime.Tree,req.LogicalStart,req.BlockCount)
+		mappings,lookupErr:=lookupMappingVector(snapshot.Runtime.Tree,req.LogicalStart,req.BlockCount)
 		if lookupErr!=nil{return Result{},lookupErr}
-		return Result{Mapping:&mapping,RootGeneration:snapshot.RootGeneration},nil
+		return Result{Mappings:mappings,RootGeneration:snapshot.RootGeneration},nil
 	case uapi.OpAllocateZeroPublish:
 		return p.executeAllocateZeroPublish(ctx, req, snapshot)
 	case uapi.OpDiscard:

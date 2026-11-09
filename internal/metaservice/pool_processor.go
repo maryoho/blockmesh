@@ -118,9 +118,9 @@ func (p *PoolRuntimeProcessor) Process(ctx context.Context, req uapi.Request) (R
 			state.rootGeneration != snap.RootGeneration || state.metadata != snap.Metadata {
 			if err = p.openTree(state, snap); err != nil { return Result{}, err }
 		}
-		mapping, lookupErr := lookupContiguous(state.tree, req.LogicalStart, req.BlockCount)
+		mappings, lookupErr := lookupMappingVector(state.tree, req.LogicalStart, req.BlockCount)
 		if lookupErr != nil { return Result{}, lookupErr }
-		return Result{Mapping: &mapping}, nil
+		return Result{Mappings: mappings}, nil
 
 	case uapi.OpAllocateZeroPublish:
 		if snap.Spec.Mode != metastore.VolumeRuntimeReadWrite || snap.OwnerEpoch != req.OwnerEpoch {
@@ -160,6 +160,24 @@ func (p *PoolRuntimeProcessor) Process(ctx context.Context, req uapi.Request) (R
 	default:
 		return Result{}, ErrInvalid
 	}
+}
+
+func lookupMappingVector(tree interface{ Get(uint64) (uint64, error) }, logical uint64, count uint32) ([]uapi.Mapping, error) {
+	if tree == nil || count == 0 || count > uapi.MaxBatch || logical > ^uint64(0)-uint64(count) { return nil, ErrInvalid }
+	out := make([]uapi.Mapping, 0, count)
+	for i := uint32(0); i < count; i++ {
+		l := logical + uint64(i)
+		physical, err := tree.Get(l)
+		if errors.Is(err, btree.ErrKeyNotFound) { return nil, ErrUnmapped }
+		if err != nil { return nil, err }
+		if n := len(out); n > 0 && out[n-1].PhysicalBlock+uint64(out[n-1].BlockCount) == physical {
+			out[n-1].BlockCount++
+		} else {
+			out = append(out, uapi.Mapping{LogicalBlock:l, PhysicalBlock:physical, BlockCount:1})
+		}
+	}
+	if _, err := uapi.MarshalMappings(out); err != nil { return nil, err }
+	return out, nil
 }
 
 func lookupContiguous(tree interface{ Get(uint64) (uint64, error) }, logical uint64, count uint32) (uapi.Mapping, error) {

@@ -57,21 +57,33 @@ func(q *QueueMemory) Drain(ctx context.Context,p Processor,limit int)(consumed,p
   var result Result;var pe error
   if de!=nil{pe=ErrInvalid}else{result,pe=p.Process(ctx,req)}
   code:=resultCode(pe);if pe!=nil{result=Result{}}
+  var mappings []uapi.Mapping
+  if result.Mapping!=nil { mappings=[]uapi.Mapping{*result.Mapping} }
+  if len(result.Mappings)>0 {
+   if len(mappings)>0 { code=uapi.CodeInternal;result=Result{} } else { mappings=result.Mappings }
+  }
   if code==uapi.CodeOK{
    switch req.Operation{
    case uapi.OpLookupBatch,uapi.OpAllocateZeroPublish:
-    if result.Mapping==nil||result.Mapping.LogicalBlock!=req.LogicalStart||result.Mapping.BlockCount!=req.BlockCount{code=uapi.CodeInternal;result=Result{}}
-    if code==uapi.CodeOK{if _,e:=result.Mapping.MarshalBinary();e!=nil{code=uapi.CodeInternal;result=Result{}}}
+    if len(mappings)==0 { code=uapi.CodeInternal } else {
+     if _,e:=uapi.MarshalMappings(mappings);e!=nil { code=uapi.CodeInternal } else {
+      first,last:=mappings[0],mappings[len(mappings)-1]
+      if first.LogicalBlock!=req.LogicalStart || last.LogicalBlock+uint64(last.BlockCount)!=req.LogicalStart+uint64(req.BlockCount) { code=uapi.CodeInternal }
+      if req.Operation==uapi.OpAllocateZeroPublish && len(mappings)!=1 { code=uapi.CodeInternal }
+     }
+    }
    case uapi.OpDiscard,uapi.OpFlush:
-    if result.Mapping!=nil{code=uapi.CodeInternal;result=Result{}}
-   default:code=uapi.CodeInvalid;result=Result{}
+    if len(mappings)!=0 { code=uapi.CodeInternal }
+   default:code=uapi.CodeInvalid
    }
+   if code!=uapi.CodeOK { result=Result{};mappings=nil }
   }
   cs:=ct&mask;po,mc,pb:=uint32(0),uint32(0),uint32(0)
-  if code==uapi.CodeOK&&result.Mapping!=nil{
+  if code==uapi.CodeOK&&len(mappings)>0{
    po=cs*uapi.MaxBatch*uapi.MappingSize
-   enc,e:=result.Mapping.MarshalBinary();if e!=nil{err=e;return}
-   off:=int(po);copy(q.Payload[off:off+uapi.MappingSize],enc);mc,pb=1,uapi.MappingSize
+   enc,e:=uapi.MarshalMappings(mappings);if e!=nil{err=e;return}
+   pb=uint32(len(enc));mc=uint32(len(mappings))
+   off:=int(po);copy(q.Payload[off:off+len(enc)],enc)
   }
   responseGeneration:=req.RootGeneration
   if code==uapi.CodeOK && result.RootGeneration!=0 { responseGeneration=result.RootGeneration }
