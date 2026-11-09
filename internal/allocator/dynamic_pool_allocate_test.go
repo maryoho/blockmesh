@@ -3,6 +3,7 @@ package allocator
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"sync"
 
