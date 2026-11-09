@@ -238,6 +238,13 @@ func Open(dev Device, expectedVolumeID string) (*Store, error) {
 
 // OwnerEpoch returns the durable Pool-backed owner fencing epoch. Legacy
 // standalone Stores do not carry a distributed owner epoch and return zero.
+// ReadAt exposes bounded raw metadata reads for format-specific planners.
+// Writes remain available only through WAL Committers or Store transactions.
+func (s *Store) ReadAt(p []byte, off int64) (int, error) {
+	if s == nil || s.dev == nil { return 0, errors.New("nil metastore device") }
+	return s.dev.ReadAt(p, off)
+}
+
 func (s *Store) OwnerEpoch() uint64 {
 	if s == nil { return 0 }
 	s.mu.RLock()
