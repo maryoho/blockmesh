@@ -25,6 +25,8 @@ type ReaderSession struct {
 	rootGeneration uint64
 	rootPage uint64
 	closed bool
+	prUnregistered bool
+	tableClosed bool
 }
 
 func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volume.ReaderLeaseConfig,
@@ -43,7 +45,7 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 		if cleanupErr==nil { _ = lease.Close() }
 		return nil, errors.Join(err,cleanupErr)
 	}
-	if err = table.Register(slot, nodeID, bootID, epoch, rootGeneration); err != nil {
+	if err = table.RegisterContext(ctx, slot, nodeID, bootID, epoch, rootGeneration); err != nil {
 		cleanupErr:=registrar.UnregisterReader(ctx,nodeID,bootID)
 		if cleanupErr==nil { _ = lease.Close() }
 		return nil, errors.Join(err,cleanupErr)
@@ -106,8 +108,15 @@ func (s *ReaderSession) CloseDrained(ctx context.Context, ioDrained bool) error 
 	s.mu.Lock(); defer s.mu.Unlock()
 	if s.closed { return nil }
 	if !ioDrained { return ErrUnsafeReclaim }
-	if err:=s.registrar.UnregisterReader(ctx,s.nodeID,s.bootID);err!=nil{return err}
-	if err := s.table.CloseDrained(s.slot,s.nodeID,s.bootID,s.epoch,true); err != nil { return err }
+	if !s.prUnregistered {
+		if err:=s.registrar.UnregisterReader(ctx,s.nodeID,s.bootID);err!=nil{return err}
+		s.prUnregistered=true
+	}
+	if !s.tableClosed {
+		if err := s.table.CloseDrained(s.slot,s.nodeID,s.bootID,s.epoch,true); err != nil { return err }
+		s.tableClosed=true
+	}
+	if err:=s.lease.Close();err!=nil{return err}
 	s.closed = true
-	return s.lease.Close()
+	return nil
 }
