@@ -421,6 +421,79 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 		BlockCount:req.BlockCount,OwnerEpoch:desc.OwnerEpoch},nil
 }
 
+// CollectDataRetired reclaims physical DataView extents only after every
+// Active/Leaving Reader has advanced beyond the retired root generation. The
+// caller must first stop new local data I/O and drain the runtime; ReaderTable
+// independently proves that remote Readers are either advanced, Closed after
+// drain, or durably Fenced. Queue deletion and bitmap release share one AG WAL
+// transaction, so recovery observes both or neither.
+func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.Lease, readers *metastore.ReaderTable, ioDrained bool) (uint64, error) {
+	if a == nil || !a.dynamic || a.store == nil || a.tree == nil || a.locks == nil ||
+		ctx == nil || ownerLease == nil || readers == nil || !readers.MatchesStore(a.store) {
+		return 0, ErrPoolAllocatorUnavailable
+	}
+	if !ioDrained { return 0, metastore.ErrUnsafeReclaim }
+	if err := ctx.Err(); err != nil { return 0, err }
+	sb, err := a.store.DynamicPoolSuperblock()
+	if err != nil { return 0, err }
+	desc, err := a.store.DynamicPoolDescriptor()
+	if err != nil { return 0, err }
+	if ownerLease.Resource() != "volume:"+desc.VolumeID || !ownerLease.Valid() {
+		return 0, errors.New("Owner lease does not match Volume Descriptor")
+	}
+	epoch, ok := ownerLease.(interface{ Epoch() uint64 })
+	if !ok || desc.OwnerEpoch == 0 || epoch.Epoch() != desc.OwnerEpoch {
+		return 0, errors.New("Owner lease epoch does not match durable Volume Descriptor")
+	}
+	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", desc.AG))
+	if err != nil { return 0, fmt.Errorf("acquire AG %d lock for Data Retire collection: %w", desc.AG, err) }
+	defer unlock()
+	if err = ctx.Err(); err != nil { return 0, err }
+	if !ownerLease.Valid() { return 0, errors.New("Owner lease lost before Data Retire collection") }
+	if err = a.store.Refresh(); err != nil { return 0, err }
+	desc, err = a.store.DynamicPoolDescriptor()
+	if err != nil { return 0, err }
+	if desc.OwnerEpoch != epoch.Epoch() || desc.VolumeID != ownerLease.Resource()[len("volume:"):] ||
+		desc.AG >= sb.Geometry.AGCount || a.tree.RootGeneration() != desc.MappingSequence {
+		return 0, errors.New("Volume Descriptor or B+Tree root changed before Data Retire collection")
+	}
+	safeGeneration, err := readers.SafeGenerationContext(ctx)
+	if err != nil { return 0, fmt.Errorf("read durable Reader generation set: %w", err) }
+	var records []DataRetireRecord
+	var keys, pageIDs []uint64
+	for _, item := range a.tree.Snapshot() {
+		if item.Key>>63 == 0 { continue }
+		page, readErr := a.store.ReadPage(item.Value)
+		if readErr != nil { return 0, fmt.Errorf("read external Arena page %d: %w", item.Value, readErr) }
+		if page.Type != DataRetireRecordPageType { continue }
+		record, decodeErr := DecodeDataRetireRecordPayload(page.Payload)
+		if decodeErr != nil || record.IndexKey != item.Key {
+			return 0, ErrDataRetireRecord
+		}
+		if record.AG != desc.AG || record.RetireGeneration >= desc.MappingSequence {
+			return 0, ErrDataRetireRecord
+		}
+		if safeGeneration <= record.RetireGeneration { continue }
+		records = append(records, record)
+		keys = append(keys, item.Key)
+		pageIDs = append(pageIDs, item.Value)
+	}
+	if len(records) == 0 { return 0, nil }
+	if !ownerLease.Valid() { return 0, errors.New("Owner lease lost before Bitmap release") }
+	if err = ctx.Err(); err != nil { return 0, err }
+	images, err := PlanDynamicBitmapFreeRanges(a.store, sb, desc.AG, records)
+	if err != nil { return 0, fmt.Errorf("plan atomic AG %d Bitmap release: %w", desc.AG, err) }
+	if err = a.tree.DeleteBatchWithImagesRetireExternal(keys, images, pageIDs); err != nil {
+		if isKnownPreCommitAllocationError(err) {
+			return 0, fmt.Errorf("commit Data Retire queue and Bitmap release: %w", err)
+		}
+		return 0, fmt.Errorf("%w: commit Data Retire queue and Bitmap release: %v", ErrAllocationOutcomeUnknown, err)
+	}
+	var released uint64
+	for _, record := range records { released += uint64(record.BlockCount) }
+	return released, nil
+}
+
 // poolDataView translates Pool-relative byte offsets into the backing data
 // device's DataStartSector-relative range.
 type poolDataView struct {
