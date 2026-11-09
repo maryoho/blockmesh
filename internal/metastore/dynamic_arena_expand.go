@@ -24,28 +24,36 @@ func(s *Store)expandDynamicArenaLegacy(committer Committer)error{
 	totalPages:=s.dynamicSB.Geometry.MetadataBytes/PageSize
 	next:=d
 	next.Generation++;next.VolumeSequence++
-	if d.LifecyclePages==0{
+	ownerPages:=uint64(0);if d.OwnerRecordStart!=0{ownerPages=format.OwnerRecordPages}
+	readerPages:=uint64(d.ReaderTablePages)
+	auxPages:=d.LifecyclePages+ownerPages+readerPages
+	if auxPages<d.LifecyclePages||auxPages<ownerPages||auxPages>totalPages{return ErrGeometry}
+	if auxPages==0{
 		newArenaPages:=totalPages-d.ArenaStart
 		if newArenaPages<=d.ArenaPages{return errors.New("expanded MetadataView has no additional Arena pages")}
 		next.ArenaPages=newArenaPages
 	}else{
-		if d.LifecyclePages>totalPages{return ErrGeometry}
-		newLifecycleStart:=totalPages-d.LifecyclePages
-		if newLifecycleStart<=d.LifecycleStart{return errors.New("expanded MetadataView does not move lifecycle tail forward")}
-		if newLifecycleStart<d.ArenaStart{return ErrGeometry}
-		// Buffer the complete lifecycle set before writing: a small metadata
-		// expansion can make source and destination ranges overlap.
-		pages:=make([][]byte,d.LifecyclePages)
-		for i:=uint64(0);i<d.LifecyclePages;i++{
+		auxStart:=d.ArenaStart+d.ArenaPages
+		if d.LifecyclePages!=0{auxStart=d.LifecycleStart}else if ownerPages!=0{auxStart=d.OwnerRecordStart}else if readerPages!=0{auxStart=d.ReaderTableStart}
+		newAuxStart:=totalPages-auxPages
+		if newAuxStart<=auxStart{return errors.New("expanded MetadataView does not move Volume auxiliary tail forward")}
+		if newAuxStart<d.ArenaStart{return ErrGeometry}
+		// Lifecycle, OwnerRecord and ReaderTable are one contiguous auxiliary
+		// tail. Buffer all pages before copying because source and destination
+		// can overlap during small metadata expansions.
+		pages:=make([][]byte,auxPages)
+		for i:=uint64(0);i<auxPages;i++{
 			pages[i]=make([]byte,PageSize)
-			if err:=readFullAt(s.dev,pages[i],int64((d.LifecycleStart+i)*PageSize));err!=nil{return fmt.Errorf("read lifecycle page %d: %w",d.LifecycleStart+i,err)}
+			if err:=readFullAt(s.dev,pages[i],int64((auxStart+i)*PageSize));err!=nil{return fmt.Errorf("read Volume auxiliary page %d: %w",auxStart+i,err)}
 		}
-		for i:=uint64(0);i<d.LifecyclePages;i++{
-			if err:=writeFullAt(s.dev,pages[i],int64((newLifecycleStart+i)*PageSize));err!=nil{return fmt.Errorf("copy lifecycle page %d: %w",newLifecycleStart+i,err)}
+		for i:=uint64(0);i<auxPages;i++{
+			if err:=writeFullAt(s.dev,pages[i],int64((newAuxStart+i)*PageSize));err!=nil{return fmt.Errorf("relocate Volume auxiliary page %d: %w",auxStart+i,err)}
 		}
-		if err:=s.dev.Sync();err!=nil{return fmt.Errorf("sync relocated lifecycle pages: %w",err)}
-		next.LifecycleStart=newLifecycleStart
-		next.ArenaPages=newLifecycleStart-d.ArenaStart
+		if err:=s.dev.Sync();err!=nil{return fmt.Errorf("sync relocated Volume auxiliary pages: %w",err)}
+		if d.LifecyclePages!=0{next.LifecycleStart=newAuxStart}
+		if ownerPages!=0{next.OwnerRecordStart=newAuxStart+d.LifecyclePages}
+		if readerPages!=0{next.ReaderTableStart=newAuxStart+d.LifecyclePages+ownerPages}
+		next.ArenaPages=newAuxStart-d.ArenaStart
 	}
 	if err:=next.ValidatePool(s.dynamicSB);err!=nil{return err}
 	image,err:=next.Encode();if err!=nil{return err}
