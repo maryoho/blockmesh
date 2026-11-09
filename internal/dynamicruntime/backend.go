@@ -69,6 +69,7 @@ type Runtime struct {
 	Committer *wal.DynamicSharedCommitter
 	Tree *btree.Tree
 	Allocator *allocator.PoolAllocator
+	Readers *metastore.ReaderTable
 	Owner OwnerLease
 	MutationMu sync.Mutex
 	closeMu sync.Mutex
@@ -204,6 +205,11 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 	tree, err := btree.OpenPersistentWithExternalPages(store, volumeCommitter, allocator.ResolveIdempotencyPages, b.cfg.ReaderCoordinator)
 	if err != nil { return cleanup(fmt.Errorf("open persistent BMPOOL03 B+Tree/Arena: %w", err)) }
 	rt.Tree = tree
+	readerStart, readerPages, err := store.ReaderTableRange()
+	if err != nil { return cleanup(fmt.Errorf("locate BMPOOL03 Reader Table: %w", err)) }
+	readers, err := metastore.NewReaderTable(store, readerStart, readerPages, volumeCommitter, b.cfg.ReaderCoordinator)
+	if err != nil { return cleanup(fmt.Errorf("open BMPOOL03 Reader Table for Data Retire collection: %w", err)) }
+	rt.Readers = readers
 	poolAllocator, err := allocator.NewDynamicPoolAllocator(store, tree, b.cfg.Locker, data)
 	if err != nil { return cleanup(fmt.Errorf("open BMPOOL03 PoolAllocator: %w", err)) }
 	rt.Allocator = poolAllocator
@@ -214,6 +220,21 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 		return cleanup(errors.New("BMDVOL03 OwnerEpoch publication did not match the live fenced Owner lease"))
 	}
 	return rt, nil
+}
+
+// CollectDataRetired is the online RW maintenance entry point. The caller
+// must provide ioDrained=true only after the kernel/runtime has stopped new
+// references to the retired generation and drained all old-generation data
+// I/O. Data.Sync is issued before the allocator atomically deletes queue
+// records and clears Bitmap bits through the AG WAL.
+func (rt *Runtime) CollectDataRetired(ctx context.Context, ioDrained bool) (uint64, error) {
+	if rt == nil || ctx == nil || rt.Allocator == nil || rt.Readers == nil || rt.Owner == nil ||
+		rt.Data == nil || !rt.Owner.Valid() {
+		return 0, ErrOwnerProof
+	}
+	if !ioDrained { return 0, metastore.ErrUnsafeReclaim }
+	if err := rt.Data.Sync(); err != nil { return 0, fmt.Errorf("flush DataView before Data Retire collection: %w", err) }
+	return rt.Allocator.CollectDataRetired(ctx, rt.Owner, rt.Readers, true)
 }
 
 // OpenReadOnly opens BMPOOL03 metadata without acquiring the exclusive
