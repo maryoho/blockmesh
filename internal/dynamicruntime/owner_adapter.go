@@ -32,5 +32,4 @@ func (a *OwnerCoordinatorAdapter) AcquireOwner(ctx context.Context, spec metasto
 	return lease,nil
 }
 
-var _ OwnerAcquirer = (*OwnerCoordinatorAdapter)(nil)
 var _ OwnerLease = (*volume.OwnerLease)(nil)
