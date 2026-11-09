@@ -85,6 +85,7 @@ type managedRuntime struct {
 	lossCause error
 	failStopOnce sync.Once
 	requestMu sync.Mutex
+	poisoned error
 }
 
 type DynamicVolumeRuntimeManager struct {
