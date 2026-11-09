@@ -227,7 +227,7 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 		}
 		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil || rt.runtime.Spec != spec ||
 			rt.reader.Slot() != spec.ReaderSlot || rt.reader.Epoch() != spec.ReaderEpoch ||
-			rt.runtime.Tree == nil || rt.runtime.Tree.RootGeneration() != rt.reader.RootGeneration() {
+			rt.runtime.RootGeneration == 0 || rt.runtime.RootGeneration != rt.reader.RootGeneration() {
 			return m.retainPartialActivation(ctx, rt, errors.New("BMPOOL03 RO opener returned nil or mismatched Runtime/Reader session"))
 		}
 	}
