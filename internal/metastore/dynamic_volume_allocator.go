@@ -213,15 +213,34 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 		if !allZeroLifecycle(page){return d,errors.New("BMPOOL03 Volume Descriptor slot is already occupied")}
 	}
 	if err=a.ensureUniqueVolumeID(d.VolumeID,index);err!=nil{return d,err}
-	need:=d.ArenaPages+d.LifecyclePages+2
-	if need<d.ArenaPages||need<d.LifecyclePages{return d,ErrGeometry}
-	start,ok:=a.findRun(need);if !ok{return d,ErrDynamicVolumeSpace}
+	baseNeed:=d.ArenaPages+d.LifecyclePages+format.OwnerRecordPages
+	if baseNeed<d.ArenaPages||baseNeed<d.LifecyclePages{return d,ErrGeometry}
+	readerPages:=format.ReaderTablePages
+	need:=baseNeed+readerPages
+	if need<baseNeed{return d,ErrGeometry}
+	start,ok:=a.findRun(need)
+	if !ok {
+		// Very small metadata geometries may still create a RW Volume with
+		// OwnerRecord but without a durable Reader Table; RO activation then
+		// remains unavailable. Prefer the complete layout whenever possible.
+		readerPages=0
+		need=baseNeed
+		start,ok=a.findRun(need)
+	}
+	if !ok{return d,ErrDynamicVolumeSpace}
 	nextBitmap:=append([]byte(nil),a.bitmap...)
 	for bit:=start;bit<start+need;bit++{nextBitmap[bit/8]|=1<<uint(bit%8)}
 	nextHeader:=a.header;nextHeader.Generation++;nextHeader.BitmapCRC=crc32.Checksum(nextBitmap,crcTable)
 	d.ArenaStart=nextHeader.RegionStart+start
 	if d.LifecyclePages==0{d.LifecycleStart=0}else{d.LifecycleStart=d.ArenaStart+d.ArenaPages}
 	d.OwnerRecordStart=d.ArenaStart+d.ArenaPages+d.LifecyclePages
+	if readerPages!=0 {
+		d.ReaderTableStart=d.OwnerRecordStart+format.OwnerRecordPages
+		d.ReaderTablePages=uint32(readerPages)
+	} else {
+		d.ReaderTableStart=0
+		d.ReaderTablePages=0
+	}
 	if err=d.ValidatePool(a.sb);err!=nil{return d,err}
 	desc,err:=d.Encode();if err!=nil{return d,err}
 	images,err:=a.bitmapHeaderImages(nextBitmap,nextHeader);if err!=nil{return d,err}
@@ -394,7 +413,8 @@ func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,p
 	if d.ArenaStart<a.header.RegionStart{return ErrGeometry}
 	start:=d.ArenaStart-a.header.RegionStart
 	need:=d.ArenaPages+d.LifecyclePages
-	if d.OwnerRecordStart!=0{need+=2}
+	if d.OwnerRecordStart!=0{need+=format.OwnerRecordPages}
+	need+=uint64(d.ReaderTablePages)
 	if need<d.ArenaPages||start<a.header.AllocStart||need==0||start>a.header.RegionPages||need>a.header.RegionPages-start{return ErrGeometry}
 	nextBitmap:=append([]byte(nil),a.bitmap...)
 	for bit:=start;bit<start+need;bit++{
