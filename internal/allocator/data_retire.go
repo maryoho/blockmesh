@@ -151,13 +151,13 @@ func dataRetireRanges(physical []uint64, generation uint64, agSizeBlocks uint64)
 }
 
 
-func unreferencedPhysicalBlocks(tree *btree.Tree, logicalStart uint64, blockCount uint32, candidates []uint64) []uint64 {
+func unreferencedPhysicalBlocks(tree *btree.Tree, logicalStart uint64, blockCount uint32, candidates []uint64, totalBlocks uint64) []uint64 {
 	if tree == nil || len(candidates) == 0 { return nil }
 	set := make(map[uint64]struct{}, len(candidates))
 	for _, id := range candidates { set[id] = struct{}{} }
 	end := logicalStart + uint64(blockCount)
 	for _, item := range tree.Snapshot() {
-		if item.Key>>63 != 0 || (item.Key >= logicalStart && item.Key < end) { continue }
+		if item.Key>>63 != 0 || item.Key >= totalBlocks || (item.Key >= logicalStart && item.Key < end) { continue }
 		delete(set, item.Value)
 	}
 	out := make([]uint64, 0, len(set))
