@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 
+	"blockmesh/internal/format"
 	"blockmesh/internal/metastore"
 )
 
@@ -116,12 +117,11 @@ func OpenPersistentWithExternalPages(store *metastore.Store, journal metastore.C
 	t, err := openTree(store, true, journal)
 	if err != nil { return nil, err }
 	hasExternal := false
-	dataRetireFloor := ^uint64(0)
-	if dynamicSB, dynamicErr := store.DynamicPoolSuperblock(); dynamicErr == nil {
-		dataRetireFloor = dynamicSB.Geometry.TotalBlocks
-	}
 	for _, item := range t.items {
-		if item.Key>>63 != 0 || item.Key >= dataRetireFloor { hasExternal = true; break }
+		if item.Key>>63 != 0 || (item.Key >= format.DynamicRetireIndexKeyStart && item.Key < format.DynamicRetireIndexKeyLimit) {
+			hasExternal = true
+			break
+		}
 	}
 	if hasExternal && resolver == nil { return nil, errors.New("external-page index keys require an ExternalPageResolver") }
 	if resolver != nil {
@@ -167,10 +167,11 @@ func (t *Tree) Refresh() error {
 	fresh,err:=openTree(t.store,true,t.journal)
 	if err!=nil{return fmt.Errorf("reload published B+Tree root: %w",err)}
 	hasExternal:=false
-	dataRetireFloor:=^uint64(0)
-	if dynamicSB,dynamicErr:=t.store.DynamicPoolSuperblock();dynamicErr==nil { dataRetireFloor=dynamicSB.Geometry.TotalBlocks }
 	for _,item:=range fresh.items {
-		if item.Key>>63!=0 || item.Key>=dataRetireFloor {hasExternal=true;break}
+		if item.Key>>63!=0 || (item.Key>=format.DynamicRetireIndexKeyStart && item.Key<format.DynamicRetireIndexKeyLimit) {
+			hasExternal=true
+			break
+		}
 	}
 	if hasExternal&&t.externalPageResolver==nil {return errors.New("external-page index keys require an ExternalPageResolver")}
 	var external []uint64
