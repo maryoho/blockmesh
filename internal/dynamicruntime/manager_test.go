@@ -48,7 +48,7 @@ func (r *managerTestReader) Heartbeat() error {
 func (r *managerTestReader) Slot() uint32 { return 2 }
 func (r *managerTestReader) Epoch() uint64 { return 9 }
 func (r *managerTestReader) RootGeneration() uint64 { return 1 }
-func (r *managerTestReader) RequestSnapshot() (uint64,uint64,error) { return 0,1,nil }
+func (r *managerTestReader) RequestSnapshot(context.Context) (uint64,uint64,error) { return 0,1,nil }
 
 func (r *managerTestReader) CloseDrained(_ context.Context, drained bool) error {
 	if !drained { return errors.New("not drained") }
