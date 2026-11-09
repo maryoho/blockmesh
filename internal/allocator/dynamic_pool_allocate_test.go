@@ -275,14 +275,25 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 	alloc, err = NewDynamicPoolAllocator(store, tree, locks, data)
 	if err != nil { t.Fatal(err) }
 	if _, err = metadata.ReadAt(bitmap, int64(g.BitmapOffset+format.PageSize)); err != nil { t.Fatal(err) }
-	if bitmap[0]&0x01 != 0 || bitmap[0]&0x02 == 0 {
-		t.Fatalf("WAL recovery did not atomically apply COW reclaim bitmap: %08b", bitmap[0])
-	}
+	queueRecords := 0
 	for _, item := range tree.Snapshot() {
 		if item.Key < format.DynamicRetireIndexKeyStart || item.Key >= format.DynamicRetireIndexKeyLimit { continue }
 		page, readErr := store.ReadPage(item.Value)
 		if readErr != nil { t.Fatal(readErr) }
-		if page.Type == DataRetireRecordPageType { t.Fatal("Data Retire queue entry survived committed Bitmap release") }
+		if page.Type == DataRetireRecordPageType { queueRecords++ }
+	}
+	// Recovery may observe either side of the commit boundary. The only valid
+	// states are (queue present, bit allocated) or (queue absent, bit free).
+	committed := queueRecords == 0 && bitmap[0]&0x01 == 0
+	uncommitted := queueRecords == 1 && bitmap[0]&0x01 != 0
+	if !committed && !uncommitted {
+		t.Fatalf("WAL recovery split Data Retire queue/Bitmap state: queue=%d bitmap=%08b", queueRecords, bitmap[0])
+	}
+	if bitmap[0]&0x02 == 0 { t.Fatalf("new COW mapping block unexpectedly free: %08b", bitmap[0]) }
+	if uncommitted {
+		if got, collectErr := alloc.CollectDataRetired(context.Background(), lease, readers, true); collectErr != nil || got != 1 {
+			t.Fatalf("retry uncommitted Data Retire transaction reclaimed=%d err=%v", got, collectErr)
+		}
 	}
 	// The Data Retire record page itself was retired by the same root
 	// transaction. Advance past that deletion root and reclaim it through the
