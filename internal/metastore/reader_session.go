@@ -56,6 +56,7 @@ func JoinReaderSession(ctx context.Context, table *ReaderTable, leaseConfig volu
 	}
 	session.tableRegistered=true
 	return session,nil
+}
 
 func (s *ReaderSession) checkLeaseLocked() error {
 	if s == nil || s.closed { return errors.New("reader session is closed") }
