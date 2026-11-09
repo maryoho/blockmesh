@@ -45,3 +45,14 @@ func TestDataRetireRecordPayloadRoundTrip(t *testing.T) {
 		t.Fatal("corrupt Data Retire record passed CRC validation")
 	}
 }
+
+func TestNextDataRetireIndexKeyWrapsInsideReservedNamespace(t *testing.T) {
+	if got := nextDataRetireIndexKey(dataRetireIndexLimit - 1); got != dataRetireNamespace {
+		t.Fatalf("probe wrapped to %#x, want namespace start %#x", got, dataRetireNamespace)
+	}
+	if got := nextDataRetireIndexKey(dataRetireIndexNamespaceLast()); got != dataRetireIndexNamespaceLast()+1 {
+		t.Fatalf("probe advanced to %#x unexpectedly", got)
+	}
+}
+
+func dataRetireIndexNamespaceLast() uint64 { return dataRetireIndexLimit - 2 }
