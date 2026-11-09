@@ -19,7 +19,7 @@ var (
 // Processor must enforce request identity and epoch admission. AllocateZeroPublish
 // must zero data before publishing the mapping; Flush must durably flush metadata.
 type Processor interface { Process(context.Context,uapi.Request)(Result,error) }
-type Result struct { Mapping *uapi.Mapping }
+type Result struct { Mapping *uapi.Mapping; RootGeneration uint64 }
 type ProcessorFunc func(context.Context,uapi.Request)(Result,error)
 func(f ProcessorFunc) Process(c context.Context,r uapi.Request)(Result,error){return f(c,r)}
 func resultCode(e error) uapi.ResultCode {
