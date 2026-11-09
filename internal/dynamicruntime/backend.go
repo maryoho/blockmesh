@@ -224,17 +224,14 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 	return rt, nil
 }
 
-// CollectDataRetired is the online RW maintenance entry point. The caller
-// must provide ioDrained=true only after the kernel/runtime has stopped new
-// references to the retired generation and drained all old-generation data
-// I/O. Data.Sync is issued before the allocator atomically deletes queue
-// records and clears Bitmap bits through the AG WAL.
-func (rt *Runtime) CollectDataRetired(ctx context.Context, ioDrained bool) (uint64, error) {
+// collectDataRetiredAfterDrain is called only by DynamicVolumeRuntimeManager
+// after its DM RequestGate has synchronously stopped admission and drained all
+// in-flight BIOs. Data.Sync precedes the atomic queue/Bitmap WAL transaction.
+func (rt *Runtime) collectDataRetiredAfterDrain(ctx context.Context) (uint64, error) {
 	if rt == nil || ctx == nil || rt.Allocator == nil || rt.Readers == nil || rt.Owner == nil ||
 		rt.Data == nil || !rt.Owner.Valid() {
 		return 0, ErrOwnerProof
 	}
-	if !ioDrained { return 0, metastore.ErrUnsafeReclaim }
 	if err := rt.Data.Sync(); err != nil { return 0, fmt.Errorf("flush DataView before Data Retire collection: %w", err) }
 	return rt.Allocator.CollectDataRetired(ctx, rt.Owner, rt.Readers, true)
 }
