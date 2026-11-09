@@ -538,6 +538,23 @@ func (m *DynamicVolumeRuntimeManager) ResolveRequest(ctx context.Context,volumeI
 }
 
 
+// ValidateMutationRuntime confirms that the supplied Runtime is still the
+// active, unpoisoned instance after the caller has acquired its per-Volume
+// mutation mutex. It closes the queued-mutator race during fail-stop.
+func (m *DynamicVolumeRuntimeManager) ValidateMutationRuntime(volumeID string, runtime *Runtime) error {
+	if m == nil || runtime == nil {
+		return ErrRuntimeStopping
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rt := m.runtimes[volumeID]
+	if rt == nil || rt.runtime != runtime || !rt.enabled || rt.stopping ||
+		rt.state != RuntimeActive || rt.failure != nil || rt.poisoned != nil {
+		return ErrRuntimeStopping
+	}
+	return nil
+}
+
  // PoisonAndStopRequests atomically makes the Runtime unavailable to new
  // ResolveRequest calls, then closes DM admission without waiting for the
  // current request to complete. The caller may schedule Deactivate afterward;
