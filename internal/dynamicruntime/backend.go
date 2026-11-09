@@ -77,7 +77,7 @@ type Runtime struct {
 type Backend struct { cfg Config }
 
 func New(cfg Config) (*Backend, error) {
-	if cfg.OpenDevice == nil || cfg.Locker == nil || !cfg.Locker.Distributed() || cfg.WALResourceForAG == nil {
+	if cfg.OpenDevice == nil || cfg.Locker == nil || !cfg.Locker.Distributed() || cfg.WALResourceForAG == nil || cfg.ReaderCoordinator == nil {
 		return nil, ErrInvalidConfig
 	}
 	return &Backend{cfg: cfg}, nil
@@ -195,7 +195,7 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 	}
 	if !owner.Valid() { return cleanup(ErrOwnerProof) }
 
-	tree, err := btree.OpenPersistentWithExternalPages(store, volumeCommitter, allocator.ResolveIdempotencyPages)
+	tree, err := btree.OpenPersistentWithExternalPages(store, volumeCommitter, allocator.ResolveIdempotencyPages, b.cfg.ReaderCoordinator)
 	if err != nil { return cleanup(fmt.Errorf("open persistent BMPOOL03 B+Tree/Arena: %w", err)) }
 	rt.Tree = tree
 	poolAllocator, err := allocator.NewDynamicPoolAllocator(store, tree, b.cfg.Locker, data)
@@ -284,6 +284,17 @@ func (b *Backend) OpenReadOnly(ctx context.Context, spec metastore.VolumeRuntime
 	if err != nil { return fail(fmt.Errorf("create BMPOOL03 RO Reader Table committer: %w", err), nil) }
 	rt.Committers[desc.AG] = committer
 	rt.Committer = committer
+	// A read-only node may be the first process to touch the AG after an
+	// interrupted writer. OpenDynamicJournal performs committed-redo recovery;
+	// do this under the distributed AG WAL lock before snapshotting/registering
+	// the Reader generation.
+	if err = committer.Recover(); err != nil {
+		return fail(fmt.Errorf("recover BMPOOL03 AG %d WAL before RO registration: %w", desc.AG, err), nil)
+	}
+	if err = store.Refresh(); err != nil { return fail(fmt.Errorf("refresh BMPOOL03 Volume after WAL recovery: %w", err), nil) }
+	desc, err = store.DynamicPoolDescriptor()
+	if err != nil { return fail(err, nil) }
+	if desc.OwnerEpoch == 0 { return fail(errors.New("BMPOOL03 RO Volume OwnerEpoch is zero after WAL recovery"), nil) }
 	start, pages, err := store.ReaderTableRange()
 	if err != nil { return fail(fmt.Errorf("resolve BMPOOL03 Reader Table range: %w", err), nil) }
 	readerTable, err := metastore.NewReaderTable(store, start, pages, committer, b.cfg.ReaderCoordinator)
