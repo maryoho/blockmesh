@@ -195,7 +195,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		for _, retired := range retireRecords {
 			if retired.AG != ag { return result, errors.New("COW source block belongs to another AG; cross-AG atomic retirement is not supported") }
 		}
-		retireRecords, err = reserveDataRetireKeys(a.tree, retireRecords)
+		retireRecords, err = reserveDataRetireKeys(a.tree, retireRecords, dynamicSB.Geometry.TotalBlocks)
 		if err != nil { return result, fmt.Errorf("reserve Data Retire index keys: %w", err) }
 	}
 	reservation, ids, err := a.tree.ReserveExternalPages(uint64(1+len(retireRecords)))
@@ -385,7 +385,7 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 	for _, retired := range retireRecords {
 		if retired.AG != desc.AG { return result, errors.New("discard source block belongs to another AG; cross-AG atomic retirement is not supported") }
 	}
-	retireRecords, err = reserveDataRetireKeys(a.tree, retireRecords)
+	retireRecords, err = reserveDataRetireKeys(a.tree, retireRecords, sb.Geometry.TotalBlocks)
 	if err != nil { return result, fmt.Errorf("reserve discard Data Retire index keys: %w", err) }
 	reservation, ids, err := a.tree.ReserveExternalPages(uint64(1+len(retireRecords)))
 	if err != nil { return result, fmt.Errorf("reserve discard idempotency and Data Retire pages: %w", err) }
