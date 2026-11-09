@@ -481,7 +481,12 @@ func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.
 		keys = append(keys, item.Key)
 		pageIDs = append(pageIDs, item.Value)
 	}
-	if len(records) == 0 { return 0, nil }
+	if len(records) == 0 {
+		if _, collectErr := a.tree.CollectRetiredWithReaders(readers, true); collectErr != nil {
+			return 0, fmt.Errorf("collect retired metadata Arena pages: %w", collectErr)
+		}
+		return 0, nil
+	}
 	if !ownerLease.Valid() { return 0, errors.New("Owner lease lost before Bitmap release") }
 	if err = ctx.Err(); err != nil { return 0, err }
 	images, err := PlanDynamicBitmapFreeRanges(a.store, sb, desc.AG, records)
@@ -494,6 +499,9 @@ func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.
 	}
 	var released uint64
 	for _, record := range records { released += uint64(record.BlockCount) }
+	if _, collectErr := a.tree.CollectRetiredWithReaders(readers, true); collectErr != nil {
+		return released, fmt.Errorf("Data Retire committed; collect retired metadata Arena pages: %w", collectErr)
+	}
 	return released, nil
 }
 
