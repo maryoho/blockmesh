@@ -205,11 +205,13 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 	tree, err := btree.OpenPersistentWithExternalPages(store, volumeCommitter, allocator.ResolveIdempotencyPages, b.cfg.ReaderCoordinator)
 	if err != nil { return cleanup(fmt.Errorf("open persistent BMPOOL03 B+Tree/Arena: %w", err)) }
 	rt.Tree = tree
-	readerStart, readerPages, err := store.ReaderTableRange()
-	if err != nil { return cleanup(fmt.Errorf("locate BMPOOL03 Reader Table: %w", err)) }
-	readers, err := metastore.NewReaderTable(store, readerStart, readerPages, volumeCommitter, b.cfg.ReaderCoordinator)
-	if err != nil { return cleanup(fmt.Errorf("open BMPOOL03 Reader Table for Data Retire collection: %w", err)) }
-	rt.Readers = readers
+	if desc.ReaderTablePages != 0 {
+		readerStart, readerPages, readerErr := store.ReaderTableRange()
+		if readerErr != nil { return cleanup(fmt.Errorf("locate BMPOOL03 Reader Table: %w", readerErr)) }
+		readers, readerErr := metastore.NewReaderTable(store, readerStart, readerPages, volumeCommitter, b.cfg.ReaderCoordinator)
+		if readerErr != nil { return cleanup(fmt.Errorf("open BMPOOL03 Reader Table for Data Retire collection: %w", readerErr)) }
+		rt.Readers = readers
+	}
 	poolAllocator, err := allocator.NewDynamicPoolAllocator(store, tree, b.cfg.Locker, data)
 	if err != nil { return cleanup(fmt.Errorf("open BMPOOL03 PoolAllocator: %w", err)) }
 	rt.Allocator = poolAllocator
