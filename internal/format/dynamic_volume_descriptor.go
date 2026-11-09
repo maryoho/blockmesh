@@ -9,7 +9,8 @@ import (
 
 const (
 	DynamicVolumeDescriptorMagic="BMDVOL03"
-	DynamicVolumeDescriptorVersion=uint32(3)
+	DynamicVolumeDescriptorVersion=uint32(4)
+	LegacyDynamicVolumeDescriptorVersion=uint32(3)
 	dynamicVolumeDescriptorCRC=int(PageSize)-4
 )
 
@@ -62,11 +63,17 @@ func(d DynamicVolumeDescriptor)Encode()([]byte,error){
 
 func DecodeDynamicVolumeDescriptor(b []byte)(DynamicVolumeDescriptor,error){
 	var d DynamicVolumeDescriptor
-	if len(b)!=int(PageSize)||string(b[:8])!=DynamicVolumeDescriptorMagic||binary.LittleEndian.Uint32(b[8:12])!=DynamicVolumeDescriptorVersion||
+	if len(b)!=int(PageSize)||string(b[:8])!=DynamicVolumeDescriptorMagic||
 		crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli)!=binary.LittleEndian.Uint32(b[dynamicVolumeDescriptorCRC:]){return d,ErrVolumeDescriptor}
+	version:=binary.LittleEndian.Uint32(b[8:12])
+	if version!=DynamicVolumeDescriptorVersion && version!=LegacyDynamicVolumeDescriptorVersion{return d,ErrVolumeDescriptor}
 	name:=b[56:120];end:=len(name);for i,c:=range name{if c==0{end=i;break}}
 	for _,c:=range name[end:]{if c!=0{return d,ErrVolumeDescriptor}}
-	for _,c:=range b[188:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
+	if version==LegacyDynamicVolumeDescriptorVersion {
+		for _,c:=range b[176:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
+	} else {
+		for _,c:=range b[188:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
+	}
 	d=DynamicVolumeDescriptor{VolumeID:string(name[:end]),AG:binary.LittleEndian.Uint32(b[12:16]),Generation:binary.LittleEndian.Uint64(b[16:24]),
 		VolumeSequence:binary.LittleEndian.Uint64(b[24:32]),MappingRootOffset:binary.LittleEndian.Uint64(b[32:40]),
 		BitmapSequence:binary.LittleEndian.Uint64(b[40:48]),OwnerEpoch:binary.LittleEndian.Uint64(b[48:56]),
