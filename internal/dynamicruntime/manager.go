@@ -32,6 +32,7 @@ type ReadOnlySession interface {
 	Slot() uint32
 	Epoch() uint64
 	RootGeneration() uint64
+	RequestSnapshot() (rootPage, rootGeneration uint64, err error)
 }
 
 // ReadOnlyRuntimeOpener must open BMPOOL03 views from one Bootstrap generation,
@@ -83,6 +84,7 @@ type managedRuntime struct {
 	failure error
 	lossCause error
 	failStopOnce sync.Once
+	requestMu sync.Mutex
 }
 
 type DynamicVolumeRuntimeManager struct {
@@ -433,6 +435,90 @@ func (m *DynamicVolumeRuntimeManager) Shutdown(ctx context.Context) error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// RuntimeRequestSnapshot is a short-lived request admission proof. The
+// kernel BIO remains in flight until the corresponding completion is posted;
+// Deactivate fences and drains the DM target before closing Runtime resources.
+type RuntimeRequestSnapshot struct {
+	Spec metastore.VolumeRuntimeSpec
+	Runtime *Runtime
+	RootPage uint64
+	RootGeneration uint64
+	OwnerEpoch uint64
+	ReaderEpoch uint64
+}
+
+// ResolveRequest performs the userspace half of BMPOOL03 request admission.
+// RW requests are checked against the durable BMDVOL03 OwnerEpoch. RO requests
+// must match the durable Reader slot and its exact pinned RootGeneration.
+func (m *DynamicVolumeRuntimeManager) ResolveRequest(volumeID,nodeID,bootID string,
+	ownerEpoch,readerEpoch,rootGeneration uint64) (RuntimeRequestSnapshot,error) {
+	var out RuntimeRequestSnapshot
+	if m==nil || strings.TrimSpace(volumeID)=="" || strings.TrimSpace(nodeID)=="" || strings.TrimSpace(bootID)=="" {
+		return out,metastore.ErrRuntimeRequestInvalid
+	}
+	m.mu.Lock()
+	rt:=m.runtimes[volumeID]
+	if rt==nil || !rt.enabled || rt.stopping || rt.state!=RuntimeActive || rt.failure!=nil || rt.poisoned!=nil || rt.runtime==nil {
+		m.mu.Unlock()
+		return out,metastore.ErrRuntimeRequestFenced
+	}
+	spec:=rt.spec
+	m.mu.Unlock()
+	if spec.VolumeID!=volumeID || spec.NodeID!=nodeID || spec.BootID!=bootID {
+		return out,metastore.ErrRuntimeRequestFenced
+	}
+	rt.requestMu.Lock()
+	defer rt.requestMu.Unlock()
+	m.mu.Lock()
+	active:=m.runtimes[volumeID]==rt && rt.enabled && !rt.stopping &&
+		rt.state==RuntimeActive && rt.failure==nil && rt.poisoned==nil
+	m.mu.Unlock()
+	if !active { return out,metastore.ErrRuntimeRequestFenced }
+	out.Spec,out.Runtime=spec,rt.runtime
+	switch spec.Mode {
+	case metastore.VolumeRuntimeReadWrite:
+		if ownerEpoch==0 || readerEpoch!=0 { return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestInvalid }
+		if rt.runtime.Owner==nil || !rt.runtime.Owner.Valid() || rt.runtime.Owner.Epoch()!=ownerEpoch {
+			return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch
+		}
+		if rt.runtime.Store==nil || rt.runtime.Tree==nil { return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestFenced }
+		if err:=rt.runtime.Store.Refresh();err!=nil{return RuntimeRequestSnapshot{},err}
+		desc,err:=rt.runtime.Store.DynamicPoolDescriptor();if err!=nil{return RuntimeRequestSnapshot{},err}
+		if desc.OwnerEpoch!=ownerEpoch{return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch}
+		sb:=rt.runtime.Store.Superblock()
+		if rt.runtime.Tree.RootGeneration()!=sb.MappingSequence {
+			if err:=rt.runtime.Tree.Refresh();err!=nil{return RuntimeRequestSnapshot{},err}
+			sb=rt.runtime.Store.Superblock()
+		}
+		if rt.runtime.Tree.RootGeneration()!=sb.MappingSequence{return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch}
+		if rootGeneration!=0 && rootGeneration!=sb.MappingSequence{return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch}
+		out.RootPage,out.RootGeneration,out.OwnerEpoch=sb.RootPage,sb.MappingSequence,ownerEpoch
+	case metastore.VolumeRuntimeReadOnly:
+		if ownerEpoch!=0 || readerEpoch==0 || rootGeneration==0 || readerEpoch!=spec.ReaderEpoch {
+			return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestInvalid
+		}
+		if rt.reader==nil || rt.reader.Epoch()!=readerEpoch { return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch }
+		root,generation,err:=rt.reader.RequestSnapshot()
+		if err!=nil {
+			if errors.Is(err,metastore.ErrReaderLeaseLost)||errors.Is(err,metastore.ErrReaderIdentity) {
+				return RuntimeRequestSnapshot{},errors.Join(metastore.ErrRuntimeRequestFenced,err)
+			}
+			if errors.Is(err,metastore.ErrReaderGeneration) {
+				return RuntimeRequestSnapshot{},errors.Join(metastore.ErrRuntimeRequestStaleEpoch,err)
+			}
+			return RuntimeRequestSnapshot{},err
+		}
+		if generation!=rootGeneration || generation!=rt.runtime.RootGeneration ||
+			rt.runtime.Tree==nil || rt.runtime.Tree.RootGeneration()!=generation {
+			return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestStaleEpoch
+		}
+		out.RootPage,out.RootGeneration,out.ReaderEpoch=root,generation,readerEpoch
+	default:
+		return RuntimeRequestSnapshot{},metastore.ErrRuntimeRequestInvalid
+	}
+	return out,nil
 }
 
 func (m *DynamicVolumeRuntimeManager) RuntimeState(volumeID string) RuntimeState {
