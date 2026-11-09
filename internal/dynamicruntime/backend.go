@@ -237,14 +237,16 @@ func (b *Backend) OpenReadOnly(ctx context.Context, spec metastore.VolumeRuntime
 	if err != nil { return nil, nil, fmt.Errorf("open parent Pool LUN for RO: %w", err) }
 	rt := &Runtime{Spec: spec, Parent: parent, Committers: make(map[uint32]*wal.DynamicSharedCommitter)}
 	fail := func(cause error, reader *metastore.ReaderSession) (*Runtime, ReadOnlySession, error) {
-		var cleanup []error
 		if reader != nil {
 			if e := reader.CloseDrained(context.WithoutCancel(ctx), true); e != nil {
-				cleanup = append(cleanup, fmt.Errorf("close partially joined Reader session: %w", e))
+				// Keep the parent LUN and both views pinned until the durable
+				// Reader slot, local PR registrations and sanlock lease are closed.
+				return rt, reader, errors.Join(cause, fmt.Errorf("close partially joined Reader session: %w", e))
 			}
 		}
-		if e := rt.Close(); e != nil { cleanup = append(cleanup, fmt.Errorf("close partial BMPOOL03 RO Runtime: %w", e)) }
-		if len(cleanup) != 0 { return rt, reader, errors.Join(cause, errors.Join(cleanup...)) }
+		if e := rt.Close(); e != nil {
+			return rt, nil, errors.Join(cause, fmt.Errorf("close partial BMPOOL03 RO Runtime: %w", e))
+		}
 		return nil, nil, cause
 	}
 	if err := ctx.Err(); err != nil { return fail(err, nil) }
