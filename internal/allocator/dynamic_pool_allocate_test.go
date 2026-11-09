@@ -166,6 +166,9 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 		MappingRootOffset:g.MappingOffset, BitmapSequence:1, OwnerEpoch:7,
 		ArenaStart:arenaStart, ArenaPages:512, RootPage:metastore.NoPage,
 		LifecycleStart:arenaStart+512, LifecyclePages:8,
+		OwnerRecordStart:arenaStart+512+8,
+		ReaderTableStart:arenaStart+512+8+format.OwnerRecordPages,
+		ReaderTablePages:format.ReaderTablePages,
 	}
 	if err = format.InitializeDynamicVolumeDescriptor(metadata, sb, 0, desc); err != nil { t.Fatal(err) }
 	if err = metadata.Sync(); err != nil { t.Fatal(err) }
