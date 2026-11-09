@@ -279,9 +279,24 @@ func (t *ReaderTable) safeGenerationLocked() (uint64,error) {
 }
 
 func (t *ReaderTable) SafeGeneration() (uint64,error) {
-	unlock,err:=t.lockReaderSet();if err!=nil{return 0,err};defer unlock()
+	return t.SafeGenerationContext(context.Background())
+}
+
+// SafeGenerationContext computes the minimum generation pinned by Active or
+// Leaving readers under the cluster-wide Reader-set barrier. A newly joining
+// reader cannot register an older root because RegisterContext validates the
+// current published MappingSequence while holding the same barrier.
+func (t *ReaderTable) SafeGenerationContext(ctx context.Context) (uint64,error) {
+	if t == nil || ctx == nil { return 0, errors.New("ReaderTable and context are required") }
+	unlock,err:=t.lockReaderSetContext(ctx);if err!=nil{return 0,err};defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	return t.safeGenerationLocked()
+}
+
+// MatchesStore prevents accidentally using another Volume's Reader table to
+// authorize physical reclamation.
+func (t *ReaderTable) MatchesStore(store *Store) bool {
+	return t != nil && store != nil && t.store == store
 }
 
 func encodeReaderRecord(r ReaderRecord) ([]byte,error) {
