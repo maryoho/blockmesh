@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"sort"
 
 	"blockmesh/internal/btree"
 	"blockmesh/internal/format"
@@ -126,7 +127,7 @@ func dataRetireRanges(physical []uint64, generation uint64, agSizeBlocks uint64)
 	for i := range ids {
 		if ids[i] >= math.MaxUint64-1 { return nil, ErrDataRetireRecord }
 	}
-	sortUint64(ids)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	out := make([]DataRetireRecord, 0)
 	for i := 0; i < len(ids); {
 		start := ids[i]
@@ -141,14 +142,6 @@ func dataRetireRanges(physical []uint64, generation uint64, agSizeBlocks uint64)
 		i = end
 	}
 	return out, nil
-}
-
-func sortUint64(v []uint64) {
-	for i := 1; i < len(v); i++ {
-		x, j := v[i], i
-		for j > 0 && v[j-1] > x { v[j] = v[j-1]; j-- }
-		v[j] = x
-	}
 }
 
 // PlanDynamicBitmapFree produces redo images that clear a previously allocated
