@@ -609,4 +609,23 @@ func TestPersistentTreePublishesExternalArenaPageWithIndexAtomically(t *testing.
 	if _,err=OpenPersistent(reopenedStore,committer);err==nil {
 		t.Fatal("opening external-page index without resolver must fail closed")
 	}
+	const externalKey = (uint64(1) << 63) | 123
+	if err = reopened.DeleteBatchWithImagesRetireExternal([]uint64{externalKey}, nil, []uint64{recordID + 1}); !errors.Is(err, metastore.ErrInvalidPageSet) {
+		t.Fatalf("mismatched external page retirement must fail closed: %v", err)
+	}
+	if _, err = reopened.Get(externalKey); err != nil {
+		t.Fatalf("failed mismatched retirement changed the index: %v", err)
+	}
+	if err = reopened.DeleteBatchWithImagesRetireExternal([]uint64{externalKey}, nil, []uint64{recordID}); err != nil {
+		t.Fatalf("delete external index and retire its page atomically: %v", err)
+	}
+	foundRetired := false
+	for _, batch := range reopened.RetiredPages() {
+		for _, id := range batch.PageIDs {
+			if id == recordID { foundRetired = true }
+		}
+	}
+	if !foundRetired {
+		t.Fatalf("deleted external page %d was not moved to PersistentArena Retire Queue", recordID)
+	}
 }
