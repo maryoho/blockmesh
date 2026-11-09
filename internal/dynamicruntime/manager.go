@@ -300,7 +300,7 @@ func (m *DynamicVolumeRuntimeManager) checkHealth(rt *managedRuntime) error {
 		}
 	case metastore.VolumeRuntimeReadOnly:
 		if rt.reader == nil || rt.reader.Epoch() != rt.spec.ReaderEpoch ||
-			rt.runtime.Tree == nil || rt.runtime.Tree.RootGeneration() != rt.reader.RootGeneration() {
+			rt.runtime.RootGeneration == 0 || rt.runtime.RootGeneration != rt.reader.RootGeneration() {
 			return ErrReaderHealthRequired
 		}
 		if err := rt.reader.Heartbeat(); err != nil {
