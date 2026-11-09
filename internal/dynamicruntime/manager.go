@@ -360,6 +360,8 @@ func (m *DynamicVolumeRuntimeManager) watchRuntime(ctx context.Context, rt *mana
 
 func (m *DynamicVolumeRuntimeManager) failStop(rt *managedRuntime, cause error) {
 	if rt == nil { return }
+	rt.requestMu.Lock()
+	defer rt.requestMu.Unlock()
 	rt.failStopOnce.Do(func() {
 		err := m.cfg.Gate.FailStop(context.Background(), rt.spec, cause)
 		m.mu.Lock()
@@ -369,6 +371,91 @@ func (m *DynamicVolumeRuntimeManager) failStop(rt *managedRuntime, cause error) 
 		rt.failure = err
 		m.mu.Unlock()
 	})
+}
+
+// CollectDataRetired performs a full local DM admission stop and drain around
+// Data Retire collection. Unlike a caller-supplied boolean, the proof comes
+// from RequestGate.StopRequests/DrainRequests, whose kernel Fence operation
+// waits for every in-flight BIO. The same RW Runtime and Owner lease remain
+// held while the collector checks remote Reader generations and commits.
+func (m *DynamicVolumeRuntimeManager) CollectDataRetired(ctx context.Context, volumeID string) (uint64, error) {
+	if m == nil || ctx == nil || strings.TrimSpace(volumeID) == "" {
+		return 0, errors.New("manager, context and Volume ID are required")
+	}
+	vl := m.volumeLock(volumeID)
+	vl.Lock()
+	defer vl.Unlock()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return 0, ErrManagerClosed
+	}
+	rt := m.runtimes[volumeID]
+	if rt == nil || rt.runtime == nil || rt.spec.Mode != metastore.VolumeRuntimeReadWrite ||
+		rt.state != RuntimeActive || !rt.enabled || rt.stopping || rt.failure != nil || rt.poisoned != nil {
+		m.mu.Unlock()
+		return 0, ErrRuntimeStopping
+	}
+	m.inflight.Add(1)
+	m.mu.Unlock()
+	defer m.inflight.Done()
+
+	// Serialize against ResolveRequest. Existing request snapshots finish
+	// before admission is closed; later snapshots observe enabled=false.
+	rt.requestMu.Lock()
+	m.mu.Lock()
+	if m.runtimes[volumeID] != rt || rt.state != RuntimeActive || !rt.enabled ||
+		rt.stopping || rt.failure != nil || rt.poisoned != nil {
+		m.mu.Unlock()
+		rt.requestMu.Unlock()
+		return 0, ErrRuntimeStopping
+	}
+	rt.enabled = false
+	m.mu.Unlock()
+
+	failClosed := func(cause error) (uint64, error) {
+		m.mu.Lock()
+		rt.poisoned = cause
+		rt.enabled = false
+		m.mu.Unlock()
+		rt.requestMu.Unlock()
+		m.failStop(rt, cause)
+		return 0, cause
+	}
+	if err := ctx.Err(); err != nil { return failClosed(err) }
+	if err := m.cfg.Gate.StopRequests(ctx, volumeID); err != nil {
+		return failClosed(fmt.Errorf("stop DM admission for Data Retire collection: %w", err))
+	}
+	if err := m.cfg.Gate.DrainRequests(ctx, volumeID); err != nil {
+		return failClosed(fmt.Errorf("drain in-flight DM BIOs for Data Retire collection: %w", err))
+	}
+	if err := m.checkHealth(rt); err != nil {
+		return failClosed(fmt.Errorf("RW Owner health lost during Data Retire drain: %w", err))
+	}
+	reclaimed, err := rt.runtime.collectDataRetiredAfterDrain(ctx)
+	if err != nil {
+		return failClosed(fmt.Errorf("collect Data Retire records: %w", err))
+	}
+	if err = m.checkHealth(rt); err != nil {
+		return failClosed(fmt.Errorf("RW Owner health lost after Data Retire collection: %w", err))
+	}
+	if err = m.cfg.Gate.EnableRequestsGuarded(ctx, rt.spec, rt.runtime, func() error {
+		return m.checkHealth(rt)
+	}); err != nil {
+		return failClosed(fmt.Errorf("re-enable DM admission after Data Retire collection: %w", err))
+	}
+	m.mu.Lock()
+	if m.runtimes[volumeID] != rt || rt.stopping || rt.failure != nil || rt.poisoned != nil ||
+		rt.OwnerInvalid() {
+		m.mu.Unlock()
+		return failClosed(ErrRuntimeStopping)
+	}
+	rt.enabled = true
+	rt.state = RuntimeActive
+	m.mu.Unlock()
+	rt.requestMu.Unlock()
+	return reclaimed, nil
 }
 
 // Deactivate closes admission and drains all in-flight requests before releasing
