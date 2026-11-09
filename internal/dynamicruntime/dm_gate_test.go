@@ -40,7 +40,7 @@ func TestDMRequestGateRWLifecycle(t *testing.T){
 	if ownerGate.prepared!=1||ownerGate.enabled!=1{t.Fatalf("prepare/enable=%d/%d",ownerGate.prepared,ownerGate.enabled)}
 	if err=g.StopRequests(context.Background(),spec.VolumeID);err!=nil{t.Fatal(err)}
 	if err=g.DrainRequests(context.Background(),spec.VolumeID);err!=nil{t.Fatal(err)}
-	if ownerGate.fenced!=2{t.Fatalf("expected stop and drain to synchronously fence, got %d",ownerGate.fenced)}
+	if ownerGate.fenced!=1{t.Fatalf("StopRequests fence must synchronously drain; got %d fences",ownerGate.fenced)}
 }
 
 func TestDMRequestGateROUsesReaderEpochAndNeverOwnerGate(t *testing.T){
@@ -55,7 +55,7 @@ func TestDMRequestGateROUsesReaderEpochAndNeverOwnerGate(t *testing.T){
 	if ownerGate.prepared!=0||ownerGate.enabled!=0{t.Fatal("RO activation touched RW Owner gate")}
 	if err=g.StopRequests(context.Background(),spec.VolumeID);err!=nil{t.Fatal(err)}
 	if err=g.DrainRequests(context.Background(),spec.VolumeID);err!=nil{t.Fatal(err)}
-	if readerGate.fenced!=2{t.Fatalf("expected Reader fence and drain, got %d",readerGate.fenced)}
+	if readerGate.fenced!=1{t.Fatalf("Reader StopRequests fence must synchronously drain; got %d fences",readerGate.fenced)}
 }
 
 func TestDMRequestGateHealthFailureFencesBeforeReturning(t *testing.T){
