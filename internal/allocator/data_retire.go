@@ -144,6 +144,22 @@ func dataRetireRanges(physical []uint64, generation uint64, agSizeBlocks uint64)
 	return out, nil
 }
 
+
+func unreferencedPhysicalBlocks(tree *btree.Tree, logicalStart uint64, blockCount uint32, candidates []uint64) []uint64 {
+	if tree == nil || len(candidates) == 0 { return nil }
+	set := make(map[uint64]struct{}, len(candidates))
+	for _, id := range candidates { set[id] = struct{}{} }
+	end := logicalStart + uint64(blockCount)
+	for _, item := range tree.Snapshot() {
+		if item.Key>>63 != 0 || (item.Key >= logicalStart && item.Key < end) { continue }
+		delete(set, item.Value)
+	}
+	out := make([]uint64, 0, len(set))
+	for id := range set { out = append(out, id) }
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // PlanDynamicBitmapFree produces redo images that clear a previously allocated
 // extent. Every bit must currently be set; a double-free or cross-AG request
 // fails closed. The descriptor checksum and sequence are updated with bitmap
