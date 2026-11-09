@@ -64,6 +64,27 @@ func (s *ReaderSession) checkLeaseLocked() error {
 	return nil
 }
 
+// RequestSnapshot revalidates the durable Reader slot and sanlock lease
+// before each metadata lookup, returning only the root generation pinned by
+// this session.
+func (s *ReaderSession) RequestSnapshot(ctx context.Context) (uint64,uint64,error) {
+	if s==nil || ctx==nil { return 0,0,errors.New("Reader session and request context are required") }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err:=s.checkLeaseLocked();err!=nil{return 0,0,err}
+	records,err:=s.table.SnapshotContext(ctx)
+	if err!=nil{return 0,0,err}
+	for _,record:=range records {
+		if record.Slot!=s.slot { continue }
+		if record.State!=ReaderActive || record.NodeID!=s.nodeID || record.BootID!=s.bootID ||
+			record.Epoch!=s.epoch || record.RootGeneration!=s.rootGeneration {
+			return 0,0,ErrReaderIdentity
+		}
+		return s.rootPage,s.rootGeneration,nil
+	}
+	return 0,0,ErrReaderIdentity
+}
+
 func (s *ReaderSession) Heartbeat() error {
 	if s == nil { return errors.New("nil reader session") }
 	s.mu.Lock(); defer s.mu.Unlock()
