@@ -220,7 +220,9 @@ func (t *ReaderTable) CloseDrained(slot uint32,nodeID,bootID string,epoch uint64
 	unlock, lockErr := t.lockReaderSet(); if lockErr != nil { return lockErr }; defer unlock()
 	t.mu.Lock();defer t.mu.Unlock()
 	r,err:=t.readLocked(slot);if err!=nil{return err}
-	if (r.State!=ReaderActive && r.State!=ReaderLeaving) || r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
+	if r.NodeID!=nodeID || r.BootID!=bootID || r.Epoch!=epoch { return ErrReaderIdentity }
+	if r.State==ReaderClosed { return nil }
+	if r.State!=ReaderActive && r.State!=ReaderLeaving { return ErrReaderIdentity }
 	r.State=ReaderClosed
 	return t.writeLocked(r)
 }
