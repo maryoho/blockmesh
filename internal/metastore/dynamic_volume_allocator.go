@@ -324,8 +324,8 @@ func(a *DynamicVolumeAllocator) GrowVolume(index uint32,pages uint64,committer C
 		if err=writeFullAt(a.dev,aux,int64(newAuxStart*format.PageSize));err!=nil{return zero,0,fmt.Errorf("relocate Volume lifecycle/OwnerRecord/ReaderTable pages: %w",err)}
 		if err=a.dev.Sync();err!=nil{return zero,0,fmt.Errorf("sync relocated Volume lifecycle/OwnerRecord/ReaderTable pages: %w",err)}
 	}
-	if err=next.ValidatePool(a.sb);err!=nil{return zero,0,err}
-	desc,err:=next.Encode();if err!=nil{return zero,0,err}
+	if err=next.ValidatePool(a.sb);err!=nil{return zero,0,fmt.Errorf("grown Volume Descriptor invalid: old=%+v next=%+v metadataPages=%d: %w",d,next,a.sb.Geometry.MetadataBytes/format.PageSize,err)}
+	desc,err:=next.Encode();if err!=nil{return zero,0,fmt.Errorf("encode grown Volume Descriptor %+v: %w",next,err)}
 	nextHeader:=a.header;nextHeader.Generation++;nextHeader.BitmapCRC=crc32.Checksum(nextBitmap,crcTable)
 	images,err:=a.bitmapHeaderImages(nextBitmap,nextHeader);if err!=nil{return zero,0,err}
 	newSlot:=uint64(1)-slot
