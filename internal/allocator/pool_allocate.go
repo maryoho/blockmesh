@@ -429,7 +429,7 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 // transaction, so recovery observes both or neither.
 func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.Lease, readers *metastore.ReaderTable, ioDrained bool) (uint64, error) {
 	if a == nil || !a.dynamic || a.store == nil || a.tree == nil || a.locks == nil ||
-		ctx == nil || ownerLease == nil || readers == nil || !readers.MatchesStore(a.store) {
+		ctx == nil || ownerLease == nil || readers == nil || !readers.MatchesStore(a.store) || !readers.HasCoordinator() {
 		return 0, ErrPoolAllocatorUnavailable
 	}
 	if !ioDrained { return 0, metastore.ErrUnsafeReclaim }
