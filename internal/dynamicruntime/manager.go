@@ -29,6 +29,9 @@ type OwnerAcquirer func(context.Context, metastore.VolumeRuntimeSpec) (OwnerLeas
 type ReadOnlySession interface {
 	Heartbeat() error
 	CloseDrained(context.Context, bool) error
+	Slot() uint32
+	Epoch() uint64
+	RootGeneration() uint64
 }
 
 // ReadOnlyRuntimeOpener must open BMPOOL03 views from one Bootstrap generation,
@@ -222,7 +225,9 @@ func (m *DynamicVolumeRuntimeManager) Activate(ctx context.Context, spec metasto
 		if openErr != nil {
 			return m.retainPartialActivation(ctx, rt, fmt.Errorf("open BMPOOL03 RO runtime: %w", openErr))
 		}
-		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil || rt.runtime.Spec != spec {
+		if rt.runtime == nil || rt.reader == nil || rt.runtime.Owner != nil || rt.runtime.Spec != spec ||
+			rt.reader.Slot() != spec.ReaderSlot || rt.reader.Epoch() != spec.ReaderEpoch ||
+			rt.runtime.Tree == nil || rt.runtime.Tree.RootGeneration() != rt.reader.RootGeneration() {
 			return m.retainPartialActivation(ctx, rt, errors.New("BMPOOL03 RO opener returned nil or mismatched Runtime/Reader session"))
 		}
 	}
@@ -294,7 +299,8 @@ func (m *DynamicVolumeRuntimeManager) checkHealth(rt *managedRuntime) error {
 			return ErrOwnerProof
 		}
 	case metastore.VolumeRuntimeReadOnly:
-		if rt.reader == nil {
+		if rt.reader == nil || rt.reader.Epoch() != rt.spec.ReaderEpoch ||
+			rt.runtime.Tree == nil || rt.runtime.Tree.RootGeneration() != rt.reader.RootGeneration() {
 			return ErrReaderHealthRequired
 		}
 		if err := rt.reader.Heartbeat(); err != nil {
