@@ -168,7 +168,7 @@ func TestBMPOOL03DataRetireWaitsForReaderGenerationAndReclaimsBitmapAtomically(t
 		LifecycleStart:arenaStart+512, LifecyclePages:8,
 		OwnerRecordStart:arenaStart+512+8,
 		ReaderTableStart:arenaStart+512+8+format.OwnerRecordPages,
-		ReaderTablePages:format.ReaderTablePages,
+		ReaderTablePages:uint32(format.ReaderTablePages),
 	}
 	if err = format.InitializeDynamicVolumeDescriptor(metadata, sb, 0, desc); err != nil { t.Fatal(err) }
 	if err = metadata.Sync(); err != nil { t.Fatal(err) }
