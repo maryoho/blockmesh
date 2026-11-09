@@ -189,7 +189,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	if a.dynamic {
 		var candidates []uint64
 		for i, mapped := range oldMapped { if mapped { candidates = append(candidates, oldPhysical[i]) } }
-		candidates = unreferencedPhysicalBlocks(a.tree, req.LogicalStart, req.BlockCount, candidates)
+		candidates = unreferencedPhysicalBlocks(a.tree, req.LogicalStart, req.BlockCount, candidates, dynamicSB.Geometry.TotalBlocks)
 		retireRecords, err = dataRetireRanges(candidates, mappingSequence, dynamicSB.Geometry.AGSizeBlocks)
 		if err != nil { return result, fmt.Errorf("plan COW Data Retire ranges: %w", err) }
 		for _, retired := range retireRecords {
@@ -379,7 +379,7 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 			return result, fmt.Errorf("lookup discard logical block %d: %w", logical, e)
 		}
 	}
-	retiredCandidates = unreferencedPhysicalBlocks(a.tree, req.LogicalStart, req.BlockCount, retiredCandidates)
+	retiredCandidates = unreferencedPhysicalBlocks(a.tree, req.LogicalStart, req.BlockCount, retiredCandidates, sb.Geometry.TotalBlocks)
 	retireRecords, err := dataRetireRanges(retiredCandidates, desc.MappingSequence, sb.Geometry.AGSizeBlocks)
 	if err != nil { return result, fmt.Errorf("plan discard Data Retire ranges: %w", err) }
 	for _, retired := range retireRecords {
@@ -462,7 +462,7 @@ func (a *PoolAllocator) CollectDataRetired(ctx context.Context, ownerLease lock.
 	var records []DataRetireRecord
 	var keys, pageIDs []uint64
 	for _, item := range a.tree.Snapshot() {
-		if item.Key>>63 == 0 { continue }
+		if item.Key>>63 != 0 || item.Key < sb.Geometry.TotalBlocks { continue }
 		page, readErr := a.store.ReadPage(item.Value)
 		if readErr != nil { return 0, fmt.Errorf("read external Arena page %d: %w", item.Value, readErr) }
 		if page.Type != DataRetireRecordPageType { continue }
