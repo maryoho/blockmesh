@@ -78,8 +78,8 @@ func(s *Store)expandDynamicArenaLegacy(committer Committer)error{
 	s.mu.Lock();defer s.mu.Unlock()
 	if !s.dynamicPool{return errors.New("Arena expansion requires BMPOOL03")}
 	if !DynamicVolumeAllocatorPresent(s.dev,s.dynamicSB){return ErrDynamicVolumeAllocatorUnformatted}
-	allocator,err:=OpenDynamicVolumeAllocator(s.dev,s.dynamicSB);if err!=nil{return err}
-	next,slot,err:=allocator.GrowVolume(s.volumeIndex,pages,cluster);if err!=nil{return err}
+	allocator,err:=OpenDynamicVolumeAllocator(s.dev,s.dynamicSB);if err!=nil{return fmt.Errorf("open Reserved allocator for Arena expansion: %w",err)}
+	next,slot,err:=allocator.GrowVolume(s.volumeIndex,pages,cluster);if err!=nil{return fmt.Errorf("grow BMPOOL03 Volume Arena: %w",err)}
 	s.dynamicDescriptor=next
 	s.sb.Generation=next.Generation
 	s.sb.ArenaStart=next.ArenaStart
@@ -97,7 +97,7 @@ func(s *Store)ExpandDynamicArenaUnderLease(ctx context.Context,ownerLease lock.L
 	if ctx==nil||ownerLease==nil||!ownerLease.Valid()||ownerLease.Resource()==""||locks==nil||!locks.Distributed(){
 		return errors.New("live Volume Owner lease and distributed AG locker are required")
 	}
-	d,err:=s.DynamicPoolDescriptor();if err!=nil{return err}
+	d,err:=s.DynamicPoolDescriptor();if err!=nil{return fmt.Errorf("read current Volume Descriptor before Arena expansion: %w",err)}
 	if identity,ok:=ownerLease.(interface{VolumeID()string});ok {
 		if identity.VolumeID()!=d.VolumeID{return errors.New("Owner lease Volume ID does not match BMPOOL03 Volume Descriptor")}
 	} else if ownerLease.Resource()!="volume:"+d.VolumeID {
