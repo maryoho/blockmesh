@@ -33,12 +33,29 @@ type AllocateRequest struct {
 
 // AllocateResult is the durable result of an allocation. Replayed is true
 // when the idempotency key resolved to an earlier committed allocation.
+type MutationOutcome uint8
+const (
+ MutationNotCommitted MutationOutcome = iota
+ MutationCommitted
+ MutationOutcomeUnknown
+)
+
+// MutationOutcomeFor classifies an allocator error. A nil error means the
+// durable transaction committed; only ErrAllocationOutcomeUnknown requires
+// WAL recovery before retry. All other errors are known pre-commit failures.
+func MutationOutcomeFor(err error) MutationOutcome {
+ if err == nil { return MutationCommitted }
+ if errors.Is(err, ErrAllocationOutcomeUnknown) { return MutationOutcomeUnknown }
+ return MutationNotCommitted
+}
+
 type AllocateResult struct {
-	LogicalStart uint64
-	PhysicalStart uint64
-	BlockCount uint32
-	OwnerEpoch uint64
-	Replayed bool
+ LogicalStart uint64
+ PhysicalStart uint64
+ BlockCount uint32
+ OwnerEpoch uint64
+ Replayed bool
+ Outcome MutationOutcome
 }
 
 // PoolAllocator coordinates Pool bitmap allocation, data zeroing, the
@@ -156,7 +173,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		if err != nil { return result, err }
 		if found {
 			return AllocateResult{LogicalStart:record.LogicalStart,PhysicalStart:record.PhysicalStart,
-				BlockCount:record.BlockCount,OwnerEpoch:record.OwnerEpoch,Replayed:true}, nil
+				BlockCount:record.BlockCount,OwnerEpoch:record.OwnerEpoch,Replayed:true,Outcome:MutationCommitted}, nil
 		}
 	} else if !errors.Is(lookupErr, btree.ErrKeyNotFound) {
 		return result, fmt.Errorf("lookup idempotency index: %w", lookupErr)
@@ -263,7 +280,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 		return result, fmt.Errorf("%w: publish allocation transaction: %v", ErrAllocationOutcomeUnknown, err)
 	}
 	return AllocateResult{LogicalStart:req.LogicalStart,PhysicalStart:physical,
-		BlockCount:req.BlockCount,OwnerEpoch:ownerEpoch}, nil
+		BlockCount:req.BlockCount,OwnerEpoch:ownerEpoch,Outcome:MutationCommitted}, nil
 }
 
 func isKnownPreCommitAllocationError(err error) bool {
@@ -421,7 +438,7 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 		return result, fmt.Errorf("%w: publish discard transaction: %v",ErrAllocationOutcomeUnknown,err)
 	}
 	return AllocateResult{LogicalStart:req.LogicalStart,PhysicalStart:firstPhysical,
-		BlockCount:req.BlockCount,OwnerEpoch:desc.OwnerEpoch},nil
+		BlockCount:req.BlockCount,OwnerEpoch:desc.OwnerEpoch,Outcome:MutationCommitted},nil
 }
 
 // CollectDataRetired reclaims physical DataView extents only after every
