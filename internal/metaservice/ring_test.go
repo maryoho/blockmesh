@@ -39,3 +39,11 @@ func TestDrainParentCancellationReachesProcessor(t *testing.T) {
  if err!=nil { t.Fatal(err) }
  if c.Code!=uapi.CodeRetry { t.Fatalf("completion code=%v want retry",c.Code) }
 }
+
+func TestQueueMemoryCancelRegistryIsDrained(t *testing.T) {
+ q:=fixture(t,uapi.OpFlush,43)
+ _,_,err:=q.Drain(context.Background(),ProcessorFunc(func(context.Context,uapi.Request)(Result,error){return Result{},nil}),1)
+ if err!=nil { t.Fatal(err) }
+ q.activeMu.Lock();n:=len(q.active);q.activeMu.Unlock()
+ if n!=0 { t.Fatalf("active cancellation registry leaked %d entries",n) }
+}

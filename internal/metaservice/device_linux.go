@@ -12,6 +12,40 @@ func(d *Device)Reconcile()error{if d==nil||d.closed{return errors.New("device cl
 func(d *Device)scan()error{seen:=make(map[uint32]struct{});for after:=uint32(0);;{q:=make([]byte,uapi.QueueQuerySize);binary.LittleEndian.PutUint32(q[:4],uapi.QueueQuerySize);binary.LittleEndian.PutUint32(q[4:8],after);e:=ioctl(d.fd,ioctlNextQueue,q);if errors.Is(e,syscall.ENOENT){break};if e!=nil{return fmt.Errorf("NEXT_QUEUE: %w",e)};query,e:=uapi.UnmarshalQueueQuery(q);if e!=nil{return fmt.Errorf("NEXT_QUEUE returned malformed queue: %w",e)};id:=query.QueueID;after=id;seen[id]=struct{}{};if current:=d.queues[id];current!=nil{if current.generation==query.QueueGeneration&&current.mem.Info.RingOrder==query.RingOrder{continue};d.unmap(id)};if e=d.setup(id,query.RingOrder);e!=nil{if errors.Is(e,syscall.ENOENT)||errors.Is(e,syscall.ENOTCONN){delete(seen,id);continue};return fmt.Errorf("setup Queue %d generation %d: %w",id,query.QueueGeneration,e)}};for id:=range d.queues{if _,ok:=seen[id];!ok{d.unmap(id)}};return nil}
 func(d *Device)setup(id,order uint32)error{b:=make([]byte,uapi.SetupSize);binary.LittleEndian.PutUint32(b[:4],uapi.SetupSize);binary.LittleEndian.PutUint32(b[4:8],uint32(uapi.Version));binary.LittleEndian.PutUint32(b[8:12],order);binary.LittleEndian.PutUint32(b[68:72],id);if e:=ioctl(d.fd,ioctlSetupQueue,b);e!=nil{return e};info,e:=uapi.UnmarshalSetupQueue(b);if e!=nil{return e};if info.QueueID!=id||info.RingOrder!=order||info.QueueGeneration==0{return errors.New("SETUP_QUEUE identity differs from discovery result")};l,e:=uapi.Layout(info.RingOrder);if e!=nil{return e};regions:=[][]byte{};mapOne:=func(off,n uint64)([]byte,error){if n==0||n>uint64(int(^uint(0)>>1)){return nil,errors.New("invalid mmap length")};x,er:=syscall.Mmap(d.fd,int64(off),int(n),syscall.PROT_READ|syscall.PROT_WRITE,syscall.MAP_SHARED);if er==nil{regions=append(regions,x)};return x,er};cleanup:=func(){for i:=len(regions)-1;i>=0;i--{_=syscall.Munmap(regions[i])}};rc,er:=mapOne(info.RequestControlOffset,4096);if er!=nil{cleanup();return er};rr,er:=mapOne(info.RequestRingOffset,uint64(l.Entries)*uapi.RequestSize);if er!=nil{cleanup();return er};cc,er:=mapOne(info.CompletionControlOffset,4096);if er!=nil{cleanup();return er};cr,er:=mapOne(info.CompletionRingOffset,uint64(l.Entries)*uapi.CompletionSize);if er!=nil{cleanup();return er};pl,er:=mapOne(info.PayloadOffset,l.PayloadBytes);if er!=nil{cleanup();return er};d.queues[id]=&mappedQueue{generation:info.QueueGeneration,mem:&QueueMemory{Info:info,RequestControl:rc,RequestRing:rr,CompletionControl:cc,CompletionRing:cr,Payload:pl,RequestTimeout:d.requestTimeout},regions:regions};return nil}
 func(d *Device)kick(id uint32)error{b:=make([]byte,4);binary.LittleEndian.PutUint32(b,id);return ioctl(d.fd,ioctlKick,b)}
-func(d *Device)Run(ctx context.Context)error{if d.closed{return errors.New("device closed")};if e:=d.scan();e!=nil{return e};for{if e:=ctx.Err();e!=nil{return e};p:=pollFD{FD:int32(d.fd),Events:pollIn|pollPri};_,_,errno:=syscall.Syscall(syscall.SYS_POLL,uintptr(unsafe.Pointer(&p)),1,250);if errno!=0&&errno!=syscall.EINTR{return fmt.Errorf("poll %s: %w",d.path,errno)};if p.Revents&pollFailure!=0{return fmt.Errorf("device poll failure: %#x",p.Revents)};if p.Revents&pollPri!=0{if e:=d.scan();e!=nil{return e}};if p.Revents&pollIn==0{continue};for id,m:=range d.queues{for{n,w,e:=m.mem.Drain(ctx,d.processor,1<<m.mem.Info.RingOrder);if errors.Is(e,ErrQueueGeneration){if scanErr:=d.scan();scanErr!=nil{return scanErr};break};if e!=nil{return fmt.Errorf("Queue %d generation %d: %w",id,m.generation,e)};if w>0{if e=d.kick(id);e!=nil{if errors.Is(e,syscall.ENOENT)||errors.Is(e,syscall.ENOTCONN){d.unmap(id);break};return fmt.Errorf("KICK Queue %d generation %d: %w",id,m.generation,e)}};if n==0{break}}}}}
+func(d *Device)Run(ctx context.Context)error{
+ d.queuesMu.RLock();closed:=d.closed;d.queuesMu.RUnlock()
+ if closed{return errors.New("device closed")}
+ if e:=d.scan();e!=nil{return e}
+ for{
+  if e:=ctx.Err();e!=nil{return e}
+  p:=pollFD{FD:int32(d.fd),Events:pollIn|pollPri}
+  _,_,errno:=syscall.Syscall(syscall.SYS_POLL,uintptr(unsafe.Pointer(&p)),1,250)
+  if errno!=0&&errno!=syscall.EINTR{return fmt.Errorf("poll %s: %w",d.path,errno)}
+  if p.Revents&pollFailure!=0{return fmt.Errorf("device poll failure: %#x",p.Revents)}
+  if p.Revents&pollPri!=0{if e:=d.scan();e!=nil{return e}}
+  if p.Revents&pollIn==0{continue}
+  d.queuesMu.RLock();ids:=make([]uint32,0,len(d.queues));for id:=range d.queues{ids=append(ids,id)};d.queuesMu.RUnlock()
+  for _,id:=range ids{
+   d.queuesMu.RLock();m:=d.queues[id]
+   if m==nil{d.queuesMu.RUnlock();continue}
+   stale:=false;gone:=false
+   for{
+    n,w,e:=m.mem.Drain(ctx,d.processor,1<<m.mem.Info.RingOrder)
+    if errors.Is(e,ErrQueueGeneration){stale=true;break}
+    if e!=nil{d.queuesMu.RUnlock();return fmt.Errorf("Queue %d generation %d: %w",id,m.generation,e)}
+    if w>0{
+     if e=d.kick(id);e!=nil{
+      if errors.Is(e,syscall.ENOENT)||errors.Is(e,syscall.ENOTCONN){gone=true;break}
+      d.queuesMu.RUnlock();return fmt.Errorf("KICK Queue %d generation %d: %w",id,m.generation,e)
+     }
+    }
+    if n==0{break}
+   }
+   d.queuesMu.RUnlock()
+   if stale{if e:=d.scan();e!=nil{return e}}
+   if gone{d.unmap(id)}
+  }
+ }
+}
 func(d *Device)unmap(id uint32){m:=d.queues[id];if m==nil{return};for i:=len(m.regions)-1;i>=0;i--{_=syscall.Munmap(m.regions[i])};delete(d.queues,id)}
 func(d *Device)Close()error{if d==nil||d.closed{return nil};d.closed=true;for id:=range d.queues{d.unmap(id)};if e:=syscall.Close(d.fd);e!=nil{return fmt.Errorf("close %s: %w",d.path,e)};return nil}
