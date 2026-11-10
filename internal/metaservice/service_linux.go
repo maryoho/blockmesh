@@ -31,7 +31,7 @@ type Service struct{
 }
 func NewService(cfg ServiceConfig)(*Service,error){
  if cfg.DevicePath==""||cfg.LockPath==""||cfg.Processor==nil{return nil,errors.New("device path, lock path and processor are required")}
- return &Service{cfg:cfg,state:ServiceCreated},nil
+ if cfg.RequestTimeout==0{cfg.RequestTimeout=DefaultRequestTimeout};return &Service{cfg:cfg,state:ServiceCreated},nil
 }
 func(s *Service)State()ServiceState{s.mu.Lock();defer s.mu.Unlock();return s.state}
 func(s *Service)Ready()bool{return s.State()==ServiceReady}

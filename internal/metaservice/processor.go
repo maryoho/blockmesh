@@ -29,7 +29,7 @@ func resultCode(e error) uapi.ResultCode {
  case errors.Is(e,ErrStaleEpoch):return uapi.CodeStaleEpoch
  case errors.Is(e,ErrReadOnly):return uapi.CodeReadOnly
  case errors.Is(e,ErrNoSpace):return uapi.CodeNoSpace
- case errors.Is(e,ErrRetry):return uapi.CodeRetry
+ case errors.Is(e,ErrRetry),errors.Is(e,context.Canceled),errors.Is(e,context.DeadlineExceeded):return uapi.CodeRetry
  case errors.Is(e,ErrFenced):return uapi.CodeFenced
  case errors.Is(e,ErrInvalid):return uapi.CodeInvalid
  default:return uapi.CodeInternal
