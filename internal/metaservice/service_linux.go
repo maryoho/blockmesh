@@ -1,6 +1,6 @@
 //go:build linux
 package metaservice
-import("context";"errors";"fmt";"os";"path/filepath";"sync";"syscall")
+import("context";"errors";"fmt";"os";"path/filepath";"sync";"syscall";"time")
 type ServiceState uint32
 const(
  ServiceCreated ServiceState=iota
@@ -17,6 +17,7 @@ type ServiceConfig struct{
  DevicePath string
  LockPath string
  Processor Processor
+ RequestTimeout time.Duration
  Recover func(context.Context)error
  OpenDevice func(string,Processor)(ServiceDevice,error)
 }
@@ -30,7 +31,7 @@ type Service struct{
  done chan struct{}
 }
 func NewService(cfg ServiceConfig)(*Service,error){
- if cfg.DevicePath==""||cfg.LockPath==""||cfg.Processor==nil{return nil,errors.New("device path, lock path and processor are required")}
+ if cfg.DevicePath==""||cfg.LockPath==""||cfg.Processor==nil{return nil,errors.New("device path, lock path and processor are required")};if cfg.RequestTimeout<0{return nil,errors.New("request timeout cannot be negative")}
  if cfg.RequestTimeout==0{cfg.RequestTimeout=DefaultRequestTimeout};return &Service{cfg:cfg,state:ServiceCreated},nil
 }
 func(s *Service)State()ServiceState{s.mu.Lock();defer s.mu.Unlock();return s.state}
@@ -45,7 +46,7 @@ func(s *Service)Start(ctx context.Context)error{
  if err=syscall.Flock(int(lf.Fd()),syscall.LOCK_EX|syscall.LOCK_NB);err!=nil{_=lf.Close();s.state=ServiceFailed;return fmt.Errorf("metadata service lock %q is already held: %w",s.cfg.LockPath,err)}
  s.lockFile=lf
  opener:=s.cfg.OpenDevice
- if opener==nil{opener=func(path string,p Processor)(ServiceDevice,error){return OpenDevice(path,p)}}
+ if opener==nil{opener=func(path string,p Processor)(ServiceDevice,error){return OpenDeviceWithTimeout(path,p,s.cfg.RequestTimeout)}}
  dev,err:=opener(s.cfg.DevicePath,s.cfg.Processor)
  if err!=nil{s.failLocked();return fmt.Errorf("open metadata device: %w",err)}
  if dev==nil{s.failLocked();return errors.New("device opener returned nil device")}
