@@ -303,3 +303,9 @@ func TestAllocateZeroPublishCrashRecoveryRejectsStaleOwnerEpoch(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+func TestMutationOutcomeClassification(t *testing.T) {
+ if got:=MutationOutcomeFor(nil);got!=MutationCommitted { t.Fatalf("nil error outcome=%v",got) }
+ if got:=MutationOutcomeFor(context.Canceled);got!=MutationNotCommitted { t.Fatalf("canceled outcome=%v",got) }
+ if got:=MutationOutcomeFor(ErrAllocationOutcomeUnknown);got!=MutationOutcomeUnknown { t.Fatalf("unknown outcome=%v",got) }
+}
