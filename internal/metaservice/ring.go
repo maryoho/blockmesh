@@ -7,6 +7,7 @@ type QueueMemory struct {
  Info uapi.SetupQueue
  RequestControl,RequestRing,CompletionControl,CompletionRing,Payload []byte
  RequestTimeout time.Duration
+ CancelNotify func(requestID,generation uint64) error
  activeMu sync.Mutex
  active map[requestIdentity]context.CancelFunc
 }
@@ -22,6 +23,10 @@ func (q *QueueMemory) beginRequest(id,generation uint64,cancel context.CancelFun
 func (q *QueueMemory) endRequest(id,generation uint64) {
  q.activeMu.Lock(); delete(q.active,requestIdentity{generation:generation,id:id}); q.activeMu.Unlock()
 }
+func (q *QueueMemory) notifyCancel(id,generation uint64) error {
+ if q.CancelNotify==nil { return nil }
+ return q.CancelNotify(id,generation)
+}
 func (q *QueueMemory) Cancel(id,generation uint64) bool {
  q.activeMu.Lock(); cancel,ok:=q.active[requestIdentity{generation:generation,id:id}]
  if ok && generation==q.Info.QueueGeneration { cancel() } else { ok=false }
@@ -35,5 +40,8 @@ func(q *QueueMemory)Drain(ctx context.Context,p Processor,limit int)(consumed,pr
         if !q.beginRequest(req.RequestID,req.QueueGeneration,cancel) { pe=ErrQueueGeneration } else {
           if de!=nil { pe=ErrInvalid } else { result,pe=p.Process(requestCtx,req) }
           q.endRequest(req.RequestID,req.QueueGeneration)
+        }
+        if requestCtx.Err()!=nil {
+          _ = q.notifyCancel(req.RequestID,req.QueueGeneration)
         }
         cancel();code:=resultCode(pe);if pe!=nil{result=Result{}};var mappings []uapi.Mapping;if result.Mapping!=nil{mappings=[]uapi.Mapping{*result.Mapping}};if len(result.Mappings)>0{if len(mappings)>0{code=uapi.CodeInternal;result=Result{}}else{mappings=result.Mappings}};if code==uapi.CodeOK{switch req.Operation{case uapi.OpLookupBatch,uapi.OpAllocateZeroPublish:if len(mappings)==0{code=uapi.CodeInternal}else if _,e:=uapi.MarshalMappings(mappings);e!=nil{code=uapi.CodeInternal}else{first,last:=mappings[0],mappings[len(mappings)-1];if first.LogicalBlock!=req.LogicalStart||last.LogicalBlock+uint64(last.BlockCount)!=req.LogicalStart+uint64(req.BlockCount){code=uapi.CodeInternal};if req.Operation==uapi.OpAllocateZeroPublish&&len(mappings)!=1{code=uapi.CodeInternal}};case uapi.OpDiscard,uapi.OpFlush:if len(mappings)!=0{code=uapi.CodeInternal};default:code=uapi.CodeInvalid};if code!=uapi.CodeOK{result=Result{};mappings=nil}};if err=q.validate();err!=nil{return};cs:=ct&mask;po,mc,pb:=uint32(0),uint32(0),uint32(0);if code==uapi.CodeOK&&len(mappings)>0{po=cs*uapi.MaxBatch*uapi.MappingSize;enc,e:=uapi.MarshalMappings(mappings);if e!=nil{err=e;return};pb=uint32(len(enc));mc=uint32(len(mappings));off:=int(po);copy(q.Payload[off:off+len(enc)],enc)};responseGeneration:=req.RootGeneration;if code==uapi.CodeOK&&result.RootGeneration!=0{responseGeneration=result.RootGeneration};c:=uapi.Completion{Code:code,RequestID:req.RequestID,QueueGeneration:req.QueueGeneration,OwnerEpoch:req.OwnerEpoch,RootGeneration:responseGeneration,PayloadOffset:po,MappingCount:mc,PayloadBytes:pb};enc,e:=c.MarshalBinary();if e!=nil{err=e;return};off:=int(cs)*uapi.CompletionSize;copy(q.CompletionRing[off:off+uapi.CompletionSize],enc);if err=q.validate();err!=nil{return};atomic.StoreUint32(idx(q.CompletionControl,4),ct+1);atomic.StoreUint32(idx(q.RequestControl,0),rh+1);consumed++;produced++};return}
