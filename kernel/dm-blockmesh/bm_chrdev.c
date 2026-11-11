@@ -19,6 +19,7 @@
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 #include <linux/xarray.h>
 #include "blockmesh_uapi.h"
 #include "bm_chrdev.h"
@@ -46,6 +47,8 @@ struct bm_pending {
 	u16 operation;
 	bool cancel_requested;
 	u32 block_count;
+	struct bm_uapi_request request;
+	u32 retry_attempt;
 };
 struct bm_queue_mem {
 	struct kref ref;
@@ -56,6 +59,9 @@ struct bm_queue {
 	struct kref ref; /* registry reference plus transient ioctl/mmap lookups */
 	struct mutex lock;
 	struct list_head pending;
+	struct list_head retry_pending;
+	struct delayed_work retry_work;
+	bool retry_work_ref;
 	u32 pending_count;
 	wait_queue_head_t wait;
 	u32 id;
@@ -142,6 +148,7 @@ static void bm_abort_queue_pending(struct bm_queue *q)
 	LIST_HEAD(aborted);
 	mutex_lock(&q->lock);
 	list_splice_init(&q->pending, &aborted);
+	list_splice_init(&q->retry_pending, &aborted);
 	q->pending_count = 0;
 	mutex_unlock(&q->lock);
 	bm_abort_pending_list(&aborted);
@@ -205,6 +212,7 @@ int bm_queue_submit(u32 queue_id, u64 target_cookie,
 			pending->owner_epoch = le64_to_cpu(request->owner_epoch);
 			pending->operation = le16_to_cpu(request->operation);
 			pending->block_count = block_count;
+			pending->request = *request;
 			list_add_tail(&pending->list, &q->pending);
 			q->pending_count++;
 			slot = q->mem->area + BM_UAPI_MMAP_REQUEST_RING +
@@ -224,6 +232,92 @@ int bm_queue_submit(u32 queue_id, u64 target_cookie,
 		wake_up_all(&bm_poll_wait);
 	return ret;
 }
+static void bm_retry_workfn(struct work_struct *work)
+{
+	struct bm_queue *q = container_of(to_delayed_work(work), struct bm_queue, retry_work);
+
+	for (;;) {
+		struct bm_pending *p;
+		bool drop_ref = false;
+		unsigned long delay;
+		int ret;
+
+		mutex_lock(&q->lock);
+		if (q->dead) {
+			LIST_HEAD(aborted);
+			list_splice_init(&q->retry_pending, &aborted);
+			if (q->retry_work_ref) {
+				q->retry_work_ref = false;
+				drop_ref = true;
+			}
+			mutex_unlock(&q->lock);
+			bm_abort_pending_list(&aborted);
+			if (drop_ref)
+				kref_put(&q->ref, bm_queue_release);
+			return;
+		}
+		if (list_empty(&q->retry_pending)) {
+			if (q->retry_work_ref) {
+				q->retry_work_ref = false;
+				drop_ref = true;
+			}
+			mutex_unlock(&q->lock);
+			if (drop_ref)
+				kref_put(&q->ref, bm_queue_release);
+			return;
+		}
+		p = list_first_entry(&q->retry_pending, struct bm_pending, list);
+		list_del_init(&p->list);
+		mutex_unlock(&q->lock);
+
+		ret = bm_queue_submit(q->id, q->target_cookie, &p->request,
+				      p->bio, p->bdev, p->base_sector,
+				      p->target_sectors, p->sector_offset,
+				      p->block_count);
+		if (ret == -EAGAIN || ret == -ENOTCONN || ret == -ENOMEM) {
+			p->retry_attempt++;
+			delay = msecs_to_jiffies(min_t(u32,
+					10U << min_t(u32, p->retry_attempt, 6), 1000U));
+			mutex_lock(&q->lock);
+			if (!q->dead) {
+				list_add_tail(&p->list, &q->retry_pending);
+				queue_delayed_work(system_wq, &q->retry_work, delay);
+				mutex_unlock(&q->lock);
+				return;
+			}
+			mutex_unlock(&q->lock);
+			bio_io_error(p->bio);
+			kfree(p);
+			continue;
+		}
+		if (ret) {
+			bio_io_error(p->bio);
+			kfree(p);
+		} else {
+			/* A new pending entry now owns the same original BIO. */
+			kfree(p);
+		}
+	}
+}
+
+static void bm_queue_retry_pending(struct bm_queue *q, struct bm_pending *p)
+{
+	mutex_lock(&q->lock);
+	if (q->dead) {
+		mutex_unlock(&q->lock);
+		bio_io_error(p->bio);
+		kfree(p);
+		return;
+	}
+	list_add_tail(&p->list, &q->retry_pending);
+	if (!q->retry_work_ref) {
+		kref_get(&q->ref);
+		q->retry_work_ref = true;
+	}
+	queue_delayed_work(system_wq, &q->retry_work, msecs_to_jiffies(10));
+	mutex_unlock(&q->lock);
+}
+
 static struct bm_pending *bm_take_pending(struct bm_queue *q, u64 request_id,
 					 u64 generation)
 {
@@ -243,7 +337,7 @@ struct bm_bio_segment {
 	u32 sectors;
 };
 
-static void bm_finish_pending(struct bm_pending *p,
+static void bm_finish_pending(struct bm_queue *q, struct bm_pending *p,
 			      const struct bm_uapi_completion *completion,
 			      const struct bm_uapi_mapping *mappings,
 			      u32 mapping_count)
@@ -255,9 +349,9 @@ static void bm_finish_pending(struct bm_pending *p,
 	u32 i, nr_segments = 0;
 
 	if (code == BM_UAPI_C_RETRY) {
-		bio->bi_status = BLK_STS_DM_REQUEUE;
-		bio_endio(bio);
-		kfree(p);
+		/* Re-submit the same BIO with the same durable idempotency key.
+		 * Do not surface a transient metadata cancellation as I/O failure. */
+		bm_queue_retry_pending(q, p);
 		return;
 	}
 	if (code != BM_UAPI_C_OK ||
@@ -484,7 +578,7 @@ static int bm_consume_completions(struct bm_queue *q)
 				  (__force u32)cpu_to_le32(head));
 		mutex_unlock(&q->lock);
 		if (p)
-			bm_finish_pending(p, &c, mappings, mapping_count);
+			bm_finish_pending(q, p, &c, mappings, mapping_count);
 		kfree(mappings);
 		consumed++;
 		mutex_lock(&q->lock);
@@ -509,6 +603,8 @@ int bm_queue_create(u32 *queue_id, u64 *target_cookie)
 	kref_init(&q->ref); /* xarray owns this reference */
 	mutex_init(&q->lock);
 	INIT_LIST_HEAD(&q->pending);
+	INIT_LIST_HEAD(&q->retry_pending);
+	INIT_DELAYED_WORK(&q->retry_work, bm_retry_workfn);
 	init_waitqueue_head(&q->wait);
 	q->generation = 1;
 	do {
@@ -540,6 +636,8 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 {
 	struct bm_queue *q;
 	struct bm_queue_mem *old_mem;
+	bool drop_retry_ref = false;
+
 	mutex_lock(&bm_queues_lock);
 	q = xa_load(&bm_queues, queue_id);
 	if (!q || q->target_cookie != target_cookie) {
@@ -554,7 +652,17 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 	q->mem = NULL;
 	mutex_unlock(&q->lock);
 	mutex_unlock(&bm_queues_lock);
+
+	cancel_delayed_work_sync(&q->retry_work);
 	bm_abort_queue_pending(q);
+	mutex_lock(&q->lock);
+	if (q->retry_work_ref) {
+		q->retry_work_ref = false;
+		drop_retry_ref = true;
+	}
+	mutex_unlock(&q->lock);
+	if (drop_retry_ref)
+		kref_put(&q->ref, bm_queue_release);
 	bm_mem_put(old_mem);
 	wake_up_all(&q->wait);
 	atomic64_inc(&bm_registry_generation);
