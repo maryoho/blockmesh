@@ -47,3 +47,45 @@ func TestQueueMemoryCancelRegistryIsDrained(t *testing.T) {
  q.activeMu.Lock();n:=len(q.active);q.activeMu.Unlock()
  if n!=0 { t.Fatalf("active cancellation registry leaked %d entries",n) }
 }
+
+func TestDrainCancellationNotifiesKernelBeforeCompletion(t *testing.T) {
+ q:=fixture(t,uapi.OpFlush,51)
+ ctx,cancel:=context.WithCancel(context.Background())
+ started:=make(chan struct{})
+ notified:=0
+ q.CancelNotify=func(id,generation uint64)error{
+  if id!=51||generation!=77{t.Fatalf("cancel identity=(%d,%d)",id,generation)}
+  notified++
+  return nil
+ }
+ done:=make(chan error,1)
+ go func(){_,_,err:=q.Drain(ctx,ProcessorFunc(func(ctx context.Context,_ uapi.Request)(Result,error){
+  close(started);<-ctx.Done();return Result{},ctx.Err()
+ }),1);done<-err}()
+ <-started
+ cancel()
+ if err:=<-done;err!=nil{t.Fatal(err)}
+ if notified!=1{t.Fatalf("kernel cancel notifications=%d want 1",notified)}
+ c,err:=uapi.UnmarshalCompletion(q.CompletionRing[:uapi.CompletionSize])
+ if err!=nil{t.Fatal(err)}
+ if c.Code!=uapi.CodeRetry{t.Fatalf("completion=%+v want retry",c)}
+}
+
+func TestDrainCommittedResultWinsCancellation(t *testing.T) {
+ q:=fixture(t,uapi.OpFlush,52)
+ ctx,cancel:=context.WithCancel(context.Background())
+ started:=make(chan struct{})
+ q.CancelNotify=func(uint64,uint64)error{return nil}
+ done:=make(chan error,1)
+ go func(){_,_,err:=q.Drain(ctx,ProcessorFunc(func(ctx context.Context,_ uapi.Request)(Result,error){
+  close(started);<-ctx.Done()
+  // Simulate the WAL commit winning the cancellation race.
+  return Result{RootGeneration:99},nil
+ }),1);done<-err}()
+ <-started
+ cancel()
+ if err:=<-done;err!=nil{t.Fatal(err)}
+ c,err:=uapi.UnmarshalCompletion(q.CompletionRing[:uapi.CompletionSize])
+ if err!=nil{t.Fatal(err)}
+ if c.Code!=uapi.CodeOK||c.RootGeneration!=99{t.Fatalf("committed result was lost: %+v",c)}
+}
