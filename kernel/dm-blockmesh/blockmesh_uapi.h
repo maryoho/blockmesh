@@ -27,6 +27,7 @@
 #define BM_UAPI_BLOCK_SECTORS 8192U /* 4MiB allocator block */
 #define BM_UAPI_FEATURE_REQUEST_RING (1ULL << 0)
 #define BM_UAPI_FEATURE_COMPLETION_KICK (1ULL << 1)
+#define BM_UAPI_FEATURE_REQUEST_CANCEL (1ULL << 2)
 #define BM_UAPI_MMAP_REQUEST_CTRL 0x00000000ULL
 #define BM_UAPI_MMAP_REQUEST_RING 0x00010000ULL
 #define BM_UAPI_MMAP_COMP_CTRL 0x00040000ULL
@@ -73,7 +74,7 @@ struct bm_uapi_queue_query {
 	__u64 queue_generation, target_cookie, reserved;
 };
 struct bm_uapi_cancel {
-	__u32 size, flags;
+	__u32 size, queue_id;
 	__u64 request_id, queue_generation, reserved[2];
 };
 struct bm_uapi_abi_info {

@@ -1,13 +1,13 @@
 //go:build linux
 package metaservice
 import("context";"encoding/binary";"errors";"fmt";"syscall";"sync";"time";"unsafe";"blockmesh/internal/uapi")
-const(ioctlGetABI uint32=0xc0404200;ioctlSetupQueue uint32=0xc0504201;ioctlNextQueue uint32=0xc0284204;ioctlKick uint32=uapi.IoctlKick;pollIn int16=1;pollPri int16=2;pollFailure int16=0x008|0x010|0x020)
+const(ioctlGetABI uint32=0xc0404200;ioctlSetupQueue uint32=0xc0504201;ioctlNextQueue uint32=0xc0284204;ioctlKick uint32=uapi.IoctlKick;ioctlCancel uint32=uapi.IoctlCancel;pollIn int16=1;pollPri int16=2;pollFailure int16=0x008|0x010|0x020)
 type pollFD struct{FD int32;Events int16;Revents int16}
 type mappedQueue struct{generation uint64;mem *QueueMemory;regions [][]byte}
 type Device struct{fd int;path string;processor Processor;requestTimeout time.Duration;queuesMu sync.RWMutex;queues map[uint32]*mappedQueue;closed bool}
 func ioctl(fd int,cmd uint32,b []byte)error{if len(b)==0{return errors.New("empty ioctl payload")};_,_,e:=syscall.Syscall(syscall.SYS_IOCTL,uintptr(fd),uintptr(cmd),uintptr(unsafe.Pointer(&b[0])));if e!=0{return e};return nil}
 func OpenDevice(path string,p Processor)(*Device,error){return OpenDeviceWithTimeout(path,p,DefaultRequestTimeout)}
-func OpenDeviceWithTimeout(path string,p Processor,requestTimeout time.Duration)(*Device,error){if path==""||p==nil{return nil,errors.New("device path and processor are required")};if requestTimeout<0{return nil,errors.New("request timeout cannot be negative")};fd,e:=syscall.Open(path,syscall.O_RDWR|syscall.O_CLOEXEC,0);if e!=nil{return nil,e};fail:=func(err error)(*Device,error){_=syscall.Close(fd);return nil,err};b:=make([]byte,uapi.ABIInfoSize);binary.LittleEndian.PutUint32(b[:4],uapi.ABIInfoSize);if e=ioctl(fd,ioctlGetABI,b);e!=nil{return fail(fmt.Errorf("GET_ABI: %w",e))};info,e:=uapi.UnmarshalABIInfo(b);if e!=nil{return fail(e)};need:=uapi.FeatureRequestRing|uapi.FeatureCompletionKick;if info.Features&need!=need{return fail(fmt.Errorf("kernel lacks required feature bits %#x",need))};return &Device{fd:fd,path:path,processor:p,requestTimeout:requestTimeout,queues:make(map[uint32]*mappedQueue)},nil}
+func OpenDeviceWithTimeout(path string,p Processor,requestTimeout time.Duration)(*Device,error){if path==""||p==nil{return nil,errors.New("device path and processor are required")};if requestTimeout<0{return nil,errors.New("request timeout cannot be negative")};fd,e:=syscall.Open(path,syscall.O_RDWR|syscall.O_CLOEXEC,0);if e!=nil{return nil,e};fail:=func(err error)(*Device,error){_=syscall.Close(fd);return nil,err};b:=make([]byte,uapi.ABIInfoSize);binary.LittleEndian.PutUint32(b[:4],uapi.ABIInfoSize);if e=ioctl(fd,ioctlGetABI,b);e!=nil{return fail(fmt.Errorf("GET_ABI: %w",e))};info,e:=uapi.UnmarshalABIInfo(b);if e!=nil{return fail(e)};need:=uapi.FeatureRequestRing|uapi.FeatureCompletionKick|uapi.FeatureRequestCancel;if info.Features&need!=need{return fail(fmt.Errorf("kernel lacks required feature bits %#x",need))};return &Device{fd:fd,path:path,processor:p,requestTimeout:requestTimeout,queues:make(map[uint32]*mappedQueue)},nil}
 func(d *Device)CancelRequest(queueID uint32,requestID,generation uint64) bool {
  if d==nil { return false }
  d.queuesMu.RLock()
@@ -15,6 +15,8 @@ func(d *Device)CancelRequest(queueID uint32,requestID,generation uint64) bool {
  if d.closed { return false }
  q:=d.queues[queueID]
  if q==nil || q.generation!=generation { return false }
+ raw,err:=(uapi.CancelRequest{QueueID:queueID,RequestID:requestID,QueueGeneration:generation}).MarshalBinary()
+ if err!=nil || ioctl(d.fd,ioctlCancel,raw)!=nil { return false }
  return q.mem.Cancel(requestID,generation)
 }
 func(d *Device)Reconcile()error{if d==nil||d.closed{return errors.New("device closed")};return d.scan()}

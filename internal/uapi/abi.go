@@ -18,6 +18,7 @@ const (
 	RingControlSize = 64
 	FeatureRequestRing uint64 = 1 << 0
 	FeatureCompletionKick uint64 = 1 << 1
+	FeatureRequestCancel uint64 = 1 << 2
 )
 type Operation uint16
 const (
@@ -28,6 +29,7 @@ const (
 )
 // Linux _IOW('B', 0x05, uint32) for BM_IOC_KICK.
 const IoctlKick uint32 = (1 << 30) | (4 << 16) | ('B' << 8) | 0x05
+const IoctlCancel uint32 = (1 << 30) | (40 << 16) | ('B' << 8) | 0x03
 
 type ResultCode uint16
 const (

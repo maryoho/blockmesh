@@ -44,6 +44,7 @@ struct bm_pending {
 	struct block_device *bdev;
 	u64 request_id, generation, logical_start, base_sector, target_sectors, sector_offset, owner_epoch;
 	u16 operation;
+	bool cancel_requested;
 	u32 block_count;
 };
 struct bm_queue_mem {
@@ -253,6 +254,12 @@ static void bm_finish_pending(struct bm_pending *p,
 	u64 request_end, cursor;
 	u32 i, nr_segments = 0;
 
+	if (code == BM_UAPI_C_RETRY) {
+		bio->bi_status = BLK_STS_AGAIN;
+		bio_endio(bio);
+		kfree(p);
+		return;
+	}
 	if (code != BM_UAPI_C_OK ||
 	    le64_to_cpu(completion->owner_epoch) != p->owner_epoch)
 		goto io_error;
@@ -650,7 +657,8 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		info.ring_ctrl_size = BM_UAPI_RING_CTRL_SIZE;
 		info.max_batch = BM_UAPI_MAX_BATCH;
 		info.max_ring_order = BM_UAPI_MAX_RING_ORDER;
-		info.features = BM_UAPI_FEATURE_REQUEST_RING | BM_UAPI_FEATURE_COMPLETION_KICK;
+		info.features = BM_UAPI_FEATURE_REQUEST_RING | BM_UAPI_FEATURE_COMPLETION_KICK |
+			BM_UAPI_FEATURE_REQUEST_CANCEL;
 		memset(info.reserved, 0, sizeof(info.reserved));
 		return copy_to_user(up, &info, sizeof(info)) ? -EFAULT : 0;
 	}
@@ -796,8 +804,29 @@ static long bm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		kref_put(&q->ref, bm_queue_release);
 		return ret < 0 ? ret : 0;
 	}
-	case BM_IOC_CANCEL:
-		return -EOPNOTSUPP; /* Cancellation state machine is a later increment. */
+	case BM_IOC_CANCEL: {
+		struct bm_uapi_cancel cancel;
+		struct bm_queue *q;
+		struct bm_pending *pending;
+		int ret = -EALREADY;
+		if (copy_from_user(&cancel, up, sizeof(cancel))) return -EFAULT;
+		if (cancel.size != sizeof(cancel) || !cancel.queue_id || cancel.queue_id > BM_UAPI_MAX_QUEUE_ID || cancel.reserved[0] || cancel.reserved[1]) return -EINVAL;
+		q = bm_queue_lookup(cancel.queue_id);
+		if (!q) return -ENOENT;
+		mutex_lock(&q->lock);
+		if (q->dead || !q->attached || !q->mem) ret = -ENOTCONN;
+		else if (cancel.queue_generation != q->generation) ret = -ESTALE;
+		else list_for_each_entry(pending, &q->pending, list) {
+			if (pending->request_id == cancel.request_id && pending->generation == cancel.queue_generation) {
+				if (pending->cancel_requested) ret = -EALREADY;
+				else { pending->cancel_requested = true; ret = 0; }
+				break;
+			}
+		}
+		mutex_unlock(&q->lock);
+		kref_put(&q->ref, bm_queue_release);
+		return ret;
+	}
 	default:
 		return -ENOTTY;
 	}

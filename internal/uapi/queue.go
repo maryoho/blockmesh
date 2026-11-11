@@ -80,18 +80,18 @@ func UnmarshalSetupQueue(b []byte)(SetupQueue,error){
 	return s,s.Validate()
 }
 
-type CancelRequest struct{RequestID,QueueGeneration uint64;Flags uint32}
+type CancelRequest struct{QueueID uint32;RequestID,QueueGeneration uint64}
 func(c CancelRequest)MarshalBinary()([]byte,error){
-	if c.RequestID==0||c.QueueGeneration==0{return nil,errors.New("cancel requires request ID and queue generation")}
-	b:=make([]byte,CancelSize);binary.LittleEndian.PutUint32(b[:4],CancelSize);binary.LittleEndian.PutUint32(b[4:8],c.Flags)
+	if c.QueueID==0||c.QueueID>MaxQueueID||c.RequestID==0||c.QueueGeneration==0{return nil,errors.New("cancel requires valid queue ID, request ID and queue generation")}
+	b:=make([]byte,CancelSize);binary.LittleEndian.PutUint32(b[:4],CancelSize);binary.LittleEndian.PutUint32(b[4:8],c.QueueID)
 	binary.LittleEndian.PutUint64(b[8:16],c.RequestID);binary.LittleEndian.PutUint64(b[16:24],c.QueueGeneration);return b,nil
 }
 func UnmarshalCancelRequest(b []byte)(CancelRequest,error){
 	var c CancelRequest
 	if len(b)!=CancelSize||binary.LittleEndian.Uint32(b[:4])!=CancelSize{return c,errors.New("cancel size mismatch")}
 	for _,v:=range b[24:40]{if v!=0{return c,errors.New("cancel reserved bytes are non-zero")}}
-	c.Flags=binary.LittleEndian.Uint32(b[4:8]);c.RequestID=binary.LittleEndian.Uint64(b[8:16]);c.QueueGeneration=binary.LittleEndian.Uint64(b[16:24])
-	if c.RequestID==0||c.QueueGeneration==0{return c,errors.New("cancel requires request ID and queue generation")};return c,nil
+	c.QueueID=binary.LittleEndian.Uint32(b[4:8]);c.RequestID=binary.LittleEndian.Uint64(b[8:16]);c.QueueGeneration=binary.LittleEndian.Uint64(b[16:24])
+	if c.QueueID==0||c.QueueID>MaxQueueID||c.RequestID==0||c.QueueGeneration==0{return c,errors.New("cancel requires valid queue ID, request ID and queue generation")};return c,nil
 }
 type ABIInfo struct{Features uint64}
 func(a ABIInfo)MarshalBinary()[]byte{
