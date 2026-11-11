@@ -42,3 +42,15 @@ func TestMappingRoundTrip(t *testing.T) {
 	got, err := UnmarshalMapping(b); if err != nil { t.Fatal(err) }
 	if got != want { t.Fatalf("got %+v want %+v", got, want) }
 }
+
+func TestCancelRequestRoundTrip(t *testing.T) {
+	want := CancelRequest{QueueID: 7, RequestID: 91, QueueGeneration: 12}
+	raw, err := want.MarshalBinary()
+	if err != nil { t.Fatal(err) }
+	if len(raw) != CancelSize { t.Fatalf("size=%d", len(raw)) }
+	got, err := UnmarshalCancelRequest(raw)
+	if err != nil { t.Fatal(err) }
+	if got != want { t.Fatalf("got %+v want %+v", got, want) }
+	raw[4] = 0
+	if _, err := UnmarshalCancelRequest(raw); err == nil { t.Fatal("accepted zero queue ID") }
+}
