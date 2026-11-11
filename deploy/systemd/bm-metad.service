@@ -1,0 +1,25 @@
+[Unit]
+Description=BlockMesh BMPOOL03 Metadata Service
+After=network-online.target sanlock.service multipathd.service
+Wants=network-online.target
+Requires=sanlock.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/sbin/bm-metad --config /etc/blockmesh/metad.json
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+TimeoutStopSec=90
+KillSignal=SIGTERM
+LimitNOFILE=1048576
+TasksMax=infinity
+PrivateDevices=no
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
