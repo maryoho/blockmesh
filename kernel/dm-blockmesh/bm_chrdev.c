@@ -255,7 +255,7 @@ static void bm_finish_pending(struct bm_pending *p,
 	u32 i, nr_segments = 0;
 
 	if (code == BM_UAPI_C_RETRY) {
-		bio->bi_status = BLK_STS_AGAIN;
+		bio->bi_status = BLK_STS_DM_REQUEUE;
 		bio_endio(bio);
 		kfree(p);
 		return;
