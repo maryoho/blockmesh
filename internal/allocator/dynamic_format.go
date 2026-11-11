@@ -18,6 +18,7 @@ const (
 )
 
 var ErrDynamicFormatIncomplete = errors.New("BMPOOL03 format is incomplete")
+var ErrDynamicSuperblockUnformatted = errors.New("BMPOOL03 superblock is not formatted")
 
 // FormatDynamicPool initializes the BMPOOL03 bitmap region and publishes the
 // two superblock copies only after all bitmap pages are durable. A durable
@@ -97,7 +98,16 @@ func OpenDynamicSuperblockPair(dev device.Device)(format.DynamicSuperblock,error
 		s,readErr:=format.ReadDynamicSuperblock(dev,int64(off))
 		if readErr==nil{valid=append(valid,s)}
 	}
-	if len(valid)==0{return zero,errors.New("no valid BMPOOL03 superblock copy")}
+	if len(valid)==0{
+  for _,off:=range []uint64{0,format.PageSize}{
+   page:=make([]byte,format.PageSize)
+   n,e:=dev.ReadAt(page,int64(off))
+   if e!=nil&&!(e==io.EOF&&n==len(page)){return zero,e}
+   if n!=len(page){return zero,io.ErrUnexpectedEOF}
+   if !allZero(page){return zero,errors.New("no valid BMPOOL03 superblock copy; metadata is occupied")}
+  }
+  return zero,ErrDynamicSuperblockUnformatted
+ }
 	if len(valid)==2{
 		if valid[0].PoolUUID!=valid[1].PoolUUID{return zero,errors.New("BMPOOL03 superblock copies have different Pool UUIDs")}
 		if valid[0].Generation==valid[1].Generation&&valid[0]!=valid[1]{return zero,errors.New("conflicting BMPOOL03 superblock copies at equal generation")}

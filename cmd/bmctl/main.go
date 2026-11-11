@@ -91,7 +91,7 @@ func runPool(args []string)error{
 		return formatPool(*poolID,cfg)
 	case "data-init":
 		if *dataBytes==0{return errors.New("data-init requires --bytes with a positive 4MiB-aligned capacity")}
-		return initializePoolData(*poolID,c,*dataBytes)
+		return initializePoolData(*poolID,cfg,*dataBytes)
 	case "dynamic-format":
 		if !*confirm{return errors.New("refusing destructive BMPOOL03 format without --confirm-format")}
 		return dynamicFormatPool(*poolID,cfg)
