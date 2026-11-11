@@ -39,7 +39,11 @@ struct bm_target {
 	bool read_only;
 	bool fenced;
 };
-struct bm_bio_ctx { bool tracked; };
+struct bm_bio_ctx {
+	bool tracked;
+	bool idempotency_key_initialized;
+	u8 idempotency_key[16];
+};
 static int bm_map(struct dm_target *ti, struct bio *bio)
 {
 	struct bm_target *bm = ti->private;
@@ -114,11 +118,19 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 		else
 			request.operation = cpu_to_le16(BM_UAPI_OP_ALLOCATE_ZERO_PUBLISH);
 		if (write) {
-			do {
-				get_random_bytes(request.idempotency_key,
-						 sizeof(request.idempotency_key));
-			} while (!memchr_inv(request.idempotency_key, 0,
-					     sizeof(request.idempotency_key)));
+			/* dm_per_bio_data survives DM_MAPIO_REQUEUE. Reuse the same
+			 * key when the same BIO is retried after CodeRetry or queue
+			 * pressure, so a committed allocation cannot be duplicated. */
+			if (!pb->idempotency_key_initialized) {
+				do {
+					get_random_bytes(pb->idempotency_key,
+							 sizeof(pb->idempotency_key));
+				} while (!memchr_inv(pb->idempotency_key, 0,
+						     sizeof(pb->idempotency_key)));
+				pb->idempotency_key_initialized = true;
+			}
+			memcpy(request.idempotency_key, pb->idempotency_key,
+			       sizeof(request.idempotency_key));
 		}
 	}
 	ret = bm_queue_submit(bm->queue_id, bm->queue_cookie, &request, bio,
