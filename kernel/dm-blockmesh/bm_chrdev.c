@@ -63,6 +63,7 @@ struct bm_queue {
 	struct delayed_work retry_work;
 	bool retry_work_ref;
 	u32 pending_count;
+	u32 retry_count;
 	wait_queue_head_t wait;
 	u32 id;
 	u32 ring_order;
@@ -193,7 +194,7 @@ int bm_queue_submit(u32 queue_id, u64 target_cookie,
 		tail = le32_to_cpu((__force __le32)READ_ONCE(ctrl->tail));
 		if ((u32)(tail - head) > entries)
 			ret = -EPROTO;
-		else if ((u32)(tail - head) == entries || q->pending_count >= entries)
+		else if ((u32)(tail - head) == entries || q->pending_count + q->retry_count >= entries)
 			ret = -EAGAIN;
 		else {
 			request->version = cpu_to_le16(BM_UAPI_VERSION);
@@ -236,6 +237,7 @@ static void bm_abort_queue_retries(struct bm_queue *q)
 	LIST_HEAD(aborted);
 	mutex_lock(&q->lock);
 	list_splice_init(&q->retry_pending, &aborted);
+	q->retry_count = 0;
 	mutex_unlock(&q->lock);
 	bm_abort_pending_list(&aborted);
 }
@@ -244,6 +246,7 @@ static void bm_queue_retry_all_pending(struct bm_queue *q)
 {
 	mutex_lock(&q->lock);
 	list_splice_tail_init(&q->pending, &q->retry_pending);
+	q->retry_count += q->pending_count;
 	q->pending_count = 0;
 	if (!list_empty(&q->retry_pending)) {
 		if (!q->retry_work_ref) {
@@ -291,6 +294,8 @@ static void bm_retry_workfn(struct work_struct *work)
 		}
 		p = list_first_entry(&q->retry_pending, struct bm_pending, list);
 		list_del_init(&p->list);
+		if (q->retry_count)
+			q->retry_count--;
 		mutex_unlock(&q->lock);
 
 		ret = bm_queue_submit(q->id, q->target_cookie, &p->request,
@@ -304,6 +309,7 @@ static void bm_retry_workfn(struct work_struct *work)
 			mutex_lock(&q->lock);
 			if (!q->dead) {
 				list_add_tail(&p->list, &q->retry_pending);
+				q->retry_count++;
 				queue_delayed_work(system_wq, &q->retry_work, delay);
 				mutex_unlock(&q->lock);
 				return;
@@ -333,6 +339,7 @@ static void bm_queue_retry_pending(struct bm_queue *q, struct bm_pending *p)
 		return;
 	}
 	list_add_tail(&p->list, &q->retry_pending);
+	q->retry_count++;
 	if (!q->retry_work_ref) {
 		kref_get(&q->ref);
 		q->retry_work_ref = true;
