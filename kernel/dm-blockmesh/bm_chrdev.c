@@ -148,7 +148,6 @@ static void bm_abort_queue_pending(struct bm_queue *q)
 	LIST_HEAD(aborted);
 	mutex_lock(&q->lock);
 	list_splice_init(&q->pending, &aborted);
-	list_splice_init(&q->retry_pending, &aborted);
 	q->pending_count = 0;
 	mutex_unlock(&q->lock);
 	bm_abort_pending_list(&aborted);
@@ -232,6 +231,30 @@ int bm_queue_submit(u32 queue_id, u64 target_cookie,
 		wake_up_all(&bm_poll_wait);
 	return ret;
 }
+static void bm_abort_queue_retries(struct bm_queue *q)
+{
+	LIST_HEAD(aborted);
+	mutex_lock(&q->lock);
+	list_splice_init(&q->retry_pending, &aborted);
+	mutex_unlock(&q->lock);
+	bm_abort_pending_list(&aborted);
+}
+
+static void bm_queue_retry_all_pending(struct bm_queue *q)
+{
+	mutex_lock(&q->lock);
+	list_splice_tail_init(&q->pending, &q->retry_pending);
+	q->pending_count = 0;
+	if (!list_empty(&q->retry_pending)) {
+		if (!q->retry_work_ref) {
+			kref_get(&q->ref);
+			q->retry_work_ref = true;
+		}
+		queue_delayed_work(system_wq, &q->retry_work, msecs_to_jiffies(10));
+	}
+	mutex_unlock(&q->lock);
+}
+
 static void bm_retry_workfn(struct work_struct *work)
 {
 	struct bm_queue *q = container_of(to_delayed_work(work), struct bm_queue, retry_work);
@@ -655,6 +678,7 @@ void bm_queue_destroy(u32 queue_id, u64 target_cookie)
 
 	cancel_delayed_work_sync(&q->retry_work);
 	bm_abort_queue_pending(q);
+	bm_abort_queue_retries(q);
 	mutex_lock(&q->lock);
 	if (q->retry_work_ref) {
 		q->retry_work_ref = false;
@@ -734,7 +758,9 @@ static int bm_release_file(struct inode *inode, struct file *file)
 		q->mem = NULL;
 		mutex_unlock(&q->lock);
 		bm_mem_put(old_mem);
-		bm_abort_queue_pending(q);
+		/* Preserve unresolved BIOs across service restart. Reissue them
+		 * with the same idempotency key after the next generation attaches. */
+		bm_queue_retry_all_pending(q);
 		wake_up_all(&q->wait);
 	}
 	mutex_unlock(&bm_queues_lock);
