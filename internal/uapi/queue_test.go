@@ -6,7 +6,7 @@ func TestQueueLayoutsDoNotOverlapAtEveryOrder(t *testing.T){
  if _,e:=Layout(MaxRingOrder+1);e==nil{t.Fatal("accepted excessive order")}
 }
 func TestSetupQueueRoundTripAndRejectBadOffset(t *testing.T){w:=setupFixture();b,e:=w.MarshalBinary();if e!=nil{t.Fatal(e)};g,e:=UnmarshalSetupQueue(b);if e!=nil{t.Fatal(e)};if g!=w{t.Fatalf("got %+v want %+v",g,w)};binary.LittleEndian.PutUint64(b[32:40],0x20000);if _,e=UnmarshalSetupQueue(b);e==nil{t.Fatal("accepted invalid offset")}}
-func TestCancelRoundTripAndReserved(t *testing.T){w:=CancelRequest{RequestID:7,QueueGeneration:8,Flags:1};b,e:=w.MarshalBinary();if e!=nil{t.Fatal(e)};g,e:=UnmarshalCancelRequest(b);if e!=nil{t.Fatal(e)};if g!=w{t.Fatalf("got %+v want %+v",g,w)};b[39]=1;if _,e=UnmarshalCancelRequest(b);e==nil{t.Fatal("accepted reserved bytes")}}
+func TestCancelRoundTripAndReserved(t *testing.T){w:=CancelRequest{QueueID:1,RequestID:7,QueueGeneration:8};b,e:=w.MarshalBinary();if e!=nil{t.Fatal(e)};g,e:=UnmarshalCancelRequest(b);if e!=nil{t.Fatal(e)};if g!=w{t.Fatalf("got %+v want %+v",g,w)};b[39]=1;if _,e=UnmarshalCancelRequest(b);e==nil{t.Fatal("accepted reserved bytes")}}
 func TestABIInfoRoundTripAndMismatch(t *testing.T){w:=ABIInfo{Features:3};b:=w.MarshalBinary();g,e:=UnmarshalABIInfo(b);if e!=nil{t.Fatal(e)};if g!=w{t.Fatalf("got %+v",g)};binary.LittleEndian.PutUint32(b[8:12],0);if _,e=UnmarshalABIInfo(b);e==nil{t.Fatal("accepted ABI mismatch")}}
 func TestCorrelatorCancelLateCompletionAndReset(t *testing.T){
  c,e:=NewCorrelator(10);if e!=nil{t.Fatal(e)};if e=c.Register(1,10);e!=nil{t.Fatal(e)};if e=c.Register(1,10);e==nil{t.Fatal("accepted duplicate")}
