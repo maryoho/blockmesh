@@ -168,3 +168,15 @@ func TestDynamicVolumeRuntimeManagerPinsRuntimeWhenFailStopFails(t *testing.T) {
 	if err=m.Deactivate(context.Background(),spec.VolumeID); err==nil { t.Fatal("expected teardown to retain resources after fail-stop failure") }
 	if m.RuntimeState(spec.VolumeID)!=RuntimeLeaseLost { t.Fatal("lost runtime state was not retained") }
 }
+
+func TestResolveRequestUsesRetryableStoppingErrorWhenRuntimeInactive(t *testing.T) {
+ m,err:=NewDynamicVolumeRuntimeManager(ManagerConfig{
+  OpenReadWrite:runtimeOpenerFunc(func(context.Context,metastore.VolumeRuntimeSpec,OwnerLease)(*Runtime,error){return nil,errors.New("unused")}),
+  Gate:&managerTestGate{},
+ })
+ if err!=nil{t.Fatal(err)}
+ _,err=m.ResolveRequest(context.Background(),"vol-1","node-a","boot-a",7,0,0)
+ if !errors.Is(err,metastore.ErrVolumeRuntimeStopping){
+  t.Fatalf("ResolveRequest error=%v want ErrVolumeRuntimeStopping",err)
+ }
+}
