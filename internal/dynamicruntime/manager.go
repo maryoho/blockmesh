@@ -566,7 +566,7 @@ func (m *DynamicVolumeRuntimeManager) ResolveRequest(ctx context.Context,volumeI
 	rt:=m.runtimes[volumeID]
 	if rt==nil || !rt.enabled || rt.stopping || rt.state!=RuntimeActive || rt.failure!=nil || rt.poisoned!=nil || rt.runtime==nil {
 		m.mu.Unlock()
-		return out,metastore.ErrRuntimeRequestFenced
+		return out,metastore.ErrVolumeRuntimeStopping
 	}
 	spec:=rt.spec
 	m.mu.Unlock()
@@ -579,7 +579,7 @@ func (m *DynamicVolumeRuntimeManager) ResolveRequest(ctx context.Context,volumeI
 	active:=m.runtimes[volumeID]==rt && rt.enabled && !rt.stopping &&
 		rt.state==RuntimeActive && rt.failure==nil && rt.poisoned==nil
 	m.mu.Unlock()
-	if !active { return out,metastore.ErrRuntimeRequestFenced }
+	if !active { return out,metastore.ErrVolumeRuntimeStopping }
 	out.Spec,out.Runtime=spec,rt.runtime
 	switch spec.Mode {
 	case metastore.VolumeRuntimeReadWrite:
