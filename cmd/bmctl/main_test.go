@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+type testBootstrapLocker struct{}
+func(testBootstrapLocker)Distributed()bool{return true}
+func(testBootstrapLocker)Lock(context.Context,string)(func()error,error){return func()error{return nil},nil}
+type testBootstrapOwner struct{epoch uint64}
+func(o *testBootstrapOwner)Epoch()uint64{return o.epoch}
+func(o *testBootstrapOwner)Valid()bool{return o.epoch>0}
+
 func writeOwnerHelper(t *testing.T,body string)string{
 	t.Helper()
 	path:=filepath.Join(t.TempDir(),"owner-helper.sh")

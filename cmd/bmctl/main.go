@@ -72,7 +72,7 @@ func main(){
 	if len(os.Args)<2||os.Args[1]!="pool"{usage();os.Exit(2)}
 	if err:=runPool(os.Args[2:]);err!=nil{fmt.Fprintln(os.Stderr,"bmctl:",err);os.Exit(1)}
 }
-func usage(){fmt.Fprintln(os.Stderr,"Usage: bmctl pool <format|dynamic-format|dynamic-status|dynamic-recover|rescan|metadata-expand|metadata-expand-status|data-expand> --pool <id> [--config-dir /etc/blockmesh/pools]")}
+func usage(){fmt.Fprintln(os.Stderr,"Usage: bmctl pool <format|data-init|dynamic-format|dynamic-status|dynamic-recover|rescan|metadata-expand|metadata-expand-status|data-expand> --pool <id> [--config-dir /etc/blockmesh/pools]")}
 func runPool(args []string)error{
 	if len(args)==0{usage();return errors.New("pool operation is required")}
 	op:=args[0]
@@ -80,6 +80,7 @@ func runPool(args []string)error{
 	poolID:=fs.String("pool","","Pool identifier")
 	configDir:=fs.String("config-dir","/etc/blockmesh/pools","Pool configuration directory")
 	confirm:=fs.Bool("confirm-format",false,"confirm creation of a new BMPOOL03 Pool")
+	dataBytes:=fs.Uint64("bytes",0,"initial Data capacity in bytes (must be a multiple of 4MiB)")
 	if err:=fs.Parse(args[1:]);err!=nil{return err}
 	if fs.NArg()!=0{return errors.New("unexpected positional arguments")}
 	if strings.TrimSpace(*poolID)==""||strings.ContainsAny(*poolID,"/\\:"){return errors.New("a valid --pool identifier is required")}
@@ -88,6 +89,9 @@ func runPool(args []string)error{
 	case "format":
 		if !*confirm{return errors.New("refusing destructive Pool format without --confirm-format")}
 		return formatPool(*poolID,cfg)
+	case "data-init":
+		if *dataBytes==0{return errors.New("data-init requires --bytes with a positive 4MiB-aligned capacity")}
+		return initializePoolData(*poolID,c,*dataBytes)
 	case "dynamic-format":
 		if !*confirm{return errors.New("refusing destructive BMPOOL03 format without --confirm-format")}
 		return dynamicFormatPool(*poolID,cfg)
@@ -197,6 +201,46 @@ func dynamicGeometryConfig(c poolConfig,metadataBytes,dataBytes uint64)(format.D
 	return format.DynamicGeometryConfig{DataBytes:dataBytes,MetadataBytes:metadataBytes,AGSizeBytes:agSize,
 		AGCapacity:agCapacity,WALSegmentBytes:walBytes,MappingBytes:mappingBytes,CheckpointBytes:checkpointBytes},nil
 }
+
+
+ // initializePoolData creates the first DataView on a freshly formatted
+ // BMPOOL03 Bootstrap Pool. It is intentionally one-shot: later capacity
+ // growth uses data-expand and its usage/forecast snapshot.
+ func initializePoolData(id string,c poolConfig,bytes uint64)error{
+  if bytes==0||bytes%poolspace.AllocationSize!=0{return fmt.Errorf("initial Data capacity must be a positive multiple of %d bytes",poolspace.AllocationSize)}
+  dev,bootstrap,owner,err:=openStore(c,id,true);if err!=nil{return err}
+  defer dev.Close();defer owner.Close()
+  allocated,err:=allocateInitialDataExtents(bootstrap,bytes);if err!=nil{return err}
+  if !owner.Valid(){return errors.New("Owner lease lost after Data extent publication")}
+  _,data,generation,err:=bootstrap.OpenViews();if err!=nil{return err}
+  if data==nil||uint64(data.Size())!=bytes{return fmt.Errorf("published DataView size mismatch: expected=%d actual=%v",bytes,data)}
+  return json.NewEncoder(os.Stdout).Encode(map[string]any{
+   "pool_id":id,"data_bytes":data.Size(),"view_generation":generation,
+   "allocated_extents":allocated,"bootstrap_generation":bootstrap.Record().Generation,
+   "next_step":"bmctl pool dynamic-format --pool "+id+" --confirm-format",
+  })
+ }
+
+ // allocateInitialDataExtents validates the one-time transition before
+ // publishing the Data extent map. Corrupt or interrupted BMPOOL03 metadata is
+ // never treated as an unformatted Pool.
+ func allocateInitialDataExtents(bootstrap *poolspace.BootstrapStore,bytes uint64)([]poolspace.Extent,error){
+  if bootstrap==nil||bytes==0||bytes%poolspace.AllocationSize!=0{return nil,errors.New("Bootstrap Pool and positive 4MiB-aligned Data capacity are required")}
+  for _,e:=range bootstrap.Extents(){if e.Kind==poolspace.Data{return nil,errors.New("Pool already contains Data extents; use data-expand after BMPOOL03 format")}}
+  metadata,_,_,err:=bootstrap.OpenViews();if err!=nil{return nil,err}
+  _,err=allocator.OpenDynamicSuperblockPair(metadata)
+  switch{
+  case err==nil:
+   return nil,errors.New("BMPOOL03 is already formatted; use data-expand instead of data-init")
+  case errors.Is(err,allocator.ErrDynamicFormatIncomplete):
+   return nil,errors.New("BMPOOL03 format is incomplete; run dynamic-recover before Data initialization")
+  case errors.Is(err,allocator.ErrDynamicSuperblockUnformatted):
+   // Expected for a fresh Bootstrap Pool.
+  default:
+   return nil,fmt.Errorf("refuse Data initialization because BMPOOL03 metadata is not cleanly unformatted: %w",err)
+  }
+  return bootstrap.AllocateDataExtents(bytes)
+ }
 
 func dynamicFormatPool(id string,c poolConfig)error{
 	dev,bootstrap,owner,err:=openStore(c,id,true);if err!=nil{return err}
