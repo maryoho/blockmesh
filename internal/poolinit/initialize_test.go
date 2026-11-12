@@ -45,3 +45,16 @@ func TestInitializeRejectsWrongCatalogName(t *testing.T) {
 		t.Fatal("expected Pool catalog name mismatch")
 	}
 }
+
+type invalidOwner struct{}
+func(invalidOwner)Epoch()uint64{return 1}
+func(invalidOwner)Valid()bool{return false}
+
+func TestOwnerGuardedDeviceRejectsWritesAfterLeaseLoss(t *testing.T) {
+	f,err:=device.OpenFile(t.TempDir()+"/guard.img")
+	if err!=nil{t.Fatal(err)}
+	defer f.Close()
+	guarded:=ownerGuardedDevice{Device:f,owner:invalidOwner{},logicalSector:512}
+	if _,err=guarded.WriteAt([]byte{1},0);err!=ErrOwnerLeaseLost{t.Fatalf("WriteAt error=%v",err)}
+	if err=guarded.Sync();err!=ErrOwnerLeaseLost{t.Fatalf("Sync error=%v",err)}
+}
