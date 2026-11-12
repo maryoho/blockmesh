@@ -59,7 +59,7 @@ func TestDynamicVolumeDescriptorCatalogFieldsRoundTrip(t *testing.T) {
 	sb,err:=NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
 	d:=DynamicVolumeDescriptor{VolumeID:"volume-03",VolumeName:"vm-disk-03",LogicalSizeBytes:4*BlockSize,
 		CreateToken:[16]byte{1,2,3},AG:0,Generation:1,VolumeSequence:1,MappingRootOffset:g.MappingOffset,
-		BitmapSequence:1,OwnerEpoch:1,ArenaStart:g.ReservedOffset/PageSize,ArenaPages:64,RootPage:^uint64(0),LifecyclePages:4}
+		BitmapSequence:1,OwnerEpoch:1,ArenaStart:g.ReservedOffset/PageSize,ArenaPages:64,RootPage:^uint64(0),LifecycleStart:g.ReservedOffset/PageSize+64,LifecyclePages:4}
 	b,err:=d.Encode();if err!=nil{t.Fatal(err)}
 	if got:=binary.LittleEndian.Uint32(b[8:12]);got!=DynamicVolumeDescriptorVersion{t.Fatalf("descriptor version=%d",got)}
 	got,err:=DecodeDynamicVolumeDescriptor(b);if err!=nil{t.Fatal(err)}
