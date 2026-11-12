@@ -20,3 +20,16 @@ func TestParseLifecycleCommand(t *testing.T) {
 	if err!=nil||action!="volumeactivate"||args.Mode!="ro" { t.Fatalf("action=%q args=%+v err=%v",action,args,err) }
 	for _, argv:=range [][]string{{"volume","activate","abc","rwX"},{"volume","create","p","v","0G"},{"pool","create","p"}} { if _,_,err:=parseLifecycleCommand(argv); err==nil { t.Errorf("expected %v to fail",argv) } }
 }
+
+func TestVolumeCreateTokenIsDeterministic(t *testing.T) {
+	first:=lifecycleArgs{Pool:"pool0",Name:"disk0",SizeBytes:100<<30}
+	second:=lifecycleArgs{Pool:"pool0",Name:"disk0",SizeBytes:100<<30}
+	makeToken:=func(a lifecycleArgs)string{
+		identity:=fmt.Sprintf("blockmesh/volume-create/v1/%s/%s/%d",a.Pool,a.Name,a.SizeBytes)
+		sum:=sha256.Sum256([]byte(identity))
+		return hex.EncodeToString(sum[:16])
+	}
+	if makeToken(first)!=makeToken(second){t.Fatal("same Volume create request produced different idempotency tokens")}
+	second.SizeBytes+=4<<20
+	if makeToken(first)==makeToken(second){t.Fatal("different Volume sizes produced the same idempotency token")}
+}

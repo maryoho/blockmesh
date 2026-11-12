@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +60,7 @@ type lifecycleArgs struct {
 	SizeBytes uint64 `json:"size_bytes,omitempty"`
 	UUID string `json:"uuid,omitempty"`
 	Mode string `json:"mode,omitempty"`
+	CreateToken string `json:"create_token,omitempty"`
 }
 
 func parseVolumeSize(s string) (uint64, error) {
@@ -134,6 +137,13 @@ func parseLifecycleCommand(argv []string) (string, lifecycleArgs, error) {
 }
 
 func callLifecycle(socket, action string, args lifecycleArgs) error {
+	if action == "volumecreate" && args.CreateToken == "" {
+		// A deterministic token makes a repeated CLI invocation after a lost
+		// response replay the original descriptor instead of allocating again.
+		identity := fmt.Sprintf("blockmesh/volume-create/v1/%s/%s/%d", args.Pool, args.Name, args.SizeBytes)
+		sum := sha256.Sum256([]byte(identity))
+		args.CreateToken = hex.EncodeToString(sum[:16])
+	}
 	payload, err := json.Marshal(args); if err != nil { return err }
 	id := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	req := lifecycleRequest{Version: 1, ID: id, Action: action, Args: payload}
