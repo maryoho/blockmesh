@@ -1,0 +1,395 @@
+package metastore
+
+import (
+ "context"
+ "encoding/binary"
+ "errors"
+ "fmt"
+ "hash/crc32"
+ "math"
+ "sync"
+)
+
+const (
+ lifecycleStateMagic = "BMARNA01"
+ lifecycleQueueMagic = "BMRETR01"
+ lifecycleVersion = uint32(1)
+ lifecycleHeaderSize = 32
+ lifecycleRecordSize = 16
+ MaxPersistentRetiredPages = (PageSize-4-lifecycleHeaderSize)/lifecycleRecordSize
+)
+
+var (
+ ErrLifecycleUnformatted = errors.New("persistent arena lifecycle region is not initialized")
+ ErrLifecycleAlreadyInitialized = errors.New("persistent arena lifecycle region is already initialized")
+ ErrRetireQueueFull = errors.New("persistent retire queue is full")
+ ErrLifecycleCorrupt = errors.New("persistent arena lifecycle metadata is corrupt")
+)
+
+// PersistentArena combines a volatile reservation allocator with durable
+// lifecycle checkpoints. Live pages are reconstructed from the published
+// root graph plus every page in the durable retire queue. In-flight
+// reservations are intentionally volatile: after a crash, uncommitted COW
+// pages are unreachable and therefore safe to reuse.
+type PersistentArena struct {
+ mu sync.Mutex
+ store *Store
+ arena *Arena
+ committer Committer
+ stateGeneration uint64
+ rootSequence uint64
+ batches []RetireBatch
+ coordinator ReaderCoordinator
+}
+
+func lifecycleOffsets(sb Superblock)(uint64,uint64,error){
+ if sb.LifecyclePages<2 { return 0,0,ErrLifecycleUnformatted }
+ return sb.LifecycleStart*PageSize,(sb.LifecycleStart+1)*PageSize,nil
+}
+
+// FormatLifecycle initializes the lifecycle checkpoint and every reserved queue page. It must be
+// called only while the metadata device is exclusively owned and before
+// opening the persistent Arena.
+func FormatLifecycle(store *Store) error {
+ if store==nil { return errors.New("nil metastore") }
+ stateOff,_,err:=lifecycleOffsets(store.Superblock()); if err!=nil{return err}
+ sb:=store.Superblock()
+ for i:=uint64(0);i<sb.LifecyclePages;i++ {
+  existing:=make([]byte,PageSize)
+  if err=readFullAt(store.dev,existing,int64((sb.LifecycleStart+i)*PageSize));err!=nil{return err}
+  if !allZeroLifecycle(existing){return ErrLifecycleAlreadyInitialized}
+ }
+ state:=encodeLifecycleState(1,sb.MappingSequence)
+ queues,err:=encodeRetireQueuePages(nil,1,sb.LifecyclePages-1);if err!=nil{return err}
+ if err=writeFullAt(store.dev,state,int64(stateOff));err!=nil{return err}
+ for i,queue:=range queues {
+  if err=writeFullAt(store.dev,queue,int64((sb.LifecycleStart+1+uint64(i))*PageSize));err!=nil{return err}
+ }
+ return store.Sync()
+}
+
+func allZeroLifecycle(b []byte)bool{for _,v:=range b{if v!=0{return false}};return true}
+
+func encodeLifecycleState(generation,rootSequence uint64)[]byte{
+ b:=make([]byte,PageSize);copy(b[:8],lifecycleStateMagic)
+ binary.LittleEndian.PutUint32(b[8:12],lifecycleVersion)
+ binary.LittleEndian.PutUint64(b[16:24],generation)
+ binary.LittleEndian.PutUint64(b[24:32],rootSequence)
+ binary.LittleEndian.PutUint32(b[PageSize-4:],crc32.Checksum(b[:PageSize-4],crcTable))
+ return b
+}
+
+func decodeLifecycleState(b []byte)(uint64,uint64,error){
+ if len(b)!=PageSize||string(b[:8])!=lifecycleStateMagic||binary.LittleEndian.Uint32(b[8:12])!=lifecycleVersion||
+  crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) {return 0,0,ErrLifecycleCorrupt}
+ for _,v:=range b[12:16]{if v!=0{return 0,0,ErrLifecycleCorrupt}}
+ for _,v:=range b[32:PageSize-4]{if v!=0{return 0,0,ErrLifecycleCorrupt}}
+ generation:=binary.LittleEndian.Uint64(b[16:24])
+ if generation==0{return 0,0,ErrLifecycleCorrupt}
+ return generation,binary.LittleEndian.Uint64(b[24:32]),nil
+}
+
+func encodeRetireQueue(batches []RetireBatch,generation uint64)([]byte,error){
+ count:=0
+ for _,batch:=range batches { if len(batch.PageIDs)==0 {continue}; if len(batch.PageIDs)>MaxPersistentRetiredPages-count{return nil,ErrRetireQueueFull};count+=len(batch.PageIDs) }
+ b:=make([]byte,PageSize);copy(b[:8],lifecycleQueueMagic);binary.LittleEndian.PutUint32(b[8:12],lifecycleVersion);binary.LittleEndian.PutUint32(b[12:16],uint32(count))
+ binary.LittleEndian.PutUint64(b[16:24],generation)
+ off:=lifecycleHeaderSize
+ for _,batch:=range batches { for _,id:=range batch.PageIDs {
+  binary.LittleEndian.PutUint64(b[off:off+8],batch.RetireGeneration)
+  binary.LittleEndian.PutUint64(b[off+8:off+16],id);off+=lifecycleRecordSize
+ }}
+ binary.LittleEndian.PutUint32(b[PageSize-4:],crc32.Checksum(b[:PageSize-4],crcTable))
+ return b,nil
+}
+
+func decodeRetireQueue(b []byte,store *Store)([]RetireBatch,uint64,error){
+ if len(b)!=PageSize||string(b[:8])!=lifecycleQueueMagic||binary.LittleEndian.Uint32(b[8:12])!=lifecycleVersion||
+  crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) {return nil,0,ErrLifecycleCorrupt}
+ count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,0,ErrLifecycleCorrupt}
+ for _,v:=range b[24:lifecycleHeaderSize]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
+ queueGeneration:=binary.LittleEndian.Uint64(b[16:24])
+ if queueGeneration==0{return nil,0,ErrLifecycleCorrupt}
+ batches:=make([]RetireBatch,0);index:=make(map[uint64]int);seen:=make(map[uint64]struct{},count)
+ off:=lifecycleHeaderSize;sb:=store.Superblock()
+ for i:=0;i<count;i++ {
+  generation:=binary.LittleEndian.Uint64(b[off:off+8]);id:=binary.LittleEndian.Uint64(b[off+8:off+16]);off+=lifecycleRecordSize
+  if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||generation>=sb.MappingSequence {return nil,0,ErrLifecycleCorrupt}
+  if _,ok:=seen[id];ok{return nil,0,ErrLifecycleCorrupt};seen[id]=struct{}{}
+  batchIndex,ok:=index[generation];if !ok {batchIndex=len(batches);index[generation]=batchIndex;batches=append(batches,RetireBatch{RetireGeneration:generation})}
+  batches[batchIndex].PageIDs=append(batches[batchIndex].PageIDs,id)
+ }
+ for _,v:=range b[off:PageSize-4]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
+ return batches,queueGeneration,nil
+}
+
+// NewPersistentArena restores live pages from the root graph and durable
+// retire records. Every retired page remains pinned until Collect proves the
+// reader generation, I/O drain and fencing conditions.
+func NewPersistentArena(store *Store,livePages []uint64,committer Committer,coordinators ...ReaderCoordinator)(*PersistentArena,error){
+ if len(coordinators)>1{return nil,errors.New("at most one reader coordinator may be supplied")}
+ if store==nil||committer==nil{return nil,errors.New("store and WAL committer are required")}
+ if len(coordinators)==1 && coordinators[0]!=nil {
+  clusterCommitter,ok:=committer.(ClusterSafeCommitter)
+  if !ok || !clusterCommitter.ClusterSafe() { return nil,ErrClusterSafeCommitterRequired }
+ }
+ stateOff,_,err:=lifecycleOffsets(store.Superblock());if err!=nil{return nil,err}
+ stateImage:=make([]byte,PageSize);if err=readFullAt(store.dev,stateImage,int64(stateOff));err!=nil{return nil,err}
+ generation,rootSequence,err:=decodeLifecycleState(stateImage);if err!=nil{return nil,err}
+ batches,queueGeneration,err:=readRetireQueuePages(store);if err!=nil{return nil,err}
+ if rootSequence!=store.Superblock().MappingSequence||queueGeneration!=generation{return nil,ErrLifecycleCorrupt}
+ live:=append([]uint64(nil),livePages...)
+ reachable:=make(map[uint64]struct{},len(livePages)+1)
+ for _,id:=range livePages { reachable[id]=struct{}{} }
+ if root:=store.Superblock().RootPage;root!=NoPage { reachable[root]=struct{}{} }
+ for _,batch:=range batches { for _,id:=range batch.PageIDs {
+  if _,ok:=reachable[id];ok { return nil,ErrLifecycleCorrupt }
+  live=append(live,id)
+ }}
+ arena,err:=newArena(store,live);if err!=nil{return nil,err}
+ var coordinator ReaderCoordinator
+ if len(coordinators)==1 { coordinator=coordinators[0] }
+ return &PersistentArena{store:store,arena:arena,committer:committer,stateGeneration:generation,rootSequence:rootSequence,batches:batches,coordinator:coordinator},nil
+}
+
+func (p *PersistentArena) Reserve(count uint64)(*Reservation,error){if p==nil{return nil,errors.New("nil persistent arena")};return p.arena.Reserve(count)}
+func (p *PersistentArena) Stats()ArenaStats{return p.arena.Stats()}
+func (p *PersistentArena) Pending()[]RetireBatch{
+ p.mu.Lock();defer p.mu.Unlock();out:=make([]RetireBatch,len(p.batches))
+ for i,b:=range p.batches{out[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
+ return out
+}
+
+// CommitPagesAndPublish persists new pages, lifecycle state, retire records,
+// and the new root descriptor in one WAL transaction. On success it atomically
+// transitions reservation pages to Live; callers must not call Reservation.Commit
+// or Abort afterward. The Arena mutex is held through the WAL commit so another
+// goroutine cannot abort/reuse a page while its after-image is in flight.
+// A non-ErrJournalFull error may have an uncertain commit outcome; callers must
+// stop using this instance and reopen/recover rather than aborting the reservation.
+func (p *PersistentArena) CommitPagesAndPublish(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64)error {
+	return p.CommitPagesAndPublishWithImages(reservation,pages,newLivePages,rootPage,mappingSequence,retireGeneration,retired,nil)
+}
+
+// CommitPagesAndPublishWithImages includes caller-owned fixed-LBA pages (such
+// as AG bitmap descriptor/data and persistent idempotency records) in the same
+// redo-WAL transaction as COW pages, lifecycle state and root publication.
+func (p *PersistentArena) CommitPagesAndPublishWithImages(reservation *Reservation,pages []Page,newLivePages []uint64,rootPage,mappingSequence,retireGeneration uint64,retired []uint64,extra []PageImage)error{
+ if p==nil{return errors.New("nil persistent arena")}
+ if p.coordinator!=nil {
+  unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return err};defer unlock()
+ }
+ p.mu.Lock();defer p.mu.Unlock()
+ if err:=p.store.Refresh();err!=nil{return err}
+ if p.rootSequence==math.MaxUint64||mappingSequence!=p.rootSequence+1||retireGeneration!=p.rootSequence{return errors.New("invalid lifecycle generation")}
+ if p.store.Superblock().MappingSequence!=p.rootSequence{return ErrLifecycleCorrupt}
+ if p.stateGeneration==math.MaxUint64{return errors.New("lifecycle generation exhausted")}
+ // Validate that every reserved page is represented by either a COW
+ // Page or an encoded Arena PageImage. Fixed-LBA extras (bitmap/lifecycle)
+ // do not consume Arena reservations.
+ p.arena.mu.Lock()
+ reservedIDs:=make(map[uint64]struct{})
+ if reservation==nil {
+  if len(pages)!=0 {p.arena.mu.Unlock();return errors.New("COW pages require an Arena reservation")}
+ } else {
+  if reservation.arena!=p.arena||reservation.done {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  for _,id:=range reservation.pages {owner,ok:=p.arena.reserved[id];if !ok||owner!=reservation.id {p.arena.mu.Unlock();return ErrInvalidPageSet};reservedIDs[id]=struct{}{}}
+ }
+ for _,page:=range pages {if _,ok:=reservedIDs[page.ID];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet};delete(reservedIDs,page.ID)}
+ for _,image:=range extra {
+  if image.Offset%PageSize!=0||len(image.Data)!=int(PageSize) {p.arena.mu.Unlock();return errors.New("extra WAL images must be aligned 4KiB pages")}
+  id:=image.Offset/PageSize
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages {continue}
+  if _,ok:=reservedIDs[id];!ok {p.arena.mu.Unlock();return fmt.Errorf("%w: extra Arena page %d is not reserved",ErrInvalidPageSet,id)}
+  if _,err:=decodePage(id,image.Data);err!=nil {p.arena.mu.Unlock();return fmt.Errorf("%w: invalid encoded Arena page %d: %v",ErrInvalidPageSet,id,err)}
+  delete(reservedIDs,id)
+ }
+ if len(reservedIDs)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ newLiveSet:=make(map[uint64]struct{},len(newLivePages))
+ for _,id:=range newLivePages {
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  newLiveSet[id]=struct{}{}
+  if owner,ok:=p.arena.reserved[id];ok {
+   if reservation==nil||owner!=reservation.id {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  } else if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }
+ if rootPage!=NoPage {if _,ok:=newLiveSet[rootPage];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}}
+ if rootPage==NoPage&&len(newLiveSet)!=0 {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ if reservation!=nil {for _,id:=range reservation.pages {if _,ok:=newLiveSet[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}}}
+ queuedPages:=make(map[uint64]struct{})
+ for _,batch:=range p.batches {for _,id:=range batch.PageIDs {
+  queuedPages[id]=struct{}{}
+  if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }}
+ retiredSeen:=make(map[uint64]struct{},len(retired))
+ for _,id:=range retired {
+  if id<p.arena.start||id-p.arena.start>=p.arena.pages||id==rootPage {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=retiredSeen[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet};retiredSeen[id]=struct{}{}
+  if _,ok:=queuedPages[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=newLiveSet[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=p.arena.live[id];!ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+  if _,ok:=p.arena.reserved[id];ok {p.arena.mu.Unlock();return ErrInvalidPageSet}
+ }
+ // Keep the Arena mutex held from reservation validation through the
+ // durable WAL commit. Otherwise a concurrent Abort/Reserve could recycle a
+ // COW page while its after-image is being committed.
+ nextBatches:=make([]RetireBatch,len(p.batches));for i,b:=range p.batches{nextBatches[i]=RetireBatch{RetireGeneration:b.RetireGeneration,PageIDs:append([]uint64(nil),b.PageIDs...)}}
+ if len(retired)>0 {nextBatches=append(nextBatches,RetireBatch{RetireGeneration:retireGeneration,PageIDs:append([]uint64(nil),retired...)})}
+ queueImages,err:=encodeRetireQueuePages(nextBatches,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{p.arena.mu.Unlock();return err}
+ stateImage:=encodeLifecycleState(p.stateGeneration+1,mappingSequence)
+ sb:=p.store.Superblock();stateOff,_,err:=lifecycleOffsets(sb);if err!=nil{p.arena.mu.Unlock();return err}
+ extras:=append([]PageImage(nil),extra...)
+ extras=append(extras,PageImage{Offset:stateOff,Data:stateImage})
+ for i,image:=range queueImages { extras=append(extras,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
+ if err=p.store.CommitPagesAndPublishWithImages(pages,extras,rootPage,mappingSequence,p.committer);err!=nil{p.arena.mu.Unlock();return err}
+ // The durable root is now visible. Convert this transaction's reservations
+ // into Live pages before allowing another goroutine to reserve or abort.
+ for id := range newLiveSet { p.arena.live[id] = struct{}{} }
+ if reservation != nil {
+  for _, id := range reservation.pages {
+   delete(p.arena.reserved, id)
+  }
+  reservation.done = true
+ }
+ p.arena.mu.Unlock()
+ p.stateGeneration++;p.rootSequence=mappingSequence;p.batches=nextBatches
+ return nil
+}
+
+// Collect durably removes safe retire records before making their pages free.
+// A crash after the WAL commit but before the in-memory release is safe:
+// reopening reconstructs free space from the root and the now-shorter queue.
+// CollectWithReaders derives the safe generation from the durable Reader
+// Table. Non-fenced Active and Leaving slots pin their recorded generations;
+// slots are excluded only after graceful I/O drain or successful SAN fencing.
+func (p *PersistentArena) CollectWithReaders(readers *ReaderTable, ioDrained bool) (int,error) {
+ return p.CollectWithReadersContext(context.Background(),readers,ioDrained)
+}
+
+func (p *PersistentArena) CollectWithReadersContext(ctx context.Context, readers *ReaderTable, ioDrained bool) (int,error) {
+ if p==nil { return 0,errors.New("nil persistent arena") }
+ if readers==nil { return 0,errors.New("durable reader table is required") }
+ if p.coordinator==nil || readers.coordinator==nil { return 0,ErrReaderCoordinatorRequired }
+ if readers.store==nil || readers.store!=p.store { return 0,ErrGeometry }
+ unlock,err:=acquireReaderSetContext(ctx,p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
+ readers.mu.Lock()
+ safe,err:=readers.safeGenerationLocked()
+ readers.mu.Unlock()
+ if err!=nil{return 0,err}
+ return p.collect(ReclaimProof{SafeGeneration:safe,IOsDrained:ioDrained,FencingConfirmed:true})
+}
+
+func (p *PersistentArena) Collect(proof ReclaimProof)(int,error){
+ if p==nil{return 0,errors.New("nil persistent arena")}
+ if p.coordinator!=nil {
+  unlock,err:=acquireReaderSet(p.coordinator,p.store.Superblock().VolumeID);if err!=nil{return 0,err};defer unlock()
+ }
+ return p.collect(proof)
+}
+
+func (p *PersistentArena) collect(proof ReclaimProof)(int,error){
+ if p==nil{return 0,errors.New("nil persistent arena")}
+ if !proof.IOsDrained||!proof.FencingConfirmed{return 0,ErrUnsafeReclaim}
+ p.mu.Lock();defer p.mu.Unlock()
+ if err:=p.store.Refresh();err!=nil{return 0,err}
+ if p.store.Superblock().MappingSequence!=p.rootSequence{return 0,ErrLifecycleCorrupt}
+ kept:=make([]RetireBatch,0,len(p.batches));var release []uint64
+ for _,b:=range p.batches {if proof.SafeGeneration>b.RetireGeneration {release=append(release,b.PageIDs...)}else{kept=append(kept,b)}}
+ if len(release)==0{return 0,nil}
+ if p.stateGeneration==math.MaxUint64{return 0,errors.New("lifecycle generation exhausted")}
+ queueImages,err:=encodeRetireQueuePages(kept,p.stateGeneration+1,p.store.Superblock().LifecyclePages-1);if err!=nil{return 0,err}
+ stateImage:=encodeLifecycleState(p.stateGeneration+1,p.rootSequence)
+ stateOff,_,err:=lifecycleOffsets(p.store.Superblock());if err!=nil{return 0,err}
+ images:=[]PageImage{{Offset:stateOff,Data:stateImage}}
+ sb:=p.store.Superblock()
+ for i,image:=range queueImages { images=append(images,PageImage{Offset:(sb.LifecycleStart+1+uint64(i))*PageSize,Data:image}) }
+ if err=p.committer.CommitImages(images);err!=nil{return 0,err}
+ if err=p.arena.ReleasePages(release);err!=nil{return 0,fmt.Errorf("retire queue committed but in-memory page release failed: %w",err)}
+ p.stateGeneration++;p.batches=kept
+ return len(release),nil
+}
+
+
+const persistentQueueFormatVersion = uint32(2)
+
+// encodeRetireQueuePages stores the durable queue in a fixed, pre-reserved
+// page range. Every page carries the same generation and an explicit index;
+// all pages are committed in one WAL transaction, so no torn mixture can be
+// accepted after recovery.
+func encodeRetireQueuePages(batches []RetireBatch, generation, pageCount uint64) ([][]byte, error) {
+ if pageCount == 0 { return nil, ErrLifecycleUnformatted }
+ if pageCount>uint64(^uint32(0)) { return nil,ErrGeometry }
+ total:=0
+ for _,batch:=range batches { total+=len(batch.PageIDs) }
+ capacity:=int(pageCount)*MaxPersistentRetiredPages
+ if total>capacity { return nil, ErrRetireQueueFull }
+ pages:=make([][]byte,int(pageCount))
+ for i:=range pages {
+  b:=make([]byte,PageSize); copy(b[:8],lifecycleQueueMagic)
+  binary.LittleEndian.PutUint32(b[8:12],persistentQueueFormatVersion)
+  binary.LittleEndian.PutUint64(b[16:24],generation)
+  binary.LittleEndian.PutUint32(b[24:28],uint32(i))
+  binary.LittleEndian.PutUint32(b[28:32],uint32(pageCount))
+  pages[i]=b
+ }
+ pageIndex:=0
+ for _,batch:=range batches { for _,id:=range batch.PageIDs {
+  if pageIndex>=len(pages) { return nil,ErrRetireQueueFull }
+  b:=pages[pageIndex]
+  count:=binary.LittleEndian.Uint32(b[12:16])
+  off:=lifecycleHeaderSize+int(count)*lifecycleRecordSize
+  binary.LittleEndian.PutUint64(b[off:off+8],batch.RetireGeneration)
+  binary.LittleEndian.PutUint64(b[off+8:off+16],id)
+  binary.LittleEndian.PutUint32(b[12:16],count+1)
+  if int(count)+1==MaxPersistentRetiredPages { pageIndex++ }
+ }}
+ for _,b:=range pages { binary.LittleEndian.PutUint32(b[PageSize-4:],crc32.Checksum(b[:PageSize-4],crcTable)) }
+ return pages,nil
+}
+
+func readRetireQueuePages(store *Store) ([]RetireBatch,uint64,error) {
+ sb:=store.Superblock()
+ if sb.LifecyclePages<2 { return nil,0,ErrLifecycleUnformatted }
+ pageCount:=sb.LifecyclePages-1
+ if pageCount>uint64(^uint32(0)) { return nil,0,ErrLifecycleCorrupt }
+ // Backward compatibility for P3-3.5's single-page queue format. Older
+ // builds may have reserved more than two lifecycle pages but only wrote the
+ // first queue page; every remaining page must therefore still be blank.
+ first:=make([]byte,PageSize)
+ if err:=readFullAt(store.dev,first,int64((sb.LifecycleStart+1)*PageSize));err!=nil{return nil,0,err}
+ if binary.LittleEndian.Uint32(first[8:12])==lifecycleVersion {
+  batches,generation,err:=decodeRetireQueue(first,store);if err!=nil{return nil,0,err}
+  for i:=uint64(1);i<pageCount;i++ {
+   blank:=make([]byte,PageSize)
+   if err=readFullAt(store.dev,blank,int64((sb.LifecycleStart+1+i)*PageSize));err!=nil{return nil,0,err}
+   if !allZeroLifecycle(blank){return nil,0,ErrLifecycleCorrupt}
+  }
+  return batches,generation,nil
+ }
+ batches:=make([]RetireBatch,0)
+ indexes:=make(map[uint64]int)
+ seen:=make(map[uint64]struct{})
+ var generation uint64
+ for i:=uint64(0);i<pageCount;i++ {
+  b:=make([]byte,PageSize)
+  off:=(sb.LifecycleStart+1+i)*PageSize
+  if err:=readFullAt(store.dev,b,int64(off));err!=nil{return nil,0,err}
+  if len(b)!=PageSize||string(b[:8])!=lifecycleQueueMagic||binary.LittleEndian.Uint32(b[8:12])!=persistentQueueFormatVersion||
+   crc32.Checksum(b[:PageSize-4],crcTable)!=binary.LittleEndian.Uint32(b[PageSize-4:]) { return nil,0,ErrLifecycleCorrupt }
+  if binary.LittleEndian.Uint32(b[24:28])!=uint32(i)||binary.LittleEndian.Uint32(b[28:32])!=uint32(pageCount) { return nil,0,ErrLifecycleCorrupt }
+  g:=binary.LittleEndian.Uint64(b[16:24]);if g==0{return nil,0,ErrLifecycleCorrupt}
+  if i==0 {generation=g} else if generation!=g {return nil,0,ErrLifecycleCorrupt}
+  count:=int(binary.LittleEndian.Uint32(b[12:16]));if count>MaxPersistentRetiredPages{return nil,0,ErrLifecycleCorrupt}
+  offRec:=lifecycleHeaderSize
+  for j:=0;j<count;j++ {
+   rg:=binary.LittleEndian.Uint64(b[offRec:offRec+8]);id:=binary.LittleEndian.Uint64(b[offRec+8:offRec+16]);offRec+=lifecycleRecordSize
+   if id<sb.ArenaStart||id-sb.ArenaStart>=sb.ArenaPages||rg>=sb.MappingSequence{return nil,0,ErrLifecycleCorrupt}
+   if _,ok:=seen[id];ok{return nil,0,ErrLifecycleCorrupt};seen[id]=struct{}{}
+   bi,ok:=indexes[rg];if !ok{bi=len(batches);indexes[rg]=bi;batches=append(batches,RetireBatch{RetireGeneration:rg})}
+   batches[bi].PageIDs=append(batches[bi].PageIDs,id)
+  }
+  for _,v:=range b[offRec:PageSize-4]{if v!=0{return nil,0,ErrLifecycleCorrupt}}
+ }
+ return batches,generation,nil
+}

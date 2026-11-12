@@ -1,0 +1,242 @@
+package metastore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"blockmesh/internal/device"
+	"blockmesh/internal/fence"
+	"blockmesh/internal/format"
+	"blockmesh/internal/lock"
+	"blockmesh/internal/volume"
+)
+
+type poolRuntimeTestDMGate struct { events []string; fenceCurrentErr error }
+func (g *poolRuntimeTestDMGate) FenceCurrent(_ context.Context,d string)error{g.events=append(g.events,"fence-current:"+d);return g.fenceCurrentErr}
+func (g *poolRuntimeTestDMGate) Prepare(_ context.Context,d string,e uint64)(uint64,error){g.events=append(g.events,fmt.Sprintf("prepare:%s:%d",d,e));return 0xab,nil}
+func (g *poolRuntimeTestDMGate) Enable(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("enable:%s:%d:%x",d,e,instance));return nil}
+func (g *poolRuntimeTestDMGate) Fence(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("fence:%s:%d:%x",d,e,instance));return nil}
+func (g *poolRuntimeTestDMGate) Drain(_ context.Context,d string,e,instance uint64)error{g.events=append(g.events,fmt.Sprintf("drain:%s:%d:%x",d,e,instance));return nil}
+type poolRuntimeTestOwner struct{}
+func (poolRuntimeTestOwner) AcquireFencedOwner(context.Context, VolumeRuntimeSpec) (RuntimeOwnerLease, error) {
+	return nil, nil
+}
+
+type poolRuntimeTestFencer struct{}
+func (poolRuntimeTestFencer) FenceNode(context.Context, string, string) error { return nil }
+
+type poolRuntimeTestRegistrar struct{}
+func (poolRuntimeTestRegistrar) RegisterReader(context.Context, string, string) error { return nil }
+func (poolRuntimeTestRegistrar) UnregisterReader(context.Context, string, string) error { return nil }
+
+func validPoolRuntimeConfig() PoolRuntimeConfig {
+	locker := &lock.SanlockLocker{}
+	return PoolRuntimeConfig{
+		DMGate: &poolRuntimeTestDMGate{},
+		DMDeviceFor: func(volumeID string) string { return "/dev/mapper/" + volumeID },
+		OpenDevice: func(context.Context, VolumeRuntimeSpec) (RuntimeMetadataDevice, error) { return nil, nil },
+		Owner: poolRuntimeTestOwner{}, Locker: locker,
+		OpenPoolSuperblock: func(RuntimeMetadataDevice) (format.Superblock, error) { return format.Superblock{}, nil },
+		CommitterForAG: func(device.Device, format.Superblock, uint32) (Committer, error) { return nil, nil },
+		RecoverAG: func(context.Context, Committer) error { return nil },
+		ReaderSetResource: func(string) string { return "reader-set" },
+		ReaderSlotResource: func(string, uint32) string { return "reader-slot" },
+		PRRegistrar: poolRuntimeTestRegistrar{},
+		ReaderRecoveryProbe: &SanlockReaderLeaseProbe{Locker: locker, ResourceFor: func(string, uint32) string { return "reader-slot" }},
+		ReaderFencer: poolRuntimeTestFencer{},
+		RecoveryConfig: ReaderRecoveryConfig{HeartbeatTimeout: 5 * time.Second},
+		LivePages: func(*Store) ([]uint64, error) { return nil, nil },
+		OnReaderLeaseLost: func(context.Context, VolumeRuntimeSpec, error) {},
+		OnOwnerLeaseLost: func(context.Context, VolumeRuntimeSpec, error) error { return nil },
+		EnableRequests: func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error { return nil },
+		EnableRequestsGuarded: func(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error{return guard()},
+		StopRequests: func(context.Context, string) error { return nil },
+		DrainMetadataIO: func(context.Context, string) error { return nil },
+		CloseMetadata: func(context.Context, VolumeRuntimeSpec, *VolumeRuntimeMetadata) error { return nil },
+	}
+}
+
+func TestNewPoolVolumeRuntimeBackendRequiresDistributedProductionDependencies(t *testing.T) {
+	backend, err := NewPoolVolumeRuntimeBackend(validPoolRuntimeConfig())
+	if err != nil { t.Fatalf("valid config rejected: %v", err) }
+	if backend == nil { t.Fatal("nil backend") }
+}
+
+func TestNewPoolVolumeRuntimeBackendRejectsNoopFencer(t *testing.T) {
+	cfg := validPoolRuntimeConfig()
+	cfg.ReaderFencer = fence.NoopFencer{}
+	if _, err := NewPoolVolumeRuntimeBackend(cfg); err == nil {
+		t.Fatal("NoopFencer accepted by Pool runtime")
+	}
+}
+
+func TestNewPoolVolumeRuntimeBackendRequiresHeartbeatRecoveryPolicy(t *testing.T) {
+	cfg := validPoolRuntimeConfig()
+	cfg.RecoveryConfig.HeartbeatTimeout = 0
+	if _, err := NewPoolVolumeRuntimeBackend(cfg); err == nil {
+		t.Fatal("missing heartbeat timeout accepted")
+	}
+}
+
+func TestNewPoolVolumeRuntimeBackendRequiresSharedReaderLocker(t *testing.T) {
+	cfg := validPoolRuntimeConfig()
+	cfg.ReaderRecoveryProbe = &SanlockReaderLeaseProbe{Locker: &lock.SanlockLocker{}, ResourceFor: func(string, uint32) string { return "reader-slot" }}
+	if _, err := NewPoolVolumeRuntimeBackend(cfg); err == nil {
+		t.Fatal("reader probe with a different sanlock locker accepted")
+	}
+}
+
+type poolOwnerTestReservation struct{}
+func (poolOwnerTestReservation) PrepareOwnerReservation(context.Context,string,string)error{return nil}
+func (poolOwnerTestReservation) EstablishOwnerReservation(context.Context,string,string)error{return nil}
+
+type poolOwnerTestRecords struct{}
+func (poolOwnerTestRecords) Load(context.Context,string)(volume.OwnerRecord,bool,error){return volume.OwnerRecord{},false,nil}
+func (poolOwnerTestRecords) CompareAndSwap(context.Context,string,*volume.OwnerRecord,volume.OwnerRecord)error{return nil}
+
+func TestNewPoolVolumeRuntimeBackendRequiresOwnerCoordinatorToShareSanlockLocker(t *testing.T) {
+	cfg:=validPoolRuntimeConfig()
+	other:=&lock.SanlockLocker{}
+	coordinator,err:=volume.NewOwnerCoordinator(volume.OwnerCoordinatorConfig{
+		Locker:other,ResourceFor:func(string)string{return "owner-resource"},
+		Records:poolOwnerTestRecords{},Fencer:poolRuntimeTestFencer{},Reservation:poolOwnerTestReservation{},
+		ReadEpoch:func(context.Context,string)(uint64,error){return 1,nil},
+		DrainOldOwner:func(context.Context,string,volume.OwnerRecord)error{return nil},
+	})
+	if err!=nil{t.Fatal(err)}
+	cfg.Owner=PoolOwnerCoordinator{Coordinator:coordinator}
+	if _,err=NewPoolVolumeRuntimeBackend(cfg);err==nil{
+		t.Fatal("OwnerCoordinator using a different sanlock locker was accepted")
+	}
+}
+
+
+type poolRuntimeProofLease struct {
+	record volume.OwnerRecord
+	epoch uint64
+	verified bool
+	valid bool
+	lost chan error
+	closed bool
+}
+func (l *poolRuntimeProofLease) Close()error{l.closed=true;return nil}
+func (l *poolRuntimeProofLease) Epoch()uint64{if l.epoch!=0{return l.epoch};return l.record.Epoch}
+func (l *poolRuntimeProofLease) Lost()<-chan error{return l.lost}
+func (l *poolRuntimeProofLease) Valid()bool{return l.valid}
+func (l *poolRuntimeProofLease) OwnerRecord()volume.OwnerRecord{return l.record}
+func (l *poolRuntimeProofLease) ReservationVerified()bool{return l.verified}
+func (l *poolRuntimeProofLease) PreviousOwnerFenced()bool{return true}
+func (l *poolRuntimeProofLease) OldOwnerIODrained()bool{return true}
+
+type poolRuntimeProofOwner struct{lease RuntimeOwnerLease}
+func (o poolRuntimeProofOwner) AcquireFencedOwner(context.Context,VolumeRuntimeSpec)(RuntimeOwnerLease,error){return o.lease,nil}
+
+func TestPoolRuntimeRequiresMatchingOwnerRecordAndPRProof(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	for _,tc:=range []struct{name string;record volume.OwnerRecord;epoch uint64;verified bool}{
+		{name:"matching",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:true},
+		{name:"wrong node",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-b",BootID:"boot-a",Epoch:9},verified:true},
+		{name:"reservation unverified",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},verified:false},
+		{name:"wrong epoch",record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:8},epoch:9,verified:true},
+	} {
+		t.Run(tc.name,func(t *testing.T){
+			lease:=&poolRuntimeProofLease{record:tc.record,epoch:tc.epoch,verified:tc.verified,valid:true,lost:make(chan error)}
+			cfg:=validPoolRuntimeConfig()
+			cfg.Owner=poolRuntimeProofOwner{lease:lease}
+			backend,err:=NewPoolVolumeRuntimeBackend(cfg)
+			if err!=nil{t.Fatal(err)}
+			got,err:=backend.AcquireOwnerLease(context.Background(),spec)
+			if tc.name=="matching" {
+				if err!=nil||got!=lease{t.Fatalf("matching proof rejected: lease=%v err=%v",got,err)}
+			} else {
+				if err==nil||got!=nil{t.Fatalf("invalid proof accepted: lease=%v err=%v",got,err)}
+				if !lease.closed{t.Fatal("invalid proof lease was not closed")}
+			}
+		})
+	}
+}
+
+
+func TestPoolRuntimeGuardedAdmissionInvokesLeaseGuardAtGate(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	guardCalled:=false
+	cfg:=validPoolRuntimeConfig()
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	cfg.EnableRequestsGuarded=func(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error{
+		guardCalled=true
+		lease.valid=false // Model sanlock lease loss immediately before DM queue enable.
+		return guard()
+	}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
+	err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:9},func()error{
+		if !lease.Valid(){return errors.New("sanlock Owner lease lost at admission gate")}
+		return nil
+	})
+	if err==nil||!guardCalled{t.Fatalf("guarded admission did not reject lost lease: called=%v err=%v",guardCalled,err)}
+	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
+	if len(gate.events)<2||gate.events[0]!="fence-current:/dev/mapper/vol-a"||gate.events[1]!="prepare:/dev/mapper/vol-a:9"{t.Fatalf("local stale gate must be fenced before epoch prepare: %v",gate.events)}
+	for _,event:=range gate.events{if strings.HasPrefix(event,"enable:"){t.Fatalf("kernel gate opened after failed guard: %v",gate.events)}}
+}
+
+
+func TestPoolRuntimeRejectsAdmissionHookThatSkipsOwnerGuard(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:9},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	stopped,drained:=false,false
+	cfg:=validPoolRuntimeConfig()
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	cfg.EnableRequestsGuarded=func(context.Context,VolumeRuntimeSpec,*VolumeRuntimeMetadata,func()error)error{return nil}
+	cfg.StopRequests=func(context.Context,string)error{stopped=true;return nil}
+	cfg.DrainMetadataIO=func(context.Context,string)error{drained=true;return nil}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
+	err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:9},func()error{return nil})
+	if err==nil||!stopped||!drained{t.Fatalf("unguarded hook was accepted or not stopped/drained: err=%v stopped=%v drained=%v",err,stopped,drained)}
+}
+
+func TestPoolRuntimeGuardedAdmissionEnablesOnlyAfterKernelPrepareAndLeaseGuard(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:12},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	cfg:=validPoolRuntimeConfig()
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	cfg.EnableRequestsGuarded=func(_ context.Context,_ VolumeRuntimeSpec,_ *VolumeRuntimeMetadata,guard func()error)error{return guard()}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if _,err=backend.AcquireOwnerLease(context.Background(),spec);err!=nil{t.Fatal(err)}
+	if err=backend.EnableRequestsGuarded(context.Background(),spec,&VolumeRuntimeMetadata{OwnerEpoch:12},func()error{return nil});err!=nil{t.Fatal(err)}
+	gate:=cfg.DMGate.(*poolRuntimeTestDMGate)
+	want:=[]string{"fence-current:/dev/mapper/vol-a","prepare:/dev/mapper/vol-a:12","enable:/dev/mapper/vol-a:12:ab"}
+	if !reflect.DeepEqual(gate.events,want){t.Fatalf("kernel gate sequence=%v want=%v",gate.events,want)}
+}
+
+func TestPoolRuntimeRejectsOwnerWhenLocalDMTargetCannotBeFenced(t *testing.T) {
+	spec:=VolumeRuntimeSpec{VolumeID:"vol-a",Mode:VolumeRuntimeReadWrite,NodeID:"node-a",BootID:"boot-a"}
+	lease:=&poolRuntimeProofLease{
+		record:volume.OwnerRecord{VolumeID:"vol-a",NodeID:"node-a",BootID:"boot-a",Epoch:15},
+		verified:true,valid:true,lost:make(chan error),
+	}
+	cfg:=validPoolRuntimeConfig()
+	gate:=&poolRuntimeTestDMGate{fenceCurrentErr:errors.New("local DM target did not drain")}
+	cfg.DMGate=gate
+	cfg.Owner=poolRuntimeProofOwner{lease:lease}
+	backend,err:=NewPoolVolumeRuntimeBackend(cfg);if err!=nil{t.Fatal(err)}
+	if got,err:=backend.AcquireOwnerLease(context.Background(),spec);err==nil||got!=nil{
+		t.Fatalf("Owner returned despite local DM fence failure: lease=%v err=%v",got,err)
+	}
+	if !lease.closed{t.Fatal("Owner Lease was not released after local DM fence failure")}
+}
