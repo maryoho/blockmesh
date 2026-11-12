@@ -84,6 +84,8 @@ func(s *Server)serveConn(parent context.Context,conn *net.UnixConn){
  var req Request
  dec:=json.NewDecoder(newSliceReader(line));dec.DisallowUnknownFields()
  if err=dec.Decode(&req);err!=nil{s.writeError(conn,"",fmt.Errorf("decode request: %w",err));return}
+ var trailing any
+ if err=dec.Decode(&trailing);err!=io.EOF{s.writeError(conn,req.ID,errors.New("request contains trailing JSON"));return}
  if req.Version!=ProtocolVersion{s.writeError(conn,req.ID,fmt.Errorf("unsupported protocol version %d",req.Version));return}
  if len(req.ID)==0||len(req.ID)>128{s.writeError(conn,req.ID,errors.New("request ID must contain 1-128 bytes"));return}
  if !actionPattern.MatchString(req.Action){s.writeError(conn,req.ID,errors.New("invalid lifecycle action"));return}
