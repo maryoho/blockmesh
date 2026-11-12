@@ -21,8 +21,7 @@ func TestReadPoolCatalogFromLUN(t *testing.T) {
 }
 
 func TestReadPoolCatalogRejectsUnnamedLegacyBootstrap(t *testing.T) {
-	f,_,err:=newSparsePool(t)
-	if err!=nil { t.Fatal(err) }
+	f,_:=newSparsePool(t)
 	defer f.Close()
 	if _,err:=ReadPoolCatalog(f);!errors.Is(err,ErrPoolCatalogNameMissing) {
 		t.Fatalf("expected unnamed Pool catalog error, got %v",err)
