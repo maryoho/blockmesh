@@ -45,6 +45,22 @@ type OwnerLease interface {
 	Valid() bool
 }
 
+var ErrOwnerLeaseLost = errors.New("Pool Owner Lease lost during initialization")
+
+type ownerGuardedDevice struct { device.Device; owner OwnerLease }
+func (d ownerGuardedDevice) WriteAt(p []byte,off int64)(int,error) {
+	if d.owner==nil || !d.owner.Valid() { return 0,ErrOwnerLeaseLost }
+	return d.Device.WriteAt(p,off)
+}
+func (d ownerGuardedDevice) Sync() error {
+	if d.owner==nil || !d.owner.Valid() { return ErrOwnerLeaseLost }
+	return d.Device.Sync()
+}
+func (d ownerGuardedDevice) LogicalSectorSize() int {
+	if v,ok:=d.Device.(interface{LogicalSectorSize()int});ok { return v.LogicalSectorSize() }
+	return 0
+}
+
 // Initialize is safe to retry after a process crash. The caller must acquire
 // an exclusive, cluster-wide Owner Lease and SCSI PR reservation before calling
 // it. lockResource must be stable across nodes (normally derived from device
@@ -54,6 +70,7 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	if name=="" || len(name)>23 { return result,fmt.Errorf("Pool name must contain 1-23 ASCII letters, digits, dot, dash or underscore") }
 	if locker==nil || !locker.Distributed() { return result,errors.New("Pool initialization requires a distributed SAN lock") }
 	if owner==nil || !owner.Valid() || owner.Epoch()==0 { return result,errors.New("Pool initialization requires a live fenced Owner Lease") }
+	guardedDev:=ownerGuardedDevice{Device:dev,owner:owner}
 	if lockResource=="" { return result,errors.New("stable Pool initialization lock resource is required") }
 	if cfg.VolumeSlots==0 { cfg.VolumeSlots=64 }
 	if cfg.AGSizeBytes==0 { cfg.AGSizeBytes=1<<40 }
@@ -69,11 +86,11 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	if !owner.Valid() { return result,errors.New("Owner Lease lost before Pool initialization") }
 
 	var bootstrap *poolspace.BootstrapStore
-	version,detectErr:=poolspace.DetectFormat(dev)
+	version,detectErr:=poolspace.DetectFormat(guardedDev)
 	switch {
 	case detectErr==nil && version==poolspace.FormatBMPOOL03:
-		bootstrap,err=poolspace.OpenBootstrap(dev)
-		if errors.Is(err,poolspace.ErrBootstrapFormatIncomplete) { bootstrap,err=poolspace.FormatBootstrapNamed(dev,name,cfg.VolumeSlots,cfg.LogicalSectorBytes) }
+		bootstrap,err=poolspace.OpenBootstrap(guardedDev)
+		if errors.Is(err,poolspace.ErrBootstrapFormatIncomplete) { bootstrap,err=poolspace.FormatBootstrapNamed(guardedDev,name,cfg.VolumeSlots,cfg.LogicalSectorBytes) }
 		if err!=nil { return result,fmt.Errorf("open or resume existing BMPOOL03 Pool: %w",err) }
 		if bootstrap.Record().PoolName!=name { return result,fmt.Errorf("device already belongs to Pool %q, not %q",bootstrap.Record().PoolName,name) }
 	case detectErr==nil && version==poolspace.FormatBMPOOL02:
@@ -117,9 +134,9 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	existing,openErr:=allocator.OpenDynamicSuperblockPair(metadata)
 	switch {
 	case errors.Is(openErr,allocator.ErrDynamicSuperblockUnformatted):
-		err=allocator.FormatDynamicPool(metadata,sb)
+		err=allocator.FormatDynamicPool(ownerGuardedDevice{Device:metadata,owner:owner},sb)
 	case errors.Is(openErr,allocator.ErrDynamicFormatIncomplete):
-		err=allocator.RecoverDynamicFormat(metadata,sb)
+		err=allocator.RecoverDynamicFormat(ownerGuardedDevice{Device:metadata,owner:owner},sb)
 	case openErr==nil:
 		if existing.PoolUUID!=record.PoolUUID || existing.ViewGeneration!=viewGeneration {
 			return result,errors.New("existing BMPOOL03 superblock identity/view generation differs from Bootstrap")
@@ -140,11 +157,11 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	if metastore.DynamicVolumeAllocatorPresent(metadata,sb) {
 		_,err=metastore.OpenDynamicVolumeAllocator(metadata,sb)
 		if errors.Is(err,metastore.ErrDynamicVolumeAllocatorUnformatted) {
-			err=metastore.RecoverDynamicVolumeAllocatorFormat(metadata,sb)
+			err=metastore.RecoverDynamicVolumeAllocatorFormat(ownerGuardedDevice{Device:metadata,owner:owner},sb)
 			if err==nil { _,err=metastore.OpenDynamicVolumeAllocator(metadata,sb) }
 		}
 	} else {
-		err=metastore.FormatDynamicVolumeAllocator(metadata,sb)
+		err=metastore.FormatDynamicVolumeAllocator(ownerGuardedDevice{Device:metadata,owner:owner},sb)
 		if err==nil { _,err=metastore.OpenDynamicVolumeAllocator(metadata,sb) }
 	}
 	if err!=nil { return result,fmt.Errorf("initialize Pool Reserved allocator: %w",err) }
