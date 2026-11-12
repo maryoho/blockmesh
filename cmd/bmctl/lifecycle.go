@@ -105,6 +105,7 @@ func parseLifecycleCommand(argv []string) (string, lifecycleArgs, error) {
 	if len(argv) < 2 { return "", a, errors.New("expected a command; run bmctl --help") }
 	group, command := argv[0], argv[1]
 	rest := argv[2:]
+	var err error
 	switch group + " " + command {
 	case "pool create":
 		if len(rest) != 2 { return "", a, errors.New("usage: bmctl pool create <name> <device>") }
