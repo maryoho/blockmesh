@@ -175,6 +175,14 @@ func FormatBootstrapNamed(dev device.Device,poolName string,volumeSlots uint32,l
 	if !validPoolName(poolName) { return nil,fmt.Errorf("invalid Pool name %q: use 1-23 ASCII letters, digits, dot, dash or underscore",poolName) }
 	if dev==nil||dev.Size()<=0{return nil,ErrInvalidGeometry}
 	deviceBytes:=uint64(dev.Size())
+	if deviceBytes<BootstrapSize {
+		for _,off:=range []uint64{BootstrapSlotA,BootstrapSlotB} {
+			p:=make([]byte,PageSize)
+			if err:=readFull(dev,p,int64(off));err!=nil { return nil,ErrInvalidGeometry }
+			if binary.LittleEndian.Uint64(p[:8])==0x424D504F4F4C3032 { return nil,ErrLegacyPoolFormat }
+		}
+		return nil,ErrInvalidGeometry
+	}
 	if block,ok:=dev.(interface{LogicalSectorSize()int});ok{
 		actual:=block.LogicalSectorSize()
 		if actual<=0{return nil,ErrInvalidGeometry}
