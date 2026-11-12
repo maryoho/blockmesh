@@ -54,3 +54,14 @@ func TestCancelRequestRoundTrip(t *testing.T) {
 	raw[4] = 0
 	if _, err := UnmarshalCancelRequest(raw); err == nil { t.Fatal("accepted zero queue ID") }
 }
+
+func TestUnmappedMappingRoundTripAndValidation(t *testing.T) {
+	want:=Mapping{LogicalBlock:12,BlockCount:3,Unmapped:true}
+	raw,err:=want.MarshalBinary();if err!=nil{t.Fatal(err)}
+	got,err:=UnmarshalMapping(raw);if err!=nil{t.Fatal(err)}
+	if got!=want{t.Fatalf("got=%+v want=%+v",got,want)}
+	bad:=Mapping{LogicalBlock:12,PhysicalBlock:99,BlockCount:1,Unmapped:true}
+	if _,err=bad.MarshalBinary();err==nil{t.Fatal("unmapped mapping with physical address accepted")}
+	raw[20]=0x80
+	if _,err=UnmarshalMapping(raw);err==nil{t.Fatal("unknown mapping flags accepted")}
+}

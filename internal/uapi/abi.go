@@ -50,9 +50,12 @@ type Request struct {
 	BlockCount uint32
 	IdempotencyKey, VolumeID, NodeID, BootID [16]byte
 }
+const MappingFlagUnmapped uint32 = 1
+
 type Mapping struct {
 	LogicalBlock, PhysicalBlock uint64
 	BlockCount uint32
+	Unmapped bool
 }
 type Completion struct {
 	Code ResultCode
@@ -169,17 +172,21 @@ func UnmarshalMappings(b []byte, count uint32) ([]Mapping, error) {
 }
 
 func (m Mapping) MarshalBinary() ([]byte, error) {
-	if m.BlockCount == 0 || m.LogicalBlock > ^uint64(0)-uint64(m.BlockCount) || m.PhysicalBlock > ^uint64(0)-uint64(m.BlockCount) { return nil, errors.New("invalid mapping range") }
+	if m.BlockCount == 0 || m.LogicalBlock > ^uint64(0)-uint64(m.BlockCount) ||
+		(!m.Unmapped && m.PhysicalBlock > ^uint64(0)-uint64(m.BlockCount)) ||
+		(m.Unmapped && m.PhysicalBlock != 0) { return nil, errors.New("invalid mapping range") }
 	b := make([]byte, MappingSize)
 	binary.LittleEndian.PutUint64(b[:8], m.LogicalBlock); binary.LittleEndian.PutUint64(b[8:16], m.PhysicalBlock)
 	binary.LittleEndian.PutUint32(b[16:20], m.BlockCount)
+	if m.Unmapped { binary.LittleEndian.PutUint32(b[20:24], MappingFlagUnmapped) }
 	return b, nil
 }
 func UnmarshalMapping(b []byte) (Mapping, error) {
 	var m Mapping
 	if len(b) != MappingSize { return m, fmt.Errorf("mapping size %d, want %d", len(b), MappingSize) }
-	if binary.LittleEndian.Uint32(b[20:24]) != 0 { return m, errors.New("mapping reserved field is non-zero") }
+	flags:=binary.LittleEndian.Uint32(b[20:24])
+	if flags & ^MappingFlagUnmapped != 0 { return m, errors.New("mapping flags contain unknown bits") }
 	m.LogicalBlock = binary.LittleEndian.Uint64(b[:8]); m.PhysicalBlock = binary.LittleEndian.Uint64(b[8:16])
-	m.BlockCount = binary.LittleEndian.Uint32(b[16:20])
+	m.BlockCount = binary.LittleEndian.Uint32(b[16:20]); m.Unmapped=flags&MappingFlagUnmapped!=0
 	_, err := m.MarshalBinary(); return m, err
 }

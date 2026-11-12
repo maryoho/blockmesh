@@ -168,9 +168,14 @@ func lookupMappingVector(tree interface{ Get(uint64) (uint64, error) }, logical 
 	for i := uint32(0); i < count; i++ {
 		l := logical + uint64(i)
 		physical, err := tree.Get(l)
-		if errors.Is(err, btree.ErrKeyNotFound) { return nil, ErrUnmapped }
+		if errors.Is(err, btree.ErrKeyNotFound) {
+			if n:=len(out);n>0&&out[n-1].Unmapped&&out[n-1].LogicalBlock+uint64(out[n-1].BlockCount)==l {
+				out[n-1].BlockCount++
+			} else { out=append(out,uapi.Mapping{LogicalBlock:l,BlockCount:1,Unmapped:true}) }
+			continue
+		}
 		if err != nil { return nil, err }
-		if n := len(out); n > 0 && out[n-1].PhysicalBlock+uint64(out[n-1].BlockCount) == physical {
+		if n := len(out); n > 0 && !out[n-1].Unmapped && out[n-1].PhysicalBlock+uint64(out[n-1].BlockCount) == physical {
 			out[n-1].BlockCount++
 		} else {
 			out = append(out, uapi.Mapping{LogicalBlock:l, PhysicalBlock:physical, BlockCount:1})

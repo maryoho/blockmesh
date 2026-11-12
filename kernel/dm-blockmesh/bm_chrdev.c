@@ -365,6 +365,7 @@ static struct bm_pending *bm_take_pending(struct bm_queue *q, u64 request_id,
 struct bm_bio_segment {
 	u64 sector;
 	u32 sectors;
+	bool zero;
 };
 
 static void bm_finish_pending(struct bm_queue *q, struct bm_pending *p,
@@ -427,18 +428,23 @@ static void bm_finish_pending(struct bm_queue *q, struct bm_pending *p,
 		u64 logical, logical_end, physical, physical_start;
 		u64 begin, finish, sector;
 		u32 count = le32_to_cpu(mappings[i].block_count);
+		u32 mapping_flags = le32_to_cpu(mappings[i].flags);
+		bool unmapped = mapping_flags & BM_UAPI_MAPPING_F_UNMAPPED;
 
 		logical = le64_to_cpu(mappings[i].logical_block);
 		physical = le64_to_cpu(mappings[i].physical_block);
-		if (le32_to_cpu(mappings[i].reserved) || !count ||
-		    logical > U64_MAX - count || physical > U64_MAX - count)
+		if ((mapping_flags & ~BM_UAPI_MAPPING_F_UNMAPPED) || !count ||
+		    (unmapped && p->operation != BM_UAPI_OP_LOOKUP_BATCH) ||
+		    logical > U64_MAX - count ||
+		    (unmapped && physical) ||
+		    (!unmapped && physical > U64_MAX - count))
 			goto io_error;
 		if ((i == 0 && logical != p->logical_start) ||
 		    (i && logical != le64_to_cpu(mappings[i - 1].logical_block) +
 				       le32_to_cpu(mappings[i - 1].block_count)))
 			goto io_error;
 		if (logical + count > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS) ||
-		    physical + count > div_u64(p->target_sectors, BM_UAPI_BLOCK_SECTORS))
+		    (!unmapped && physical + count > div_u64(p->target_sectors, BM_UAPI_BLOCK_SECTORS)))
 			goto io_error;
 		logical_end = (logical + count) * BM_UAPI_BLOCK_SECTORS;
 		begin = max(cursor, logical * BM_UAPI_BLOCK_SECTORS);
@@ -447,23 +453,28 @@ static void bm_finish_pending(struct bm_queue *q, struct bm_pending *p,
 			continue;
 		if (begin != cursor || nr_segments >= BM_UAPI_MAX_BATCH)
 			goto io_error;
-		if (physical > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS))
-			goto io_error;
-		physical_start = physical * BM_UAPI_BLOCK_SECTORS;
-		if (physical_start > U64_MAX - (begin - logical * BM_UAPI_BLOCK_SECTORS))
-			goto io_error;
-		physical_start += begin - logical * BM_UAPI_BLOCK_SECTORS;
-		if (p->base_sector > U64_MAX - physical_start)
-			goto io_error;
-		sector = p->base_sector + physical_start;
-		if (p->base_sector > U64_MAX - p->target_sectors ||
-		    sector < p->base_sector ||
-		    sector > p->base_sector + p->target_sectors ||
-		    finish - begin > p->base_sector + p->target_sectors - sector ||
-		    sector > bdev_nr_sectors(p->bdev) ||
-		    finish - begin > bdev_nr_sectors(p->bdev) - sector)
-			goto io_error;
-		segments[nr_segments].sector = sector;
+		segments[nr_segments].zero = unmapped;
+		if (unmapped) {
+			segments[nr_segments].sector = 0;
+		} else {
+			if (physical > div_u64(U64_MAX, BM_UAPI_BLOCK_SECTORS))
+				goto io_error;
+			physical_start = physical * BM_UAPI_BLOCK_SECTORS;
+			if (physical_start > U64_MAX - (begin - logical * BM_UAPI_BLOCK_SECTORS))
+				goto io_error;
+			physical_start += begin - logical * BM_UAPI_BLOCK_SECTORS;
+			if (p->base_sector > U64_MAX - physical_start)
+				goto io_error;
+			sector = p->base_sector + physical_start;
+			if (p->base_sector > U64_MAX - p->target_sectors ||
+			    sector < p->base_sector ||
+			    sector > p->base_sector + p->target_sectors ||
+			    finish - begin > p->base_sector + p->target_sectors - sector ||
+			    sector > bdev_nr_sectors(p->bdev) ||
+			    finish - begin > bdev_nr_sectors(p->bdev) - sector)
+				goto io_error;
+			segments[nr_segments].sector = sector;
+		}
 		segments[nr_segments].sectors = (u32)(finish - begin);
 		nr_segments++;
 		cursor = finish;
@@ -491,9 +502,14 @@ static void bm_finish_pending(struct bm_queue *q, struct bm_pending *p,
 		} else if (bio_sectors(bio) != segments[i].sectors) {
 			goto io_error;
 		}
-		bio_set_dev(part, p->bdev);
-		part->bi_iter.bi_sector = segments[i].sector;
-		submit_bio_noacct(part);
+		if (segments[i].zero) {
+			zero_fill_bio(part);
+			bio_endio(part);
+		} else {
+			bio_set_dev(part, p->bdev);
+			part->bi_iter.bi_sector = segments[i].sector;
+			submit_bio_noacct(part);
+		}
 	}
 	kfree(segments);
 	kfree(p);

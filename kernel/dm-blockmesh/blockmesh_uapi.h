@@ -10,6 +10,7 @@
 #define BM_UAPI_REQUEST_SIZE 128U
 #define BM_UAPI_COMPLETION_SIZE 64U
 #define BM_UAPI_MAPPING_SIZE 24U
+#define BM_UAPI_MAPPING_F_UNMAPPED 1U
 #define BM_UAPI_RING_CTRL_SIZE 64U
 #define BM_UAPI_OP_LOOKUP_BATCH 1U
 #define BM_UAPI_OP_ALLOCATE_ZERO_PUBLISH 2U
@@ -59,7 +60,7 @@ struct bm_uapi_completion {
 };
 struct bm_uapi_mapping {
 	__u64 logical_block, physical_block;
-	__u32 block_count, reserved;
+	__u32 block_count, flags;
 };
 struct bm_uapi_setup {
 	__u32 size, version, ring_order, flags;
