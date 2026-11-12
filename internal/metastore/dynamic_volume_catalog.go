@@ -185,7 +185,28 @@ func (a *DynamicVolumeAllocator) FindVolumeByCreateToken(token [16]byte)(VolumeC
 // must serialize against Reader registration and prove the Volume inactive on
 // every node; ReleaseVolume then clears descriptor copies and frees its
 // Reserved metadata pages in one cluster-safe WAL transaction.
+type heldVolumeDeleteProof struct { lease lock.VolumeFencingLease }
+func (p heldVolumeDeleteProof) AcquireVolumeFencing(context.Context,string,uint64)(lock.VolumeFencingLease,error) {
+	if p.lease==nil{return nil,errors.New("missing held Volume delete lease")}
+	return p.lease,nil
+}
 func (a *DynamicVolumeAllocator) DeleteVolume(ctx context.Context,index uint32,proof DynamicVolumeDeleteProof,committer ClusterSafeCommitter) error {
-	if proof==nil{return errors.New("cluster-wide inactive-Volume delete proof is required")}
-	return a.ReleaseVolume(ctx,index,dynamicDeleteProofAdapter{proof:proof},committer)
+	if a==nil||ctx==nil||proof==nil||committer==nil||!committer.ClusterSafe(){return errors.New("allocator, context, cluster-wide delete proof and cluster-safe committer are required")}
+	a.mu.Lock()
+	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index)
+	if err!=nil{a.mu.Unlock();return err}
+	d,err:=a.readDescriptor(pair)
+	a.mu.Unlock()
+	if err!=nil{return err}
+	lease,err:=proof.AcquireVolumeDeleteGuard(ctx,d.VolumeID,d.OwnerEpoch)
+	if err!=nil{return fmt.Errorf("acquire cluster-wide inactive-Volume delete guard: %w",err)}
+	if lease==nil{return errors.New("Volume delete proof returned a nil fencing lease")}
+	if !lease.Valid()||lease.VolumeID()!=d.VolumeID||lease.Epoch()!=d.OwnerEpoch {
+		return errors.Join(errors.New("Volume delete lease identity/epoch does not match descriptor"),lease.Close())
+	}
+	if err=proof.RetireVolumeData(ctx,lease,d.VolumeID,d.OwnerEpoch);err!=nil{
+		return errors.Join(fmt.Errorf("retire all Volume mappings and reclaim physical DataView blocks: %w",err),lease.Close())
+	}
+	if !lease.Valid(){return errors.Join(errors.New("Volume delete lease lost after Data Retire collection"),lease.Close())}
+	return a.ReleaseVolume(ctx,index,heldVolumeDeleteProof{lease:lease},committer)
 }
