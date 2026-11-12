@@ -29,9 +29,11 @@ func TestLookupMappingVectorCoalescesOnlyPhysicalAdjacency(t *testing.T) {
 	for i := range want { if got[i] != want[i] { t.Fatalf("mapping[%d]=%+v want %+v", i, got[i], want[i]) } }
 }
 
-func TestLookupMappingVectorRejectsUnmappedAndInvalidRange(t *testing.T) {
-	if _, err := lookupMappingVector(mappingVectorTree{1: 10}, 1, 2); !errors.Is(err, ErrUnmapped) {
-		t.Fatalf("missing logical block: %v", err)
+func TestLookupMappingVectorReturnsUnmappedMarkerAndRejectsInvalidRange(t *testing.T) {
+	got,err:=lookupMappingVector(mappingVectorTree{1:10},1,2)
+	if err!=nil{t.Fatal(err)}
+	if len(got)!=2||got[0].Unmapped||!got[1].Unmapped||got[1].PhysicalBlock!=0{
+		t.Fatalf("missing logical block was not represented as zero extent: %+v",got)
 	}
 	if _, err := lookupMappingVector(mappingVectorTree{}, ^uint64(0), 1); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("overflow range: %v", err)

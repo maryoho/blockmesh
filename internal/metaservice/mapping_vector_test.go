@@ -37,6 +37,7 @@ func TestLookupMappingVectorIncludesZeroExtents(t *testing.T) {
 		{LogicalBlock:12,PhysicalBlock:102,BlockCount:1},
 		{LogicalBlock:13,BlockCount:2,Unmapped:true},
 		{LogicalBlock:15,PhysicalBlock:200,BlockCount:1},
+		{LogicalBlock:16,BlockCount:1,Unmapped:true},
 	}
 	if len(got)!=len(want){t.Fatalf("mapping count=%d want=%d: %+v",len(got),len(want),got)}
 	for i:=range want{if got[i]!=want[i]{t.Fatalf("mapping[%d]=%+v want=%+v",i,got[i],want[i])}}
