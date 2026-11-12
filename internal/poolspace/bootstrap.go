@@ -2,6 +2,7 @@ package poolspace
 
 import (
 	"context"
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -43,6 +44,7 @@ type BootstrapRecord struct {
 	ExtentMapGeneration uint64
 	LogicalSectorBytes uint32
 	OwnerEpoch uint64
+	PoolName string
 	Slot uint64
 }
 
@@ -71,7 +73,7 @@ func (r BootstrapRecord) encode() ([]byte,error) {
 		(r.ExtentMapOffset!=extentMapSlotA && r.ExtentMapOffset!=extentMapSlotA+extentMapSlotSize) ||
 		r.ExtentMapBytes==0 || r.ExtentMapBytes>extentMapSlotSize ||
 		r.LogicalSectorBytes<512 || r.LogicalSectorBytes>65536 ||
-		r.LogicalSectorBytes&(r.LogicalSectorBytes-1)!=0 || r.DeviceBytes%uint64(r.LogicalSectorBytes)!=0 {
+		r.LogicalSectorBytes&(r.LogicalSectorBytes-1)!=0 || r.DeviceBytes%uint64(r.LogicalSectorBytes)!=0 || !validPoolName(r.PoolName) {
 		return nil,ErrInvalidGeometry
 	}
 	b:=make([]byte,PageSize)
@@ -88,6 +90,7 @@ func (r BootstrapRecord) encode() ([]byte,error) {
 	binary.LittleEndian.PutUint64(b[80:88],r.ExtentMapGeneration)
 	binary.LittleEndian.PutUint32(b[88:92],r.LogicalSectorBytes)
 	binary.LittleEndian.PutUint64(b[96:104],r.OwnerEpoch)
+	copy(b[104:128],r.PoolName)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],0)
 	binary.LittleEndian.PutUint32(b[bootstrapCRCOffset:bootstrapCRCOffset+4],crc32.Checksum(b,crc32.MakeTable(crc32.Castagnoli)))
 	return b,nil
@@ -111,9 +114,13 @@ func decodeBootstrap(b []byte,slot uint64)(BootstrapRecord,error){
 	r.ExtentMapGeneration=binary.LittleEndian.Uint64(b[80:88])
 	r.LogicalSectorBytes=binary.LittleEndian.Uint32(b[88:92])
 	r.OwnerEpoch=binary.LittleEndian.Uint64(b[96:104])
+	nameField:=b[104:128]
+	nameEnd:=bytes.IndexByte(nameField,0)
+	if nameEnd<0 { return BootstrapRecord{},ErrInvalidGeometry }
+	for _,v:=range nameField[nameEnd:] { if v!=0 { return BootstrapRecord{},ErrInvalidGeometry } }
+	r.PoolName=string(nameField[:nameEnd])
 	r.Slot=slot
  for _,v:=range b[92:96]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
- for _,v:=range b[104:bootstrapCRCOffset]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
  for _,v:=range b[bootstrapCRCOffset+4:]{if v!=0{return BootstrapRecord{},ErrInvalidGeometry}}
  if _,err:=r.encode();err!=nil{return BootstrapRecord{},err}
 	return r,nil
@@ -141,10 +148,29 @@ func loadExtentMap(dev device.Device,r BootstrapRecord)(ExtentMap,error){
 	return m,nil
 }
 
+
+// validPoolName accepts an empty name only for backward compatibility with
+// Bootstrap records created before Pool Catalog names were persisted.
+func validPoolName(name string) bool {
+	if len(name) > 23 { return false }
+	for i:=0;i<len(name);i++ {
+		c:=name[i]
+		if !((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='.'||c=='-'||c=='_') { return false }
+	}
+	return true
+}
+
 // FormatBootstrap creates a new BMPOOL03 Pool. It refuses non-zero bootstrap
 // pages, so it cannot overwrite BMPOOL02 or an unrecognized existing format.
 // The caller must hold exclusive ownership and fence every other initiator.
 func FormatBootstrap(dev device.Device,volumeSlots uint32,logicalSectorBytes uint32)(*BootstrapStore,error){
+	return FormatBootstrapNamed(dev,"",volumeSlots,logicalSectorBytes)
+}
+
+// FormatBootstrapNamed persists the Pool Catalog name in both redundant
+// Bootstrap records. An empty name is reserved for legacy/development callers.
+func FormatBootstrapNamed(dev device.Device,poolName string,volumeSlots uint32,logicalSectorBytes uint32)(*BootstrapStore,error){
+	if !validPoolName(poolName) { return nil,fmt.Errorf("invalid Pool name %q: use 1-23 ASCII letters, digits, dot, dash or underscore",poolName) }
 	if dev==nil||dev.Size()<=0{return nil,ErrInvalidGeometry}
 	deviceBytes:=uint64(dev.Size())
  if block,ok:=dev.(interface{LogicalSectorSize()int});ok{
@@ -175,7 +201,7 @@ func FormatBootstrap(dev device.Device,volumeSlots uint32,logicalSectorBytes uin
 	if _,err=io.ReadFull(rand.Reader,uuid[:]);err!=nil{return nil,err}
 	r:=BootstrapRecord{Generation:1,PoolUUID:uuid,DeviceBytes:deviceBytes,BootstrapBytes:BootstrapSize,
 		MetadataBytes:BootstrapSize+plan.InitialMetadata,ExtentMapOffset:extentMapSlotA,
-		ExtentMapBytes:uint64(len(encoded)),ExtentMapGeneration:1,LogicalSectorBytes:logicalSectorBytes}
+		ExtentMapBytes:uint64(len(encoded)),ExtentMapGeneration:1,LogicalSectorBytes:logicalSectorBytes,PoolName:poolName}
 	if err=writeFull(dev,encoded,int64(r.ExtentMapOffset));err!=nil{return nil,err}
 	if err=dev.Sync();err!=nil{return nil,err}
 	sb,err:=r.encode();if err!=nil{return nil,err}
