@@ -40,11 +40,15 @@ type VolumeCreateResult struct {
 }
 
 type DynamicVolumeDeleteProof interface {
-	// AcquireVolumeDeleteGuard must atomically prevent new Reader registration,
-	// prove that no active Reader or local runtime reference remains, fence the
-	// previous Owner on every SAN path, and hold that cluster-wide guard until
-	// Close. A plain Owner lease/fence is not sufficient for catalog deletion.
+	// AcquireVolumeDeleteGuard atomically prevents new Reader registration,
+	// proves no active Reader/local Runtime remains, fences the previous Owner
+	// on every SAN path, and holds the cluster-wide guard until Close.
 	AcquireVolumeDeleteGuard(context.Context, string, uint64) (lock.VolumeFencingLease, error)
+	// RetireVolumeData must remove every logical Mapping and reclaim its
+	// physical DataView blocks through the persistent Data Retire Queue. The
+	// delete guard is held for the entire operation, so no Reader can pin the
+	// old Mapping root. It must be idempotent after an uncertain WAL outcome.
+	RetireVolumeData(context.Context, lock.VolumeFencingLease, string, uint64) error
 }
 
 type dynamicDeleteProofAdapter struct { proof DynamicVolumeDeleteProof }

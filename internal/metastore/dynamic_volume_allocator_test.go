@@ -221,10 +221,15 @@ func TestDynamicVolumeSANOwnerRecordSurvivesArenaGrowth(t *testing.T){
 	if !exists||got!=record{t.Fatalf("OwnerRecord lost after Arena growth: exists=%v record=%+v",exists,got)}
 }
 
-type dynamicVolumeTestDeleteProof struct{ err error }
-func(p dynamicVolumeTestDeleteProof)AcquireVolumeDeleteGuard(_ context.Context,id string,epoch uint64)(lock.VolumeFencingLease,error){
+type dynamicVolumeTestDeleteProof struct{ err error; retireErr error; retired int }
+func(p *dynamicVolumeTestDeleteProof)AcquireVolumeDeleteGuard(_ context.Context,id string,epoch uint64)(lock.VolumeFencingLease,error){
 	if p.err!=nil{return nil,p.err}
 	return &dynamicVolumeTestFenceLease{volumeID:id,epoch:epoch,valid:true},nil
+}
+func(p *dynamicVolumeTestDeleteProof)RetireVolumeData(_ context.Context,lease lock.VolumeFencingLease,id string,epoch uint64)error{
+	if lease==nil||!lease.Valid()||lease.VolumeID()!=id||lease.Epoch()!=epoch{return errors.New("invalid data-retire guard")}
+	p.retired++
+	return p.retireErr
 }
 
 func TestDynamicVolumeCatalogCreateListLookupAndIdempotentReplay(t *testing.T) {
@@ -278,10 +283,13 @@ func TestDynamicVolumeCatalogDeleteRequiresClusterWideGuard(t *testing.T) {
 	req:=VolumeCreateRequest{VolumeID:"volume-delete",Name:"delete-me",SizeBytes:format.BlockSize,
 		CreateToken:[16]byte{7},ArenaPages:64}
 	created,err:=a.CreateVolume(req,committer);if err!=nil{t.Fatal(err)}
-	if err=a.DeleteVolume(context.Background(),created.Entry.Index,dynamicVolumeTestDeleteProof{err:errors.New("Reader still active")},committer);err==nil{
+	if err=a.DeleteVolume(context.Background(),created.Entry.Index,&dynamicVolumeTestDeleteProof{err:errors.New("Reader still active")},committer);err==nil{
 		t.Fatal("Volume deleted without cluster-wide inactive proof")
 	}
 	if _,err=a.FindVolumeByID(req.VolumeID);err!=nil{t.Fatalf("failed delete removed descriptor: %v",err)}
-	if err=a.DeleteVolume(context.Background(),created.Entry.Index,dynamicVolumeTestDeleteProof{},committer);err!=nil{t.Fatal(err)}
+	retireFailure:=&dynamicVolumeTestDeleteProof{retireErr:errors.New("Data Retire WAL failed")}
+	if err=a.DeleteVolume(context.Background(),created.Entry.Index,retireFailure,committer);err==nil{t.Fatal("Volume deleted after Data Retire failure")}
+	if _,err=a.FindVolumeByID(req.VolumeID);err!=nil{t.Fatalf("Data Retire failure removed descriptor: %v",err)}
+	if err=a.DeleteVolume(context.Background(),created.Entry.Index,&dynamicVolumeTestDeleteProof{},committer);err!=nil{t.Fatal(err)}
 	if _,err=a.FindVolumeByID(req.VolumeID);!errors.Is(err,ErrVolumeCatalogNotFound){t.Fatalf("deleted Volume still visible: %v",err)}
 }
