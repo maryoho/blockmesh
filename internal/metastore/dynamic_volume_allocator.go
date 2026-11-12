@@ -200,8 +200,13 @@ func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*Dynami
 // descriptor copies in the same cluster-safe WAL transaction. ArenaPages and
 // LifecyclePages in descriptor are requested sizes; their starts are assigned.
 func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolumeDescriptor,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,error) {
-	if a==nil||committer==nil||!committer.ClusterSafe(){return d,ErrClusterSafeCommitterRequired}
+	if a==nil { return d,ErrGeometry }
 	a.mu.Lock();defer a.mu.Unlock()
+	return a.allocateVolumeLocked(index,d,committer)
+}
+
+func(a *DynamicVolumeAllocator) allocateVolumeLocked(index uint32,d format.DynamicVolumeDescriptor,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,error) {
+	if a==nil||committer==nil||!committer.ClusterSafe(){return d,ErrClusterSafeCommitterRequired}
 	if d.ArenaPages==0{return d,ErrGeometry}
 	if d.LifecyclePages!=0&&(d.LifecyclePages<2||d.LifecyclePages>MaxLifecyclePages){return d,ErrGeometry}
 	if a.header.Generation==math.MaxUint64{return d,errors.New("Reserved allocator generation exhausted")}
@@ -213,6 +218,10 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 		if !allZeroLifecycle(page){return d,errors.New("BMPOOL03 Volume Descriptor slot is already occupied")}
 	}
 	if err=a.ensureUniqueVolumeID(d.VolumeID,index);err!=nil{return d,err}
+	if d.VolumeName!="" {
+		if !format.ValidDynamicVolumeName(d.VolumeName) { return d,ErrGeometry }
+		if err=a.ensureUniqueVolumeName(d.VolumeName,index);err!=nil{return d,err}
+	}
 	baseNeed:=d.ArenaPages+d.LifecyclePages+format.OwnerRecordPages
 	if baseNeed<d.ArenaPages||baseNeed<d.LifecyclePages{return d,ErrGeometry}
 	readerPages:=format.ReaderTablePages
@@ -250,6 +259,7 @@ func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolu
 	a.bitmap,a.header=nextBitmap,nextHeader
 	a.headerSlot=1-a.headerSlot
 	return d,nil
+
 }
 
  // CanExpandRegion validates whether a new MetadataView size fits the

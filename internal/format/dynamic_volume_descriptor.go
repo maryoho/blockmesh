@@ -9,7 +9,8 @@ import (
 
 const (
 	DynamicVolumeDescriptorMagic="BMDVOL03"
-	DynamicVolumeDescriptorVersion=uint32(4)
+	DynamicVolumeDescriptorVersion=uint32(5)
+	CurrentLegacyDynamicVolumeDescriptorVersion=uint32(4)
 	LegacyDynamicVolumeDescriptorVersion=uint32(3)
 	dynamicVolumeDescriptorCRC=int(PageSize)-4
 )
@@ -31,12 +32,16 @@ type DynamicVolumeDescriptor struct {
 	OwnerRecordStart uint64
 	ReaderTableStart uint64
 	ReaderTablePages uint32
+	VolumeName string
+	LogicalSizeBytes uint64
+	CreateToken [16]byte
 }
 
 func(d DynamicVolumeDescriptor)Encode()([]byte,error){
 	if d.VolumeID==""||len(d.VolumeID)>64||d.Generation==0||d.VolumeSequence==0||d.OwnerEpoch==0||d.ArenaPages==0||
 		(d.RootPage!=^uint64(0)&&(d.RootPage<d.ArenaStart||d.RootPage-d.ArenaStart>=d.ArenaPages))||
-		(d.LifecyclePages==0&&d.LifecycleStart!=0)||(d.LifecyclePages!=0&&(d.LifecyclePages<2||d.LifecyclePages>32)){
+		(d.LifecyclePages==0&&d.LifecycleStart!=0)||(d.LifecyclePages!=0&&(d.LifecyclePages<2||d.LifecyclePages>32))||
+		(d.VolumeName==""&&d.LogicalSizeBytes!=0)||(d.VolumeName!=""&&(!validDynamicVolumeName(d.VolumeName)||d.LogicalSizeBytes==0||d.LogicalSizeBytes%BlockSize!=0)){
 		return nil,ErrVolumeDescriptor
 	}
 	b:=make([]byte,PageSize);copy(b[:8],DynamicVolumeDescriptorMagic)
@@ -57,6 +62,10 @@ func(d DynamicVolumeDescriptor)Encode()([]byte,error){
 	binary.LittleEndian.PutUint64(b[168:176],d.OwnerRecordStart)
 	binary.LittleEndian.PutUint64(b[176:184],d.ReaderTableStart)
 	binary.LittleEndian.PutUint32(b[184:188],d.ReaderTablePages)
+	binary.LittleEndian.PutUint32(b[188:192],uint32(len(d.VolumeName)))
+	copy(b[192:256],d.VolumeName)
+	binary.LittleEndian.PutUint64(b[256:264],d.LogicalSizeBytes)
+	copy(b[264:280],d.CreateToken[:])
 	binary.LittleEndian.PutUint32(b[dynamicVolumeDescriptorCRC:],crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli))
 	return b,nil
 }
@@ -66,13 +75,18 @@ func DecodeDynamicVolumeDescriptor(b []byte)(DynamicVolumeDescriptor,error){
 	if len(b)!=int(PageSize)||string(b[:8])!=DynamicVolumeDescriptorMagic||
 		crc32.Checksum(b[:dynamicVolumeDescriptorCRC],castagnoli)!=binary.LittleEndian.Uint32(b[dynamicVolumeDescriptorCRC:]){return d,ErrVolumeDescriptor}
 	version:=binary.LittleEndian.Uint32(b[8:12])
-	if version!=DynamicVolumeDescriptorVersion && version!=LegacyDynamicVolumeDescriptorVersion{return d,ErrVolumeDescriptor}
+	if version!=DynamicVolumeDescriptorVersion && version!=CurrentLegacyDynamicVolumeDescriptorVersion && version!=LegacyDynamicVolumeDescriptorVersion{return d,ErrVolumeDescriptor}
 	name:=b[56:120];end:=len(name);for i,c:=range name{if c==0{end=i;break}}
 	for _,c:=range name[end:]{if c!=0{return d,ErrVolumeDescriptor}}
 	if version==LegacyDynamicVolumeDescriptorVersion {
 		for _,c:=range b[176:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
-	} else {
+	} else if version==CurrentLegacyDynamicVolumeDescriptorVersion {
 		for _,c:=range b[188:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
+	} else {
+		nameLen:=binary.LittleEndian.Uint32(b[188:192])
+		if nameLen>63{return d,ErrVolumeDescriptor}
+		for _,c:=range b[192+nameLen:256]{if c!=0{return d,ErrVolumeDescriptor}}
+		for _,c:=range b[280:dynamicVolumeDescriptorCRC]{if c!=0{return d,ErrVolumeDescriptor}}
 	}
 	d=DynamicVolumeDescriptor{VolumeID:string(name[:end]),AG:binary.LittleEndian.Uint32(b[12:16]),Generation:binary.LittleEndian.Uint64(b[16:24]),
 		VolumeSequence:binary.LittleEndian.Uint64(b[24:32]),MappingRootOffset:binary.LittleEndian.Uint64(b[32:40]),
@@ -80,6 +94,12 @@ func DecodeDynamicVolumeDescriptor(b []byte)(DynamicVolumeDescriptor,error){
 		ArenaStart:binary.LittleEndian.Uint64(b[120:128]),ArenaPages:binary.LittleEndian.Uint64(b[128:136]),
 		RootPage:binary.LittleEndian.Uint64(b[136:144]),MappingSequence:binary.LittleEndian.Uint64(b[144:152]),
 		LifecycleStart:binary.LittleEndian.Uint64(b[152:160]),LifecyclePages:binary.LittleEndian.Uint64(b[160:168]),OwnerRecordStart:binary.LittleEndian.Uint64(b[168:176]),ReaderTableStart:binary.LittleEndian.Uint64(b[176:184]),ReaderTablePages:binary.LittleEndian.Uint32(b[184:188])}
+	if version==DynamicVolumeDescriptorVersion {
+		nameLen:=binary.LittleEndian.Uint32(b[188:192])
+		d.VolumeName=string(b[192:192+nameLen])
+		d.LogicalSizeBytes=binary.LittleEndian.Uint64(b[256:264])
+		copy(d.CreateToken[:],b[264:280])
+	}
 	if _,err:=d.Encode();err!=nil{return DynamicVolumeDescriptor{},err}
 	return d,nil
 }
@@ -88,6 +108,8 @@ func(d DynamicVolumeDescriptor)ValidatePool(sb DynamicSuperblock)error{
 	if err:=sb.Validate();err!=nil{return err}
 	g:=sb.Geometry
 	if d.AG>=g.AGCount||d.BitmapSequence==0{return ErrVolumeDescriptor}
+	if d.VolumeName!="" && (d.LogicalSizeBytes==0 || d.LogicalSizeBytes%BlockSize!=0 || d.LogicalSizeBytes>g.DataBytes) { return ErrVolumeDescriptor }
+	if d.VolumeName=="" && d.LogicalSizeBytes!=0 { return ErrVolumeDescriptor }
 	if d.MappingRootOffset%PageSize!=0||d.MappingRootOffset<g.MappingOffset||d.MappingRootOffset>g.CheckpointOffset||
 		PageSize>g.CheckpointOffset-d.MappingRootOffset{return ErrVolumeDescriptor}
 	reservedStart:=g.ReservedOffset/PageSize
@@ -114,6 +136,18 @@ func(d DynamicVolumeDescriptor)ValidatePool(sb DynamicSuperblock)error{
 		}
 	}
 	return nil
+}
+
+
+// ValidDynamicVolumeName reports whether a Volume name is safe for the on-disk catalog.
+func ValidDynamicVolumeName(name string) bool { return validDynamicVolumeName(name) }
+
+func validDynamicVolumeName(name string) bool {
+	if len(name)==0 || len(name)>63 { return false }
+	for _,c:=range []byte(name) {
+		if !((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='.'||c=='_'||c=='-') { return false }
+	}
+	return true
 }
 
 func DynamicVolumeDescriptorPairOffset(sb DynamicSuperblock,index uint32)(uint64,error){

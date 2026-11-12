@@ -220,3 +220,68 @@ func TestDynamicVolumeSANOwnerRecordSurvivesArenaGrowth(t *testing.T){
 	got,exists,err:=recordsAfter.Load(ctx,d.VolumeID);if err!=nil{t.Fatal(err)}
 	if !exists||got!=record{t.Fatalf("OwnerRecord lost after Arena growth: exists=%v record=%+v",exists,got)}
 }
+
+type dynamicVolumeTestDeleteProof struct{ err error }
+func(p dynamicVolumeTestDeleteProof)AcquireVolumeDeleteGuard(_ context.Context,id string,epoch uint64)(lock.VolumeFencingLease,error){
+	if p.err!=nil{return nil,p.err}
+	return &dynamicVolumeTestFenceLease{volumeID:id,epoch:epoch,valid:true},nil
+}
+
+func TestDynamicVolumeCatalogCreateListLookupAndIdempotentReplay(t *testing.T) {
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	req:=VolumeCreateRequest{VolumeID:"6d8e1d4c-7b23-4c2d-93e4-123456789abc",Name:"vm-disk-01",
+		SizeBytes:4*format.BlockSize,CreateToken:[16]byte{1,2,3},OwnerEpoch:1,ArenaPages:64,LifecyclePages:4}
+	committer:=dynamicVolumeTestCommitter{dev}
+	created,err:=a.CreateVolume(req,committer);if err!=nil{t.Fatal(err)}
+	if created.Replayed||created.Entry.Index!=0||created.Entry.Descriptor.VolumeName!=req.Name||
+		created.Entry.Descriptor.LogicalSizeBytes!=req.SizeBytes||created.Entry.Descriptor.CreateToken!=req.CreateToken{
+		t.Fatalf("unexpected created catalog entry: %+v",created)
+	}
+	replayed,err:=a.CreateVolume(req,committer);if err!=nil{t.Fatal(err)}
+	if !replayed.Replayed||replayed.Entry.Descriptor.VolumeID!=req.VolumeID{t.Fatalf("create retry was not idempotent: %+v",replayed)}
+	if _,err=a.CreateVolume(VolumeCreateRequest{VolumeID:"another-id",Name:req.Name,SizeBytes:req.SizeBytes,
+		CreateToken:[16]byte{9},ArenaPages:64},committer);!errors.Is(err,ErrVolumeCatalogNameExists){t.Fatalf("duplicate name error=%v",err)}
+	entries,err:=a.ListVolumes();if err!=nil{t.Fatal(err)}
+	if len(entries)!=1{t.Fatalf("catalog entries=%d want 1",len(entries))}
+	byName,err:=a.FindVolumeByName(req.Name);if err!=nil{t.Fatal(err)}
+	byID,err:=a.FindVolumeByID(req.VolumeID);if err!=nil{t.Fatal(err)}
+	byToken,err:=a.FindVolumeByCreateToken(req.CreateToken);if err!=nil{t.Fatal(err)}
+	if byName.Index!=created.Entry.Index||byID.Index!=created.Entry.Index||byToken.Index!=created.Entry.Index{t.Fatal("catalog lookups returned different descriptor slots")}
+	reopened,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	entries,err=reopened.ListVolumes();if err!=nil{t.Fatal(err)}
+	if len(entries)!=1||entries[0].Descriptor.VolumeName!=req.Name{t.Fatalf("catalog did not survive reopen: %+v",entries)}
+}
+
+func TestDynamicVolumeCatalogRejectsInvalidCapacityAndTokenReuse(t *testing.T) {
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	committer:=dynamicVolumeTestCommitter{dev}
+	base:=VolumeCreateRequest{VolumeID:"volume-invalid",Name:"disk",SizeBytes:format.BlockSize,
+		CreateToken:[16]byte{1},ArenaPages:64}
+	bad:=base;bad.SizeBytes++
+	if _,err=a.CreateVolume(bad,committer);err==nil{t.Fatal("unaligned Volume size accepted")}
+	bad=base;bad.SizeBytes=sb.Geometry.DataBytes+format.BlockSize;bad.CreateToken[0]=2
+	if _,err=a.CreateVolume(bad,committer);err==nil{t.Fatal("Volume larger than current logical address space accepted")}
+	if _,err=a.CreateVolume(base,committer);err!=nil{t.Fatal(err)}
+	conflict:=base;conflict.Name="other-disk";conflict.SizeBytes=2*format.BlockSize
+	if _,err=a.CreateVolume(conflict,committer);!errors.Is(err,ErrVolumeCreateTokenConflict){t.Fatalf("token reuse conflict=%v",err)}
+}
+
+func TestDynamicVolumeCatalogDeleteRequiresClusterWideGuard(t *testing.T) {
+	dev,sb:=dynamicVolumeAllocatorFixture(t)
+	if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+	a,err:=OpenDynamicVolumeAllocator(dev,sb);if err!=nil{t.Fatal(err)}
+	committer:=dynamicVolumeTestCommitter{dev}
+	req:=VolumeCreateRequest{VolumeID:"volume-delete",Name:"delete-me",SizeBytes:format.BlockSize,
+		CreateToken:[16]byte{7},ArenaPages:64}
+	created,err:=a.CreateVolume(req,committer);if err!=nil{t.Fatal(err)}
+	if err=a.DeleteVolume(context.Background(),created.Entry.Index,dynamicVolumeTestDeleteProof{err:errors.New("Reader still active")},committer);err==nil{
+		t.Fatal("Volume deleted without cluster-wide inactive proof")
+	}
+	if _,err=a.FindVolumeByID(req.VolumeID);err!=nil{t.Fatalf("failed delete removed descriptor: %v",err)}
+	if err=a.DeleteVolume(context.Background(),created.Entry.Index,dynamicVolumeTestDeleteProof{},committer);err!=nil{t.Fatal(err)}
+	if _,err=a.FindVolumeByID(req.VolumeID);!errors.Is(err,ErrVolumeCatalogNotFound){t.Fatalf("deleted Volume still visible: %v",err)}
+}
