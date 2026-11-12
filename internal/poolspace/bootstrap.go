@@ -19,6 +19,7 @@ import (
 const (
 	BootstrapMagic uint64 = 0x424D504F4F4C3033 // BMPOOL03
 	BootstrapVersion uint32 = 3
+	bootstrapFormatMarkerOffset uint64 = BootstrapSize-PageSize
 	BootstrapSlotA uint64 = 0
 	BootstrapSlotB uint64 = PageSize
 	extentMapSlotA uint64 = 2 * PageSize
@@ -29,6 +30,7 @@ const (
 var (
 	ErrLegacyPoolFormat = errors.New("legacy BMPOOL02 Pool format is read-only to the dynamic layout implementation")
 	ErrBootstrapUnformatted = errors.New("dynamic Pool bootstrap metadata is not formatted")
+	ErrBootstrapFormatIncomplete = errors.New("Bootstrap Pool format is incomplete; retry Pool initialization under the fenced Owner Lease")
 	ErrExtentMapTooLarge = errors.New("extent map exceeds reserved bootstrap slot")
 	ErrStaleBootstrap = errors.New("stale Bootstrap generation")
 )
@@ -173,48 +175,78 @@ func FormatBootstrapNamed(dev device.Device,poolName string,volumeSlots uint32,l
 	if !validPoolName(poolName) { return nil,fmt.Errorf("invalid Pool name %q: use 1-23 ASCII letters, digits, dot, dash or underscore",poolName) }
 	if dev==nil||dev.Size()<=0{return nil,ErrInvalidGeometry}
 	deviceBytes:=uint64(dev.Size())
- if block,ok:=dev.(interface{LogicalSectorSize()int});ok{
-  actual:=block.LogicalSectorSize()
-  if actual<=0{return nil,ErrInvalidGeometry}
-  if logicalSectorBytes!=0&&logicalSectorBytes!=uint32(actual){return nil,fmt.Errorf("configured logical sector size %d differs from device %d",logicalSectorBytes,actual)}
-  logicalSectorBytes=uint32(actual)
- }
- if logicalSectorBytes==0{logicalSectorBytes=512}
-	if logicalSectorBytes<512||logicalSectorBytes>65536||logicalSectorBytes&(logicalSectorBytes-1)!=0||deviceBytes%uint64(logicalSectorBytes)!=0{return nil,ErrInvalidGeometry}
-	for _,off:=range []uint64{BootstrapSlotA,BootstrapSlotB}{
-		p:=make([]byte,PageSize)
-		if err:=readFull(dev,p,int64(off));err!=nil{return nil,fmt.Errorf("inspect bootstrap page at %d: %w",off,err)}
-		if binary.LittleEndian.Uint64(p[:8])==0x424D504F4F4C3032{return nil,ErrLegacyPoolFormat}
-		for _,v:=range p{if v!=0{return nil,errors.New("refusing to format a non-empty or unknown device")}}
+	if block,ok:=dev.(interface{LogicalSectorSize()int});ok{
+		actual:=block.LogicalSectorSize()
+		if actual<=0{return nil,ErrInvalidGeometry}
+		if logicalSectorBytes!=0&&logicalSectorBytes!=uint32(actual){return nil,fmt.Errorf("configured logical sector size %d differs from device %d",logicalSectorBytes,actual)}
+		logicalSectorBytes=uint32(actual)
 	}
- for off:=uint64(2*PageSize);off<BootstrapSize;off+=PageSize{
-  p:=make([]byte,PageSize)
-  if err:=readFull(dev,p,int64(off));err!=nil{return nil,fmt.Errorf("inspect reserved Bootstrap page at %d: %w",off,err)}
-  for _,v:=range p{if v!=0{return nil,fmt.Errorf("refusing to overwrite non-zero reserved Bootstrap page at %d",off)}}
- }
-	plan,err:=PlanDevice(deviceBytes,volumeSlots);if err!=nil{return nil,err}
-	a,err:=NewAllocator(deviceBytes,BootstrapSize,plan.InitialMetadata);if err!=nil{return nil,err}
-	m:=ExtentMap{Generation:1,DeviceBytes:deviceBytes,Extents:a.Extents()}
+	if logicalSectorBytes==0{logicalSectorBytes=512}
+	if logicalSectorBytes<512||logicalSectorBytes>65536||logicalSectorBytes&(logicalSectorBytes-1)!=0||deviceBytes%uint64(logicalSectorBytes)!=0{return nil,ErrInvalidGeometry}
+
+	marker:=make([]byte,PageSize)
+	if err:=readFull(dev,marker,int64(bootstrapFormatMarkerOffset));err!=nil{return nil,fmt.Errorf("inspect Bootstrap format marker: %w",err)}
+	var r BootstrapRecord
+	var allocator *Allocator
+	resume:=false
+	if !bytes.Equal(marker,make([]byte,PageSize)) {
+		existing,err:=decodeBootstrap(marker,BootstrapSlotB)
+		if err!=nil{return nil,fmt.Errorf("%w: format marker is occupied or corrupt",ErrBootstrapFormatIncomplete)}
+		if existing.PoolName!=poolName||existing.DeviceBytes!=deviceBytes||existing.LogicalSectorBytes!=logicalSectorBytes {
+			return nil,fmt.Errorf("%w: marker belongs to Pool %q with different device geometry",ErrBootstrapFormatIncomplete,existing.PoolName)
+		}
+		r=existing
+		plan,err:=PlanDevice(deviceBytes,volumeSlots);if err!=nil{return nil,err}
+		if r.MetadataBytes!=BootstrapSize+plan.InitialMetadata{return nil,fmt.Errorf("%w: requested volume slot geometry differs from format marker",ErrBootstrapFormatIncomplete)}
+		allocator,err=NewAllocator(deviceBytes,BootstrapSize,plan.InitialMetadata);if err!=nil{return nil,err}
+		resume=true
+	} else {
+		for _,off:=range []uint64{BootstrapSlotA,BootstrapSlotB}{
+			p:=make([]byte,PageSize)
+			if err:=readFull(dev,p,int64(off));err!=nil{return nil,fmt.Errorf("inspect bootstrap page at %d: %w",off,err)}
+			if binary.LittleEndian.Uint64(p[:8])==0x424D504F4F4C3032{return nil,ErrLegacyPoolFormat}
+			if !bytes.Equal(p,make([]byte,PageSize)){return nil,errors.New("refusing to format a non-empty or unknown device")}
+		}
+		for off:=uint64(2*PageSize);off<BootstrapSize;off+=PageSize{
+			if off==bootstrapFormatMarkerOffset{continue}
+			p:=make([]byte,PageSize)
+			if err:=readFull(dev,p,int64(off));err!=nil{return nil,fmt.Errorf("inspect reserved Bootstrap page at %d: %w",off,err)}
+			if !bytes.Equal(p,make([]byte,PageSize)){return nil,fmt.Errorf("refusing to overwrite non-zero reserved Bootstrap page at %d",off)}
+		}
+		plan,err:=PlanDevice(deviceBytes,volumeSlots);if err!=nil{return nil,err}
+		allocator,err=NewAllocator(deviceBytes,BootstrapSize,plan.InitialMetadata);if err!=nil{return nil,err}
+		var uuid [16]byte
+		if _,err=io.ReadFull(rand.Reader,uuid[:]);err!=nil{return nil,err}
+		r=BootstrapRecord{Generation:1,PoolUUID:uuid,DeviceBytes:deviceBytes,BootstrapBytes:BootstrapSize,
+			MetadataBytes:BootstrapSize+plan.InitialMetadata,ExtentMapOffset:extentMapSlotA,
+			ExtentMapGeneration:1,LogicalSectorBytes:logicalSectorBytes,PoolName:poolName}
+	}
+	m:=ExtentMap{Generation:r.ExtentMapGeneration,DeviceBytes:r.DeviceBytes,Extents:allocator.Extents()}
 	encoded,err:=m.Encode();if err!=nil{return nil,err}
 	if uint64(len(encoded))>extentMapSlotSize{return nil,ErrExtentMapTooLarge}
-	var uuid [16]byte
-	if _,err=io.ReadFull(rand.Reader,uuid[:]);err!=nil{return nil,err}
-	r:=BootstrapRecord{Generation:1,PoolUUID:uuid,DeviceBytes:deviceBytes,BootstrapBytes:BootstrapSize,
-		MetadataBytes:BootstrapSize+plan.InitialMetadata,ExtentMapOffset:extentMapSlotA,
-		ExtentMapBytes:uint64(len(encoded)),ExtentMapGeneration:1,LogicalSectorBytes:logicalSectorBytes,PoolName:poolName}
-	if err=writeFull(dev,encoded,int64(r.ExtentMapOffset));err!=nil{return nil,err}
-	if err=dev.Sync();err!=nil{return nil,err}
-	sb,err:=r.encode();if err!=nil{return nil,err}
+	r.ExtentMapBytes=uint64(len(encoded))
+	markerPage,err:=r.encode();if err!=nil{return nil,err}
+	if !resume {
+		if err=writeFull(dev,markerPage,int64(bootstrapFormatMarkerOffset));err!=nil{return nil,fmt.Errorf("write Bootstrap format intent: %w",err)}
+		if err=dev.Sync();err!=nil{return nil,fmt.Errorf("persist Bootstrap format intent: %w",err)}
+	}
+	if err=writeFull(dev,encoded,int64(r.ExtentMapOffset));err!=nil{return nil,fmt.Errorf("write initial Bootstrap Extent Map: %w",err)}
+	if err=dev.Sync();err!=nil{return nil,fmt.Errorf("persist initial Bootstrap Extent Map: %w",err)}
+	if err=writeFull(dev,markerPage,int64(BootstrapSlotB));err!=nil{return nil,fmt.Errorf("publish initial Bootstrap record: %w",err)}
+	if err=dev.Sync();err!=nil{return nil,fmt.Errorf("persist initial Bootstrap record: %w",err)}
+	if err=writeFull(dev,make([]byte,PageSize),int64(bootstrapFormatMarkerOffset));err!=nil{return nil,fmt.Errorf("clear Bootstrap format intent: %w",err)}
+	if err=dev.Sync();err!=nil{return nil,fmt.Errorf("persist Bootstrap format completion: %w",err)}
 	r.Slot=BootstrapSlotB
-	if err=writeFull(dev,sb,int64(BootstrapSlotB));err!=nil{return nil,err}
-	if err=dev.Sync();err!=nil{return nil,err}
-	return &BootstrapStore{dev:dev,record:r,allocator:a},nil
+	return &BootstrapStore{dev:dev,record:r,allocator:allocator},nil
 }
 
 // OpenBootstrap replays the one-record Bootstrap WAL and chooses the highest
 // valid record whose extent-map root validates.
 func OpenBootstrap(dev device.Device)(*BootstrapStore,error){
 	if dev==nil{return nil,ErrInvalidGeometry}
+	marker:=make([]byte,PageSize)
+	if err:=readFull(dev,marker,int64(bootstrapFormatMarkerOffset));err!=nil{return nil,err}
+	if !bytes.Equal(marker,make([]byte,PageSize)){return nil,ErrBootstrapFormatIncomplete}
 	blockedSlot,walErr:=recoverBootstrapWAL(dev)
 	if walErr!=nil{return nil,fmt.Errorf("recover Bootstrap WAL: %w",walErr)}
 	type candidate struct{r BootstrapRecord;m ExtentMap}

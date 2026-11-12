@@ -73,7 +73,8 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	switch {
 	case detectErr==nil && version==poolspace.FormatBMPOOL03:
 		bootstrap,err=poolspace.OpenBootstrap(dev)
-		if err!=nil { return result,fmt.Errorf("open existing BMPOOL03 Pool: %w",err) }
+		if errors.Is(err,poolspace.ErrBootstrapFormatIncomplete) { bootstrap,err=poolspace.FormatBootstrapNamed(dev,name,cfg.VolumeSlots,cfg.LogicalSectorBytes) }
+		if err!=nil { return result,fmt.Errorf("open or resume existing BMPOOL03 Pool: %w",err) }
 		if bootstrap.Record().PoolName!=name { return result,fmt.Errorf("device already belongs to Pool %q, not %q",bootstrap.Record().PoolName,name) }
 	case detectErr==nil && version==poolspace.FormatBMPOOL02:
 		return result,poolspace.ErrLegacyPoolFormat

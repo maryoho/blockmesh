@@ -200,3 +200,28 @@ func TestBootstrapRejectsLegacyFormat(t *testing.T){
 	if _,err=FormatBootstrap(d,64,512);!errors.Is(err,ErrLegacyPoolFormat){t.Fatalf("expected legacy format rejection, got %v",err)}
 }
 func binaryPutUint64(b []byte,v uint64){for i:=0;i<8;i++{b[i]=byte(v>>(8*i))}}
+
+
+func TestBootstrapFormatIntentRecoversInterruptedCreation(t *testing.T) {
+	f,err:=device.OpenFile(t.TempDir()+"/format-recovery.img")
+	if err!=nil { t.Fatal(err) }
+	defer f.Close()
+	if _,err=f.WriteAt([]byte{0},(2<<40)-1);err!=nil { t.Fatal(err) }
+	fault:=&failWriteDevice{Device:f,failAt:2}
+	if _,err=FormatBootstrapNamed(fault,"recover-pool",64,512);err==nil { t.Fatal("expected injected extent-map write failure") }
+	if _,err=OpenBootstrap(f);!errors.Is(err,ErrBootstrapFormatIncomplete) { t.Fatalf("expected incomplete format marker, got %v",err) }
+	recovered,err:=FormatBootstrapNamed(f,"recover-pool",64,512)
+	if err!=nil { t.Fatalf("resume Bootstrap format: %v",err) }
+	if recovered.Record().PoolName!="recover-pool" { t.Fatalf("PoolName=%q",recovered.Record().PoolName) }
+	if _,err=OpenBootstrap(f);err!=nil { t.Fatalf("open recovered Bootstrap: %v",err) }
+}
+
+func TestBootstrapFormatIntentRejectsWrongPoolName(t *testing.T) {
+	f,err:=device.OpenFile(t.TempDir()+"/format-name.img")
+	if err!=nil { t.Fatal(err) }
+	defer f.Close()
+	if _,err=f.WriteAt([]byte{0},(2<<40)-1);err!=nil { t.Fatal(err) }
+	fault:=&failWriteDevice{Device:f,failAt:2}
+	if _,err=FormatBootstrapNamed(fault,"pool-a",64,512);err==nil { t.Fatal("expected injected failure") }
+	if _,err=FormatBootstrapNamed(f,"pool-b",64,512);!errors.Is(err,ErrBootstrapFormatIncomplete) { t.Fatalf("expected format marker name mismatch, got %v",err) }
+}
