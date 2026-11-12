@@ -1,6 +1,6 @@
 # BlockMesh 第一版操作指南与验收计划
 
-> 文档状态：跟随 `main` 更新。当前代码基线：以 GitHub `main` 最新提交为准（2026-11-12）；P4-1.3.5.3 Catalog 与 sparse zero-read 路径已进入实现和 CI 验证。
+> 文档状态：跟随 `main` 更新。当前代码基线：以 GitHub `main` 最新提交为准（2026-11-12）；P4-1.3.5.3 Catalog、删除前 Data Retire 强制回收、sparse zero-read 和 P4-1.3.5.4 RPC transport/action router 已进入实现。
 >
 > **重要：本指南同时说明目标操作流程和当前代码可用边界。当前还没有完成 `bmctl` → `bm-metad` 生命周期 RPC 闭环，因此下文的 Pool/Volume 简化命令是第一版目标接口，不代表当前提交已经可以直接执行。不要在生产 LUN 上尝试尚未接通的命令。**
 
@@ -198,7 +198,7 @@ multipath -ll
 
 后续开发按可运行主链路优先，避免继续扩展与第一版无关的功能：
 
-1. **P4-1.3.5.3 Volume Catalog：** 已提交 Descriptor v5 和持久化 Catalog API（create/list/find/delete）、CreateToken 幂等重试、AG 绑定容量校验与删除 guard；下一步接入控制面。
+1. **P4-1.3.5.3 Volume Catalog：** Descriptor v5、持久化 Catalog API、CreateToken 幂等重试、AG 绑定容量校验已实现；删除 API 现在强制先执行 Data Retire 回收，并在同一个集群 fencing guard 下完成 Descriptor 释放。
 2. **P4-1.3.5.4 Lifecycle RPC：** 实现 Unix socket 服务端、Pool 动态发现/注册和 CLI 接线；优先先打通 Pool create/list/info。
 3. **P4-1.3.5.5 Volume 生命周期：** 接通 Volume create/list/info/delete 和动态 RW activate；不再使用静态 `volumes[]` 作为权威清单。
 4. **P4-1.3.5.6 Deactivate/Recovery：** 完成 drain、关闭 DM、释放 lease 和 daemon crash reconciliation。
