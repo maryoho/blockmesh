@@ -96,7 +96,7 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	case detectErr==nil && version==poolspace.FormatBMPOOL02:
 		return result,poolspace.ErrLegacyPoolFormat
 	case errors.Is(detectErr,poolspace.ErrUnknownPoolFormat):
-		bootstrap,err=poolspace.FormatBootstrapNamed(dev,name,cfg.VolumeSlots,cfg.LogicalSectorBytes)
+		bootstrap,err=poolspace.FormatBootstrapNamed(guardedDev,name,cfg.VolumeSlots,cfg.LogicalSectorBytes)
 		if err!=nil { return result,fmt.Errorf("format Pool Bootstrap and catalog: %w",err) }
 	default:
 		if detectErr!=nil { return result,fmt.Errorf("detect existing Pool format: %w",detectErr) }
