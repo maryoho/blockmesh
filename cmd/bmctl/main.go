@@ -69,13 +69,13 @@ type poolStatus struct {
 }
 
 func main() {
-	if err := runCLI(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "bmctl:", err)
+	if err := executeCLI(os.Args[1:]); err != nil {
+		printCLIError(err)
 		os.Exit(1)
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, lifecycleUsage)
+	fmt.Fprint(os.Stderr, lifecycleUsage)
 }
 func runPool(args []string)error{
 	if len(args)==0{usage();return errors.New("pool operation is required")}
