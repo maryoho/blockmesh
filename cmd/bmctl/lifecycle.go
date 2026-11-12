@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -155,6 +154,3 @@ func callLifecycle(socket, action string, args lifecycleArgs) error {
 	return nil
 }
 
-// Kept for tests and future API clients: a zero-length or non-JSON response is
-// never interpreted as successful lifecycle completion.
-var _ = flag.ErrHelp

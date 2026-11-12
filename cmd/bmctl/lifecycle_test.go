@@ -1,7 +1,6 @@
 package main
 
 import (
-	"math"
 	"testing"
 )
 
@@ -12,7 +11,6 @@ func TestParseVolumeSize(t *testing.T) {
 	for _, tc := range cases { got,err:=parseVolumeSize(tc.name); if err!=nil||got!=tc.want { t.Fatalf("%s: got %d err=%v want %d",tc.name,got,err,tc.want) } }
 	for _, value := range []string{"","0G","-1G","1","1P","18446744073709551615T"} { if _,err:=parseVolumeSize(value); err==nil { t.Errorf("expected %q to fail",value) } }
 	if _,err:=parseVolumeSize("16G"); err!=nil { t.Fatal(err) }
-	_ = math.MaxUint64
 }
 
 func TestParseLifecycleCommand(t *testing.T) {
