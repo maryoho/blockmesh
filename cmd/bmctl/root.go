@@ -14,7 +14,7 @@ func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "bmctl",
 		Short:         "BlockMesh storage lifecycle management",
-		Long:          "Manage BlockMesh Pools and Volumes. Lifecycle operations are executed by bm-metad.",
+		Long:          "Manage BlockMesh Pools and Volumes. Lifecycle operations are executed by bm-metad.\n\nPool: create, list, info, destroy.\nVolume: create, list, info, delete, activate, deactivate.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

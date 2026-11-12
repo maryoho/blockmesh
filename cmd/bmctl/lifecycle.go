@@ -130,7 +130,7 @@ func parseLifecycleCommand(argv []string) (string, lifecycleArgs, error) {
 	default:
 		return "", a, fmt.Errorf("unknown command %q; run bmctl --help", strings.Join(argv, " "))
 	}
-	return strings.ReplaceAll(group+"."+command, " ", ""), a, nil
+	return group+command, a, nil
 }
 
 func callLifecycle(socket, action string, args lifecycleArgs) error {
