@@ -15,12 +15,15 @@ type daemonConfig struct {
  NodeID string `json:"node_id"`
  BootID string `json:"boot_id"`
  Service serviceConfig `json:"service"`
+ Control controlConfig `json:"control"`
+ DiscoveryDevices []string `json:"discovery_devices"`
  Sanlock sanlockConfig `json:"sanlock"`
  SAN sanConfig `json:"san"`
  Runtime runtimeConfig `json:"runtime"`
  Volumes []volumeConfig `json:"volumes"`
 }
 type serviceConfig struct{DevicePath string `json:"device_path"`;LockPath string `json:"lock_path"`;RequestTimeout string `json:"request_timeout"`;ShutdownTimeout string `json:"shutdown_timeout"`}
+type controlConfig struct{SocketPath string `json:"socket_path"`}
 type sanlockConfig struct{Binary string `json:"binary"`;HelperBinary string `json:"helper_binary"`;ReadyDir string `json:"ready_dir"`;Lockspace string `json:"lockspace"`;LockDevice string `json:"lock_device"`;ResourceOffsets map[string]uint64 `json:"resource_offsets"`}
 type sanConfig struct{SGPersistBinary string `json:"sg_persist_binary"`;ReservationType uint8 `json:"reservation_type"`;Paths []prPathConfig `json:"paths"`;OwnerKeys map[string][]uint64 `json:"owner_keys"`;OwnerDrainHelper string `json:"owner_drain_helper"`}
 type prPathConfig struct{Device string `json:"device"`;LocalKey uint64 `json:"local_key"`}
@@ -62,7 +65,7 @@ func(c daemonConfig)validate()error{
   seen:=map[uint64]bool{}
   for _,key:=range ownerKeys{if key==0||localKeys[key]||seen[key]{return fmt.Errorf("invalid or colliding PR key %x for %s",key,identity)};seen[key]=true}
  }
- if len(c.Volumes)==0{return errors.New("at least one volume must be configured")}
+ seenDevices:=map[string]bool{};for _,path:=range c.DiscoveryDevices{if strings.TrimSpace(path)==""||seenDevices[path]{return fmt.Errorf("discovery_devices contains an empty or duplicate path %q",path)};seenDevices[path]=true}
  ids:=map[string]bool{};dmNames:=map[string]bool{}
  for _,v:=range c.Volumes{
   if strings.TrimSpace(v.VolumeID)==""||strings.TrimSpace(v.DevicePath)==""||strings.TrimSpace(v.DMDevice)==""{return errors.New("each volume requires volume_id, device_path and dm_device")}

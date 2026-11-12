@@ -1,0 +1,21 @@
+//go:build linux
+
+package main
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"blockmesh/internal/control"
+)
+
+func TestCatalogLifecycleBackendMutationFailsClosed(t *testing.T) {
+	b:=newCatalogLifecycleBackend(nil)
+	if _,err:=b.PoolCreate(context.Background(),control.PoolCreateArgs{Name:"p",Device:"/dev/sdb"});err==nil||!strings.Contains(err.Error(),"not available yet"){t.Fatalf("expected explicit fail-closed error, got %v",err)}
+	if _,err:=b.VolumeActivate(context.Background(),"vol-a","rw");err==nil||!strings.Contains(err.Error(),"not available yet"){t.Fatalf("expected explicit fail-closed error, got %v",err)}
+}
+func TestDaemonConfigAllowsNoStaticVolumes(t *testing.T) {
+	cfg:=validTestConfig();cfg.Volumes=nil
+	if err:=cfg.validate();err!=nil{t.Fatalf("empty static volume list should be valid for catalog-only daemon: %v",err)}
+}

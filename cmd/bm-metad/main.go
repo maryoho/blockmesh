@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"blockmesh/internal/allocator"
+	"blockmesh/internal/control"
 	"blockmesh/internal/device"
 	"blockmesh/internal/dmowner"
 	"blockmesh/internal/dynamicruntime"
@@ -190,6 +191,12 @@ func run(cfg daemonConfig) error {
 		StopRuntime:manager.Shutdown,ShutdownTimeout:shutdownTimeout,
 	})
 	if err!=nil{return err}
+	socketPath:=cfg.Control.SocketPath
+	if strings.TrimSpace(socketPath)=="" { socketPath="/run/blockmesh/control.sock" }
+	lifecycleServer,err:=control.New(control.Config{Path:socketPath,Handler:control.LifecycleHandler{Backend:newCatalogLifecycleBackend(cfg.DiscoveryDevices)}})
+	if err!=nil{return fmt.Errorf("construct lifecycle control server: %w",err)}
+	defer lifecycleServer.Close()
+
 	ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt,syscall.SIGTERM)
 	defer stop()
 	defer func() {
@@ -197,9 +204,19 @@ func run(cfg daemonConfig) error {
 			log.Printf("bm-metad final shutdown retry failed: %v", shutdownErr)
 		}
 	}()
-	log.Printf("bm-metad starting: node=%s boot=%s volumes=%d device=%s",cfg.NodeID,cfg.BootID,len(cfg.Volumes),cfg.Service.DevicePath)
-	err=service.Run(ctx)
-	if err!=nil{return err}
+	serveCtx,cancelServe:=context.WithCancel(ctx)
+	defer cancelServe()
+	controlErr:=make(chan error,1)
+	go func(){if serveErr:=lifecycleServer.Serve(serveCtx);serveErr!=nil{controlErr<-serveErr;stop()}}()
+	log.Printf("bm-metad starting: node=%s boot=%s configured_volumes=%d discovery_devices=%d control_socket=%s device=%s",cfg.NodeID,cfg.BootID,len(cfg.Volumes),len(cfg.DiscoveryDevices),socketPath,cfg.Service.DevicePath)
+	serviceErr:=service.Run(serveCtx)
+	cancelServe()
+	select {
+	case serveErr:=<-controlErr:
+		if serveErr!=nil{return errors.Join(serviceErr,fmt.Errorf("lifecycle control server: %w",serveErr))}
+	default:
+	}
+	if serviceErr!=nil{return serviceErr}
 	log.Printf("bm-metad stopped cleanly")
 	return nil
 }
