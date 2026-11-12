@@ -81,9 +81,7 @@ func (a *DynamicVolumeAllocator) CreateVolume(req VolumeCreateRequest, committer
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if req.SizeBytes>a.sb.Geometry.DataBytes {
-		return result,fmt.Errorf("Volume logical size %d exceeds Pool DataView capacity %d: %w",req.SizeBytes,a.sb.Geometry.DataBytes,ErrGeometry)
-	}
+	
 	entries,err:=a.listVolumesLocked()
 	if err!=nil{return result,err}
 	for _,entry:=range entries {
@@ -106,9 +104,15 @@ func (a *DynamicVolumeAllocator) CreateVolume(req VolumeCreateRequest, committer
 		if err=readFullAt(a.dev,first,int64(pair));err!=nil{return result,err}
 		if err=readFullAt(a.dev,second,int64(pair+format.PageSize));err!=nil{return result,err}
 		if !allZeroLifecycle(first)||!allZeroLifecycle(second) { continue }
+		ag:=index%a.sb.Geometry.AGCount
+		agBlocks,agErr:=a.sb.Geometry.AGBlocks(ag)
+		if agErr!=nil{return result,agErr}
+		if req.SizeBytes>agBlocks*format.BlockSize {
+			return result,fmt.Errorf("Volume logical size %d exceeds AG %d address capacity %d: %w",req.SizeBytes,ag,agBlocks*format.BlockSize,ErrGeometry)
+		}
 		d:=format.DynamicVolumeDescriptor{
 			VolumeID:req.VolumeID,VolumeName:req.Name,LogicalSizeBytes:req.SizeBytes,CreateToken:req.CreateToken,
-			AG:0,Generation:1,VolumeSequence:1,MappingRootOffset:a.sb.Geometry.MappingOffset,
+			AG:ag,Generation:1,VolumeSequence:1,MappingRootOffset:a.sb.Geometry.MappingOffset,
 			BitmapSequence:1,OwnerEpoch:req.OwnerEpoch,ArenaPages:req.ArenaPages,
 			RootPage:^uint64(0),LifecyclePages:req.LifecyclePages,
 		}

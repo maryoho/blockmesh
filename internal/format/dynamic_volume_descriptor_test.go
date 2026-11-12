@@ -26,6 +26,8 @@ func TestDynamicVolumeDescriptorRoundTripAndValidation(t *testing.T){
 	if err=got.ValidatePool(sb);err!=nil{t.Fatal(err)}
 	got.AG=sb.Geometry.AGCount
 	if err=got.ValidatePool(sb);err==nil{t.Fatal("invalid AG accepted")}
+	got=d;got.LogicalSizeBytes=5*BlockSize
+	if err=got.ValidatePool(sb);err==nil{t.Fatal("Volume size larger than its AG accepted")}
 }
 
 func TestInitializeDynamicVolumeDescriptorCopies(t *testing.T){
@@ -73,6 +75,8 @@ func TestDecodeLegacyDynamicVolumeDescriptorV4(t *testing.T) {
 	g,err:=PlanDynamicGeometry(DynamicGeometryConfig{DataBytes:8*BlockSize,MetadataBytes:64<<20,AGSizeBytes:4*BlockSize,
 		WALSegmentBytes:64<<10,MappingBytes:8<<20,CheckpointBytes:64<<10})
 	if err!=nil{t.Fatal(err)}
+	var id [16]byte;copy(id[:],"dynamic-volume04")
+	sb,err:=NewDynamicSuperblock(g,id,1,1);if err!=nil{t.Fatal(err)}
 	d:=DynamicVolumeDescriptor{VolumeID:"legacy-v4",AG:0,Generation:1,VolumeSequence:1,MappingRootOffset:g.MappingOffset,
 		BitmapSequence:1,OwnerEpoch:1,ArenaStart:g.ReservedOffset/PageSize,ArenaPages:64,RootPage:^uint64(0)}
 	b,err:=d.Encode();if err!=nil{t.Fatal(err)}

@@ -263,8 +263,8 @@ func TestDynamicVolumeCatalogRejectsInvalidCapacityAndTokenReuse(t *testing.T) {
 		CreateToken:[16]byte{1},ArenaPages:64}
 	bad:=base;bad.SizeBytes++
 	if _,err=a.CreateVolume(bad,committer);err==nil{t.Fatal("unaligned Volume size accepted")}
-	bad=base;bad.SizeBytes=sb.Geometry.DataBytes+format.BlockSize;bad.CreateToken[0]=2
-	if _,err=a.CreateVolume(bad,committer);err==nil{t.Fatal("Volume larger than current logical address space accepted")}
+	bad=base;bad.SizeBytes=5*format.BlockSize;bad.CreateToken[0]=2
+	if _,err=a.CreateVolume(bad,committer);err==nil{t.Fatal("Volume larger than selected AG address space accepted")}
 	if _,err=a.CreateVolume(base,committer);err!=nil{t.Fatal(err)}
 	conflict:=base;conflict.Name="other-disk";conflict.SizeBytes=2*format.BlockSize
 	if _,err=a.CreateVolume(conflict,committer);!errors.Is(err,ErrVolumeCreateTokenConflict){t.Fatalf("token reuse conflict=%v",err)}

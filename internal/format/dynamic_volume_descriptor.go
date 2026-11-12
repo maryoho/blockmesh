@@ -108,7 +108,10 @@ func(d DynamicVolumeDescriptor)ValidatePool(sb DynamicSuperblock)error{
 	if err:=sb.Validate();err!=nil{return err}
 	g:=sb.Geometry
 	if d.AG>=g.AGCount||d.BitmapSequence==0{return ErrVolumeDescriptor}
-	if d.VolumeName!="" && (d.LogicalSizeBytes==0 || d.LogicalSizeBytes%BlockSize!=0 || d.LogicalSizeBytes>g.DataBytes) { return ErrVolumeDescriptor }
+	if d.VolumeName!="" {
+		agBlocks,err:=g.AGBlocks(d.AG)
+		if err!=nil || d.LogicalSizeBytes==0 || d.LogicalSizeBytes%BlockSize!=0 || d.LogicalSizeBytes>agBlocks*BlockSize { return ErrVolumeDescriptor }
+	}
 	if d.VolumeName=="" && d.LogicalSizeBytes!=0 { return ErrVolumeDescriptor }
 	if d.MappingRootOffset%PageSize!=0||d.MappingRootOffset<g.MappingOffset||d.MappingRootOffset>g.CheckpointOffset||
 		PageSize>g.CheckpointOffset-d.MappingRootOffset{return ErrVolumeDescriptor}

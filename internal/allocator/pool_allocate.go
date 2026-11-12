@@ -130,7 +130,9 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	if a.dynamic {
 		dynamicSB,err=a.store.DynamicPoolSuperblock();if err!=nil{return result,err}
 		desc,e:=a.store.DynamicPoolDescriptor();if e!=nil{return result,e}
-		totalBlocks=dynamicSB.Geometry.TotalBlocks;volumeID=desc.VolumeID;ownerEpoch=desc.OwnerEpoch
+		totalBlocks=dynamicSB.Geometry.TotalBlocks
+		if desc.LogicalSizeBytes!=0 { totalBlocks=desc.LogicalSizeBytes/format.BlockSize }
+		volumeID=desc.VolumeID;ownerEpoch=desc.OwnerEpoch
 		generation=desc.Generation;mappingSequence=desc.MappingSequence;ag=desc.AG
 	} else {
 		pool,e:=a.store.PoolSuperblock();if e!=nil{return result,e}
@@ -142,7 +144,7 @@ func (a *PoolAllocator) AllocateZeroPublishTxn(ctx context.Context, ownerLease l
 	if ownerEpoch==0{return result,errors.New("Volume Descriptor has no active OwnerEpoch")}
 	epochLease,ok:=ownerLease.(interface{Epoch()uint64})
 	if !ok||epochLease.Epoch()!=ownerEpoch{return result,errors.New("Owner lease epoch does not match the durable Volume Descriptor")}
-	if req.LogicalStart+uint64(req.BlockCount)>totalBlocks{return result,errors.New("logical allocation range exceeds Pool capacity")}
+	if req.LogicalStart+uint64(req.BlockCount)>totalBlocks{return result,errors.New("logical allocation range exceeds Volume logical capacity")}
 	if generation==math.MaxUint64||mappingSequence==math.MaxUint64{return result,errors.New("Volume metadata generation exhausted")}
 	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", ag))
 	if err != nil { return result, fmt.Errorf("acquire AG %d lock: %w", ag, err) }
@@ -355,8 +357,10 @@ func (a *PoolAllocator) DiscardTxn(ctx context.Context, ownerLease lock.Lease, r
 	if !ok || epoch.Epoch() != desc.OwnerEpoch || desc.OwnerEpoch == 0 {
 		return result, errors.New("Owner lease epoch does not match durable Volume Descriptor")
 	}
-	if req.LogicalStart >= uint64(1)<<63 || req.LogicalStart+uint64(req.BlockCount) > sb.Geometry.TotalBlocks {
-		return result, errors.New("discard logical range exceeds Pool capacity")
+	logicalBlocks:=sb.Geometry.TotalBlocks
+	if desc.LogicalSizeBytes!=0 { logicalBlocks=desc.LogicalSizeBytes/format.BlockSize }
+	if req.LogicalStart >= uint64(1)<<63 || req.LogicalStart+uint64(req.BlockCount) > logicalBlocks {
+		return result, errors.New("discard logical range exceeds Volume logical capacity")
 	}
 	unlock, err := a.locks.Lock(ctx, fmt.Sprintf("ag:%03d", desc.AG))
 	if err != nil { return result, fmt.Errorf("acquire AG %d lock: %w", desc.AG, err) }
