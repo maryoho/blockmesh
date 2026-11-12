@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"blockmesh/internal/device"
-	"blockmesh/internal/poolspace"
 )
 
 type testLocker struct{}

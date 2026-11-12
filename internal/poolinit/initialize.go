@@ -49,8 +49,7 @@ type OwnerLease interface {
 // an exclusive, cluster-wide Owner Lease and SCSI PR reservation before calling
 // it. lockResource must be stable across nodes (normally derived from device
 // WWID, not a host-local /dev path).
-func Initialize(ctx context.Context, dev device.Device, name, lockResource string, locker poolspace.BootstrapLocker, owner OwnerLease, cfg Config) (Result,error) {
-	var result Result
+func Initialize(ctx context.Context, dev device.Device, name, lockResource string, locker poolspace.BootstrapLocker, owner OwnerLease, cfg Config) (result Result, retErr error) {
 	if ctx==nil || dev==nil || dev.Size()<=0 { return result,poolspace.ErrInvalidGeometry }
 	if name=="" || len(name)>23 { return result,fmt.Errorf("Pool name must contain 1-23 ASCII letters, digits, dot, dash or underscore") }
 	if locker==nil || !locker.Distributed() { return result,errors.New("Pool initialization requires a distributed SAN lock") }
@@ -66,7 +65,7 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	if err!=nil { return result,fmt.Errorf("plan Pool geometry from device capacity: %w",err) }
 	release,err:=locker.Lock(ctx,lockResource)
 	if err!=nil { return result,fmt.Errorf("acquire Pool initialization lock: %w",err) }
-	defer func(){ _=release() }()
+	defer func(){ if releaseErr:=release(); releaseErr!=nil { retErr=errors.Join(retErr,fmt.Errorf("release Pool initialization lock: %w",releaseErr)) } }()
 	if !owner.Valid() { return result,errors.New("Owner Lease lost before Pool initialization") }
 
 	var bootstrap *poolspace.BootstrapStore
