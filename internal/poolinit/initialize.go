@@ -47,7 +47,7 @@ type OwnerLease interface {
 
 var ErrOwnerLeaseLost = errors.New("Pool Owner Lease lost during initialization")
 
-type ownerGuardedDevice struct { device.Device; owner OwnerLease }
+type ownerGuardedDevice struct { device.Device; owner OwnerLease; logicalSector int }
 func (d ownerGuardedDevice) WriteAt(p []byte,off int64)(int,error) {
 	if d.owner==nil || !d.owner.Valid() { return 0,ErrOwnerLeaseLost }
 	return d.Device.WriteAt(p,off)
@@ -56,10 +56,7 @@ func (d ownerGuardedDevice) Sync() error {
 	if d.owner==nil || !d.owner.Valid() { return ErrOwnerLeaseLost }
 	return d.Device.Sync()
 }
-func (d ownerGuardedDevice) LogicalSectorSize() int {
-	if v,ok:=d.Device.(interface{LogicalSectorSize()int});ok { return v.LogicalSectorSize() }
-	return 0
-}
+func (d ownerGuardedDevice) LogicalSectorSize() int { return d.logicalSector }
 
 // Initialize is safe to retry after a process crash. The caller must acquire
 // an exclusive, cluster-wide Owner Lease and SCSI PR reservation before calling
@@ -70,7 +67,10 @@ func Initialize(ctx context.Context, dev device.Device, name, lockResource strin
 	if name=="" || len(name)>23 { return result,fmt.Errorf("Pool name must contain 1-23 ASCII letters, digits, dot, dash or underscore") }
 	if locker==nil || !locker.Distributed() { return result,errors.New("Pool initialization requires a distributed SAN lock") }
 	if owner==nil || !owner.Valid() || owner.Epoch()==0 { return result,errors.New("Pool initialization requires a live fenced Owner Lease") }
-	guardedDev:=ownerGuardedDevice{Device:dev,owner:owner}
+	logicalSector:=int(cfg.LogicalSectorBytes)
+	if v,ok:=dev.(interface{LogicalSectorSize()int});ok { logicalSector=v.LogicalSectorSize() }
+	if logicalSector==0 { logicalSector=512 }
+	guardedDev:=ownerGuardedDevice{Device:dev,owner:owner,logicalSector:logicalSector}
 	if lockResource=="" { return result,errors.New("stable Pool initialization lock resource is required") }
 	if cfg.VolumeSlots==0 { cfg.VolumeSlots=64 }
 	if cfg.AGSizeBytes==0 { cfg.AGSizeBytes=1<<40 }
