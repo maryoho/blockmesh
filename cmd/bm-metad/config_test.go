@@ -33,12 +33,11 @@ func TestDaemonConfigRequiresROReaderEpoch(t *testing.T){
 
 func TestDaemonConfigSupportsDynamicResourcesWithoutStaticVolumes(t *testing.T) {
  cfg:=validTestConfig();cfg.Volumes=nil;cfg.Sanlock.ResourceOffsets=nil
- cfg.Sanlock.DynamicResourceBase=1<<20;cfg.Sanlock.DynamicResourceSlots=1<<10;cfg.Sanlock.ResourceAlignmentBytes=1<<20
+ cfg.Sanlock.ResourceIndexOffset=8<<20;cfg.Sanlock.ResourceAlignmentBytes=1<<20
  if err:=cfg.validate();err!=nil{t.Fatalf("dynamic resource config rejected without static Volumes: %v",err)}
 }
 
-func TestDaemonConfigRejectsStaticDynamicResourceOverlap(t *testing.T) {
- cfg:=validTestConfig();cfg.Sanlock.DynamicResourceBase=1<<20;cfg.Sanlock.DynamicResourceSlots=16;cfg.Sanlock.ResourceAlignmentBytes=1<<20
- cfg.Sanlock.ResourceOffsets["fixed"]=cfg.Sanlock.DynamicResourceBase+(1<<20)
- if err:=cfg.validate();err==nil{t.Fatal("expected static resource overlap rejection")}
+func TestDaemonConfigRejectsMisalignedResourceIndex(t *testing.T) {
+ cfg:=validTestConfig();cfg.Sanlock.ResourceIndexOffset=(8<<20)+512;cfg.Sanlock.ResourceAlignmentBytes=1<<20
+ if err:=cfg.validate();err==nil{t.Fatal("expected RINDEX alignment rejection")}
 }

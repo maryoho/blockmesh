@@ -26,7 +26,7 @@ type daemonConfig struct {
 }
 type serviceConfig struct{DevicePath string `json:"device_path"`;LockPath string `json:"lock_path"`;RequestTimeout string `json:"request_timeout"`;ShutdownTimeout string `json:"shutdown_timeout"`}
 type controlConfig struct{SocketPath string `json:"socket_path"`}
-type sanlockConfig struct{Binary string `json:"binary"`;HelperBinary string `json:"helper_binary"`;ReadyDir string `json:"ready_dir"`;Lockspace string `json:"lockspace"`;LockDevice string `json:"lock_device"`;ResourceOffsets map[string]uint64 `json:"resource_offsets"`;DynamicResourceBase uint64 `json:"dynamic_resource_base"`;DynamicResourceSlots uint64 `json:"dynamic_resource_slots"`;ResourceAlignmentBytes uint64 `json:"resource_alignment_bytes"`}
+type sanlockConfig struct{Binary string `json:"binary"`;HelperBinary string `json:"helper_binary"`;ReadyDir string `json:"ready_dir"`;Lockspace string `json:"lockspace"`;LockDevice string `json:"lock_device"`;ResourceOffsets map[string]uint64 `json:"resource_offsets"`;ResourceIndexOffset uint64 `json:"resource_index_offset"`;ResourceAlignmentBytes uint64 `json:"resource_alignment_bytes"`}
 type sanConfig struct{SGPersistBinary string `json:"sg_persist_binary"`;ReservationType uint8 `json:"reservation_type"`;Paths []prPathConfig `json:"paths"`;OwnerKeys map[string][]uint64 `json:"owner_keys"`;OwnerDrainHelper string `json:"owner_drain_helper"`}
 type prPathConfig struct{Device string `json:"device"`;LocalKey uint64 `json:"local_key"`}
 type runtimeConfig struct{ReaderHeartbeatInterval string `json:"reader_heartbeat_interval"`}
@@ -47,14 +47,13 @@ func(c daemonConfig)validate()error{
  if _,err:=parseDuration("service.shutdown_timeout",c.Service.ShutdownTimeout,30*time.Second);err!=nil{return err}
  if _,err:=parseDuration("runtime.reader_heartbeat_interval",c.Runtime.ReaderHeartbeatInterval,250*time.Millisecond);err!=nil{return err}
  if strings.TrimSpace(c.Sanlock.Lockspace)==""||strings.TrimSpace(c.Sanlock.LockDevice)==""{return errors.New("sanlock.lockspace and sanlock.lock_device are required")}
- dynamicEnabled:=c.Sanlock.DynamicResourceBase!=0||c.Sanlock.DynamicResourceSlots!=0
- if dynamicEnabled { if _,err:=lock.NewHashedResourceOffsets(c.Sanlock.DynamicResourceBase,c.Sanlock.DynamicResourceSlots,c.Sanlock.ResourceAlignmentBytes);err!=nil{return fmt.Errorf("sanlock dynamic resource range: %w",err)} } else if len(c.Sanlock.ResourceOffsets)==0{return errors.New("configure sanlock.resource_offsets or a dynamic_resource_base/dynamic_resource_slots range") }
+ rindexEnabled:=c.Sanlock.ResourceIndexOffset!=0
+ if rindexEnabled { if c.Sanlock.ResourceAlignmentBytes!=1<<20&&c.Sanlock.ResourceAlignmentBytes!=2<<20&&c.Sanlock.ResourceAlignmentBytes!=4<<20&&c.Sanlock.ResourceAlignmentBytes!=8<<20{return errors.New("sanlock.resource_alignment_bytes must be 1, 2, 4 or 8 MiB when resource_index_offset is configured")};if c.Sanlock.ResourceIndexOffset%c.Sanlock.ResourceAlignmentBytes!=0{return errors.New("sanlock.resource_index_offset must align to resource_alignment_bytes")} } else if len(c.Sanlock.ResourceOffsets)==0{return errors.New("configure sanlock.resource_offsets or sanlock.resource_index_offset for dynamic resource allocation") }
  used:=map[uint64]string{}
- var dynamicFirst,dynamicLast uint64
- if dynamicEnabled { dynamicFirst=c.Sanlock.DynamicResourceBase;dynamicLast=dynamicFirst+(c.Sanlock.DynamicResourceSlots-1)*c.Sanlock.ResourceAlignmentBytes }
+ resourceAlignment:=uint64(512);if rindexEnabled{resourceAlignment=c.Sanlock.ResourceAlignmentBytes}
  for name,off:=range c.Sanlock.ResourceOffsets{
-  if strings.TrimSpace(name)==""||off==0||off%func()uint64{if dynamicEnabled{return c.Sanlock.ResourceAlignmentBytes};return 512}()!=0{return fmt.Errorf("invalid sanlock resource offset for %q: offsets must be nonzero and aligned to the configured sanlock resource alignment",name)}
-  if dynamicEnabled&&off>=dynamicFirst&&off<=dynamicLast{return fmt.Errorf("static sanlock resource %q at %d overlaps the dynamic resource range",name,off)}
+  if strings.TrimSpace(name)==""||off==0||off%resourceAlignment!=0{return fmt.Errorf("invalid sanlock resource offset for %q: offsets must be nonzero and aligned to the configured sanlock resource alignment",name)}
+  
   if prev,ok:=used[off];ok{return fmt.Errorf("sanlock resources %q and %q share offset %d",prev,name,off)}
   used[off]=name
  }
@@ -78,7 +77,7 @@ func(c daemonConfig)validate()error{
   if ids[v.VolumeID]||dmNames[v.DMDevice]{return fmt.Errorf("duplicate Volume ID or DM device for %q",v.VolumeID)}
   ids[v.VolumeID],dmNames[v.DMDevice]=true,true
   required:=[]string{"owner/"+v.VolumeID,"reader-set/"+v.VolumeID,fmt.Sprintf("reader/%s/%d",v.VolumeID,v.ReaderSlot)}
-  if !dynamicEnabled { for _,name:=range required{if _,ok:=c.Sanlock.ResourceOffsets[name];!ok{return fmt.Errorf("sanlock.resource_offsets is missing required resource %q",name)}} }
+  if !rindexEnabled { for _,name:=range required{if _,ok:=c.Sanlock.ResourceOffsets[name];!ok{return fmt.Errorf("sanlock.resource_offsets is missing required resource %q",name)}} }
   switch v.Mode{case "rw":if v.ReaderEpoch!=0{return fmt.Errorf("RW Volume %s must not configure reader_epoch",v.VolumeID)}
   case "ro":if v.ReaderEpoch==0{return fmt.Errorf("RO Volume %s requires nonzero reader_epoch",v.VolumeID)}
   default:return fmt.Errorf("Volume %s mode must be rw or ro",v.VolumeID)}

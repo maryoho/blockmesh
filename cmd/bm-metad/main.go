@@ -113,7 +113,7 @@ func run(cfg daemonConfig) error {
 	locker:=&lock.SanlockLocker{
 		Binary:cfg.Sanlock.Binary,HelperBinary:cfg.Sanlock.HelperBinary,ReadyDir:cfg.Sanlock.ReadyDir,
 		ResourceFor:func(name string)(string,error){
-			off,ok:=offsets[name];if !ok&&dynamicOffsets!=nil { var e error;off,e=dynamicOffsets.Offset(name);if e!=nil{return "",e};ok=true };if !ok{return "",fmt.Errorf("sanlock resource %q has no configured lockspace offset (dynamic range is not configured)",name)}
+			off,ok:=offsets[name];if !ok&&resourceIndex!=nil { var e error;off,e=resourceIndex.Resolve(name);if e!=nil{return "",e};ok=true };if !ok{return "",fmt.Errorf("sanlock resource %q has no configured offset (resource_index_offset is not configured)",name)}
 			return lock.SanlockResource(cfg.Sanlock.Lockspace,name,cfg.Sanlock.LockDevice,off)
 		},
 	}
