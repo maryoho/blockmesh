@@ -19,7 +19,6 @@ import (
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
-	"blockmesh/internal/metastore"
 	"blockmesh/internal/poolspace"
 	"blockmesh/internal/wal"
 )
