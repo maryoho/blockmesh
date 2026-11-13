@@ -39,7 +39,7 @@ func (r staticPRKeyResolver) KeysForNode(_ context.Context,nodeID,bootID string)
 	return append([]uint64(nil),keys...),nil
 }
 
-type ownerRecordRepository struct { volumes map[string]volumeConfig }
+type ownerRecordRepository struct { volumes map[string]volumeConfig; resolve func(string)(volumeConfig,error) }
 
 type ownerRecordHandle struct {
 	parent *device.BlockDevice
@@ -51,6 +51,7 @@ type ownerRecordHandle struct {
 
 func (r *ownerRecordRepository) open(volumeID string)(*ownerRecordHandle,error) {
 	v,ok:=r.volumes[volumeID]
+	if r.resolve!=nil { var resolveErr error;v,resolveErr=r.resolve(volumeID);if resolveErr!=nil{return nil,resolveErr};ok=true }
 	if !ok{return nil,fmt.Errorf("Volume %s is not configured",volumeID)}
 	parent,err:=device.OpenBlockDevice(v.DevicePath,true,false)
 	if err!=nil{return nil,fmt.Errorf("open shared Pool LUN for OwnerRecord: %w",err)}
@@ -122,15 +123,21 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 			return lock.SanlockResource(cfg.Sanlock.Lockspace,name,cfg.Sanlock.LockDevice,off)
 		},
 	}
+	lifecycleBackend:=newCatalogLifecycleBackend(cfg.DiscoveryDevices,locker)
+	staticVolumes:=make(map[string]volumeConfig,len(cfg.Volumes))
+	for _,v:=range cfg.Volumes{staticVolumes[v.VolumeID]=v}
+	resolveVolume:=func(id string)(volumeConfig,error){
+		item,err:=lifecycleBackend.findVolume(context.Background(),id)
+		if err==nil { dmName,e:=dmowner.BlockMeshDMName(id);if e!=nil{return volumeConfig{},e};return volumeConfig{VolumeID:id,DevicePath:item.Device,DMDevice:dmName,VolumeIndex:item.Index},nil }
+		if v,ok:=staticVolumes[id];ok{return v,nil};return volumeConfig{},err
+	}
 	paths:=make([]fence.PRPath,0,len(cfg.SAN.Paths))
 	for _,p:=range cfg.SAN.Paths{paths=append(paths,fence.PRPath{Device:p.Device,LocalKey:p.LocalKey})}
 	keyResolver:=staticPRKeyResolver(cfg.SAN.OwnerKeys)
 	fencer:=&fence.SCSIPRFencer{Binary:cfg.SAN.SGPersistBinary,Paths:paths,Keys:keyResolver,ReservationType:cfg.SAN.ReservationType}
 	reservation:=&fence.SCSIPROwnerReservation{Binary:cfg.SAN.SGPersistBinary,Paths:paths,ReservationType:cfg.SAN.ReservationType}
 	registrar:=&fence.SCSIPRRegistrar{Binary:cfg.SAN.SGPersistBinary,Paths:paths}
-	records:=&ownerRecordRepository{volumes:make(map[string]volumeConfig,len(cfg.Volumes))}
-	volumeByID:=make(map[string]volumeConfig,len(cfg.Volumes))
-	for _,v:=range cfg.Volumes{records.volumes[v.VolumeID]=v;volumeByID[v.VolumeID]=v}
+	records:=&ownerRecordRepository{volumes:staticVolumes,resolve:resolveVolume}
 
 	ownerCoordinator,err:=volume.NewOwnerCoordinator(volume.OwnerCoordinatorConfig{
 		Locker:locker,ResourceFor:volume.OwnerResourceName,
@@ -155,7 +162,7 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	backend,err:=dynamicruntime.New(dynamicruntime.Config{
 		OpenDevice:func(ctx context.Context,spec metastore.VolumeRuntimeSpec)(device.Device,error){
 			if err:=ctx.Err();err!=nil{return nil,err}
-			v,ok:=volumeByID[spec.VolumeID];if !ok{return nil,fmt.Errorf("Volume %s is not configured",spec.VolumeID)}
+			v,e:=resolveVolume(spec.VolumeID);if e!=nil{return nil,fmt.Errorf("resolve Volume %s device: %w",spec.VolumeID,e)}
 			return device.OpenBlockDevice(v.DevicePath,true,false)
 		},
 		Locker:locker,
@@ -164,14 +171,16 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	})
 	if err!=nil{return fmt.Errorf("construct BMPOOL03 Backend: %w",err)}
 	dmSetup:=dmowner.DMSetupGate{}
-	gate,err:=dynamicruntime.NewDMRequestGate(dmSetup,dmSetup,func(id string)string{
-		if v,ok:=volumeByID[id];ok{return v.DMDevice};return ""
-	})
+	tables:=dmowner.TableManager{}
+	gate,err:=dynamicruntime.NewDMRequestGateWithRemoval(dmSetup,dmSetup,func(id string)string{
+		v,e:=resolveVolume(id);if e!=nil{return ""};return v.DMDevice
+	},func(ctx context.Context,id string)error{return tables.Remove(ctx,id)})
 	if err!=nil{return err}
 	heartbeat,err:=parseDuration("runtime.reader_heartbeat_interval",cfg.Runtime.ReaderHeartbeatInterval,250*time.Millisecond)
 	if err!=nil{return err}
 	manager,err:=dynamicruntime.NewIntegratedDynamicVolumeRuntimeManager(backend,ownerCoordinator,gate,heartbeat)
 	if err!=nil{return fmt.Errorf("construct integrated Volume Runtime manager: %w",err)}
+	lifecycleBackend.attachRuntime(manager,tables,dmSetup,cfg.NodeID,cfg.BootID)
 	processor,err:=metaservice.NewDynamicPoolRuntimeProcessor(manager)
 	if err!=nil{return err}
 	requestTimeout,err:=parseDuration("service.request_timeout",cfg.Service.RequestTimeout,metaservice.DefaultRequestTimeout)
@@ -182,16 +191,13 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	service,err:=metaservice.NewService(metaservice.ServiceConfig{
 		DevicePath:cfg.Service.DevicePath,LockPath:cfg.Service.LockPath,Processor:processor,RequestTimeout:requestTimeout,
 		Recover:func(ctx context.Context)error{
-			for _,v:=range cfg.Volumes{
-				mode:=metastore.VolumeRuntimeReadWrite
-				if v.Mode=="ro"{mode=metastore.VolumeRuntimeReadOnly}
-				spec:=metastore.VolumeRuntimeSpec{VolumeID:v.VolumeID,Mode:mode,NodeID:cfg.NodeID,BootID:cfg.BootID,
-					VolumeIndex:v.VolumeIndex,ReaderSlot:v.ReaderSlot,ReaderEpoch:v.ReaderEpoch}
-				if err:=manager.Activate(ctx,spec);err!=nil{
-					cleanupCtx,cancel:=context.WithTimeout(context.Background(),shutdownTimeout)
-					cleanupErr:=manager.Shutdown(cleanupCtx);cancel()
-					return errors.Join(fmt.Errorf("activate Volume %s: %w",v.VolumeID,err),cleanupErr)
-				}
+			// Runtime ownership is not persisted as a local desired-state list.
+			// On daemon restart, fence and remove every stale local BlockMesh DM
+			// table before accepting lifecycle requests; Volumes remain inactive.
+			names,e:=tables.List(ctx);if e!=nil{return e}
+			for _,name:=range names{
+				if e=dmSetup.FenceCurrent(ctx,name);e!=nil{return fmt.Errorf("fence stale local DM target %s: %w",name,e)}
+				if e=tables.RemoveName(ctx,name);e!=nil{return fmt.Errorf("remove stale local DM target %s: %w",name,e)}
 			}
 			return nil
 		},
@@ -200,7 +206,7 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	if err!=nil{return err}
 	socketPath:=cfg.Control.SocketPath
 	if strings.TrimSpace(socketPath)=="" { socketPath="/run/blockmesh/control.sock" }
-	lifecycleServer,err:=control.New(control.Config{Path:socketPath,Handler:control.LifecycleHandler{Backend:newCatalogLifecycleBackend(cfg.DiscoveryDevices, locker)}})
+	lifecycleServer,err:=control.New(control.Config{Path:socketPath,Handler:control.LifecycleHandler{Backend:lifecycleBackend}})
 	if err!=nil{return fmt.Errorf("construct lifecycle control server: %w",err)}
 	defer lifecycleServer.Close()
 

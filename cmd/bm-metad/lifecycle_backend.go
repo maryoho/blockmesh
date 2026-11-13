@@ -13,6 +13,9 @@ import (
 
 	"blockmesh/internal/allocator"
 	"blockmesh/internal/control"
+	"blockmesh/internal/dmowner"
+	"blockmesh/internal/dynamicruntime"
+	"blockmesh/internal/metastore"
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
@@ -29,6 +32,11 @@ const (
 type catalogLifecycleBackend struct {
 	devices []string
 	locker lock.DistributedLocker
+	runtime *dynamicruntime.DynamicVolumeRuntimeManager
+	tables dmowner.TableManager
+	dmSetup dmowner.DMSetupGate
+	nodeID string
+	bootID string
 }
 
 func newCatalogLifecycleBackend(paths []string, locker lock.DistributedLocker) *catalogLifecycleBackend {
@@ -120,10 +128,15 @@ func (b *catalogLifecycleBackend) VolumeList(ctx context.Context) (any, error) {
 	sort.Slice(items, func(i, j int) bool { if items[i].Pool != items[j].Pool { return items[i].Pool < items[j].Pool }; return items[i].Index < items[j].Index })
 	return items, nil
 }
-func (b *catalogLifecycleBackend) VolumeInfo(ctx context.Context, id string) (any, error) {
-	items, err := b.scanVolumes(ctx); if err != nil { return nil, err }
-	for _, item := range items { if item.Descriptor.VolumeID == id { return item, nil } }
-	return nil, fmt.Errorf("Volume %q was not found in configured Pool devices", id)
+func (b *catalogLifecycleBackend) findVolume(ctx context.Context,id string) (discoveredVolume,error) {
+	items,err:=b.scanVolumes(ctx);if err!=nil{return discoveredVolume{},err}
+	for _,item:=range items { if item.Descriptor.VolumeID==id { return item,nil } }
+	return discoveredVolume{},fmt.Errorf("Volume %q was not found in configured Pool devices",id)
+}
+func (b *catalogLifecycleBackend) VolumeInfo(ctx context.Context,id string) (any,error) { return b.findVolume(ctx,id) }
+
+func (b *catalogLifecycleBackend) attachRuntime(manager *dynamicruntime.DynamicVolumeRuntimeManager,tables dmowner.TableManager,setup dmowner.DMSetupGate,nodeID,bootID string) {
+	b.runtime=manager;b.tables=tables;b.dmSetup=setup;b.nodeID=nodeID;b.bootID=bootID
 }
 
 func newVolumeUUID() (string, error) {
@@ -192,5 +205,26 @@ func (*catalogLifecycleBackend) unsupported(action string) (any, error) {
 func (b *catalogLifecycleBackend) PoolCreate(context.Context, control.PoolCreateArgs) (any, error) { return b.unsupported("pool create") }
 func (b *catalogLifecycleBackend) PoolDestroy(context.Context, string) (any, error) { return b.unsupported("pool destroy") }
 func (b *catalogLifecycleBackend) VolumeDelete(context.Context, string) (any, error) { return b.unsupported("volume delete") }
-func (b *catalogLifecycleBackend) VolumeActivate(context.Context, string, string) (any, error) { return b.unsupported("volume activate") }
-func (b *catalogLifecycleBackend) VolumeDeactivate(context.Context, string) (any, error) { return b.unsupported("volume deactivate") }
+func (b *catalogLifecycleBackend) VolumeActivate(ctx context.Context,id,mode string) (any,error) {
+	if b==nil||b.runtime==nil{return nil,errors.New("dynamic Volume Runtime manager is not configured")}
+	if mode!="rw" { return nil,errors.New("dynamic RO activation requires a cluster-coordinated Reader slot allocator and is not enabled yet") }
+	item,err:=b.findVolume(ctx,id);if err!=nil{return nil,err}
+	dmName,err:=dmowner.BlockMeshDMName(id);if err!=nil{return nil,err}
+	if _,err=b.tables.Ensure(ctx,dmowner.TableSpec{VolumeID:id,LogicalSizeBytes:item.Descriptor.LogicalSizeBytes,
+		BackingDevice:item.Device,NodeID:b.nodeID,BootID:b.bootID});err!=nil{return nil,fmt.Errorf("create closed/fenced DM target: %w",err)}
+	spec:=metastore.VolumeRuntimeSpec{VolumeID:id,Mode:metastore.VolumeRuntimeReadWrite,NodeID:b.nodeID,BootID:b.bootID,VolumeIndex:item.Index}
+	if err=b.runtime.Activate(ctx,spec);err!=nil{return nil,fmt.Errorf("activate fenced BMPOOL03 RW Runtime: %w",err)}
+	return map[string]any{"volume_id":id,"mode":"rw","dm_device":dmName,"device":"/dev/mapper/"+dmName},nil
+}
+func (b *catalogLifecycleBackend) VolumeDeactivate(ctx context.Context,id string) (any,error) {
+	if b==nil||b.runtime==nil{return nil,errors.New("dynamic Volume Runtime manager is not configured")}
+	if err:=b.runtime.Deactivate(ctx,id);err!=nil{return nil,err}
+	dmName,err:=dmowner.BlockMeshDMName(id);if err!=nil{return nil,err}
+	names,err:=b.tables.List(ctx);if err!=nil{return nil,err}
+	for _,name:=range names {
+		if name!=dmName{continue}
+		if err=b.dmSetup.FenceCurrent(ctx,name);err!=nil{return nil,fmt.Errorf("fence orphaned DM target %s: %w",name,err)}
+		if err=b.tables.RemoveName(ctx,name);err!=nil{return nil,err}
+	}
+	return map[string]any{"volume_id":id,"state":"inactive"},nil
+}
