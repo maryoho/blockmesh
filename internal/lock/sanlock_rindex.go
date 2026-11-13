@@ -48,9 +48,11 @@ func(r *SanlockRIndexResolver) Resolve(name string)(uint64,error){
  // the RINDEX create race or our response was lost, a second lookup returns
  // the single persistent offset chosen by sanlock.
  createOut,createErr:=runner.Run(ctx,binary,"client","create","-x",rindex,"-e",name)
- if createErr==nil { if off,parseErr:=parseSanlockRIndexOffset(createOut);parseErr==nil{return off,nil} }
- if off,lookupErr:=lookup();lookupErr==nil{return off,nil}
- return 0,errors.Join(fmt.Errorf("sanlock RINDEX create for %s failed: %w: %s",name,createErr,strings.TrimSpace(string(createOut))),lookupErr)
+ var createFailure error
+ if createErr!=nil { createFailure=fmt.Errorf("sanlock RINDEX create for %s failed: %w: %s",name,createErr,strings.TrimSpace(string(createOut))) } else if off,parseErr:=parseSanlockRIndexOffset(createOut);parseErr==nil { return off,nil } else { createFailure=fmt.Errorf("parse sanlock RINDEX create for %s: %w: %s",name,parseErr,strings.TrimSpace(string(createOut))) }
+ off,lookupErr:=lookup()
+ if lookupErr==nil{return off,nil}
+ return 0,errors.Join(createFailure,lookupErr)
 }
 
 func parseSanlockRIndexOffset(output []byte)(uint64,error){
