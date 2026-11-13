@@ -1,7 +1,6 @@
 package lock
 
 import (
- "errors"
  "testing"
 )
 
@@ -24,5 +23,4 @@ func TestHashedResourceOffsetsRejectInvalidRange(t *testing.T){
  for _,tc:=range []struct{base,slots uint64}{{0,1},{513,1},{512,0},{^uint64(0)-511,2}}{
   if _,err:=NewHashedResourceOffsets(tc.base,tc.slots);err==nil{t.Fatalf("accepted invalid range base=%d slots=%d",tc.base,tc.slots)}
  }
- if !errors.Is(nil,nil){t.Fatal("unreachable")}
 }
