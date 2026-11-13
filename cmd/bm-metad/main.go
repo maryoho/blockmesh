@@ -221,10 +221,23 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	}()
 	serveCtx,cancelServe:=context.WithCancel(ctx)
 	defer cancelServe()
+	log.Printf("bm-metad recovering before opening lifecycle control socket: node=%s boot=%s",cfg.NodeID,cfg.BootID)
+	if err=service.Start(serveCtx);err!=nil{return fmt.Errorf("start and recover metadata service before lifecycle RPC: %w",err)}
+	serviceRunDone:=make(chan error,1)
+	go func(){serviceRunDone<-service.RunStarted(serveCtx)}()
+	for service.State()!=metaservice.ServiceRunning {
+		select {
+		case serviceErr:=<-serviceRunDone:
+			return fmt.Errorf("metadata service device loop failed before control-plane readiness: %w",serviceErr)
+		case <-serveCtx.Done():
+			return serveCtx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
 	controlErr:=make(chan error,1)
 	go func(){if serveErr:=lifecycleServer.Serve(serveCtx);serveErr!=nil{controlErr<-serveErr;stop()}}()
-	log.Printf("bm-metad starting: node=%s boot=%s configured_volumes=%d discovery_devices=%d control_socket=%s device=%s",cfg.NodeID,cfg.BootID,len(cfg.Volumes),len(cfg.DiscoveryDevices),socketPath,cfg.Service.DevicePath)
-	serviceErr:=service.Run(serveCtx)
+	log.Printf("bm-metad ready: node=%s boot=%s configured_volumes=%d discovery_devices=%d control_socket=%s device=%s",cfg.NodeID,cfg.BootID,len(cfg.Volumes),len(cfg.DiscoveryDevices),socketPath,cfg.Service.DevicePath)
+	serviceErr:=<-serviceRunDone
 	cancelServe()
 	select {
 	case serveErr:=<-controlErr:

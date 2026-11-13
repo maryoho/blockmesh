@@ -29,3 +29,35 @@ func TestServiceRunShutdownWaitsForDevice(t *testing.T){
  select{case err:=<-shutdownDone:if err!=nil{t.Fatal(err)};case<-time.After(time.Second):t.Fatal("Shutdown did not cancel and join Run")}
  if err:=<-runDone;err!=nil{t.Fatal(err)};if s.State()!=ServiceClosed{t.Fatalf("state=%s",s.State())}
 }
+func TestServiceRunStartedRequiresCompletedRecovery(t *testing.T) {
+	lock:=filepath.Join(t.TempDir(),"metaservice.lock")
+	recovered:=false
+	dev:=&fakeServiceDevice{runStarted:make(chan struct{})}
+	s:=newTestService(t,lock,dev,func(context.Context)error{recovered=true;return nil})
+	if err:=s.RunStarted(context.Background());err==nil { t.Fatal("RunStarted accepted a service that was not started") }
+	if err:=s.Start(context.Background());err!=nil { t.Fatal(err) }
+	if !recovered||!s.Ready() { t.Fatal("service became ready before recovery completed") }
+	runDone:=make(chan error,1)
+	go func(){runDone<-s.RunStarted(context.Background())}()
+	select{case <-dev.runStarted:case <-time.After(time.Second):t.Fatal("device loop did not start")}
+	if err:=s.Shutdown();err!=nil { t.Fatal(err) }
+	if err:=<-runDone;err!=nil { t.Fatal(err) }
+}
+
+func TestServiceRunStartedRequiresCompletedRecovery(t *testing.T) {
+	lock:=filepath.Join(t.TempDir(),"metaservice.lock")
+	recovered:=false
+	dev:=&fakeServiceDevice{runStarted:make(chan struct{})}
+	s:=newTestService(t,lock,dev,func(context.Context)error{recovered=true;return nil})
+	if err:=s.RunStarted(context.Background());err==nil { t.Fatal("RunStarted accepted a service that was not started") }
+	if err:=s.Start(context.Background());err!=nil { t.Fatal(err) }
+	if !recovered||!s.Ready() { t.Fatal("service became ready before recovery completed") }
+	runDone:=make(chan error,1)
+	go func(){runDone<-s.RunStarted(context.Background())}()
+	deadline:=time.After(time.Second)
+	for s.State()!=ServiceRunning {
+		select { case err:=<-runDone: t.Fatalf("device loop exited before running state: %v",err); case <-deadline:t.Fatal("service did not enter running state"); case <-time.After(time.Millisecond): }
+	}
+	if err:=s.Shutdown();err!=nil { t.Fatal(err) }
+	if err:=<-runDone;err!=nil { t.Fatal(err) }
+}

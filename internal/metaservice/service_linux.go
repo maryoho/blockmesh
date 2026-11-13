@@ -19,11 +19,12 @@ const (
  ServiceOpening
  ServiceRecovering
  ServiceReady
+ ServiceRunning
  ServiceDraining
  ServiceClosed
  ServiceFailed
 )
-func(s ServiceState)String()string{switch s{case ServiceCreated:return"created";case ServiceOpening:return"opening";case ServiceRecovering:return"recovering";case ServiceReady:return"ready";case ServiceDraining:return"draining";case ServiceClosed:return"closed";case ServiceFailed:return"failed";default:return"unknown"}}
+func(s ServiceState)String()string{switch s{case ServiceCreated:return"created";case ServiceOpening:return"opening";case ServiceRecovering:return"recovering";case ServiceReady:return"ready";case ServiceRunning:return"running";case ServiceDraining:return"draining";case ServiceClosed:return"closed";case ServiceFailed:return"failed";default:return"unknown"}}
 
 type ServiceDevice interface{Reconcile()error;Run(context.Context)error;Close()error}
 type ServiceConfig struct{
@@ -57,7 +58,7 @@ func NewService(cfg ServiceConfig)(*Service,error){
  return &Service{cfg:cfg,state:ServiceCreated},nil
 }
 func(s *Service)State()ServiceState{s.mu.Lock();defer s.mu.Unlock();return s.state}
-func(s *Service)Ready()bool{return s.State()==ServiceReady}
+func(s *Service)Ready()bool{state:=s.State();return state==ServiceReady||state==ServiceRunning}
 
 func(s *Service)Start(ctx context.Context)error{
  if ctx==nil{return errors.New("service start context is required")}
@@ -93,9 +94,19 @@ func(s *Service)Start(ctx context.Context)error{
 
 func(s *Service)Run(ctx context.Context)error{
  if err:=s.Start(ctx);err!=nil{return err}
+ return s.RunStarted(ctx)
+}
+
+// RunStarted begins the metadata device loop after Start has completed
+// reconciliation and recovery. Daemons that expose a control plane must call
+// Start first and only begin serving lifecycle requests after Ready is true.
+func(s *Service)RunStarted(ctx context.Context)error{
+ if s==nil||ctx==nil{return errors.New("started service and run context are required")}
  s.mu.Lock()
  if s.state!=ServiceReady{state:=s.state;s.mu.Unlock();return fmt.Errorf("cannot run service in state %s",state)}
- runCtx,cancel:=context.WithCancel(ctx);done:=make(chan struct{});s.cancel=cancel;s.done=done;dev:=s.device
+ if s.done!=nil{s.mu.Unlock();return errors.New("metadata service device loop is already running")}
+ if err:=ctx.Err();err!=nil{s.mu.Unlock();return err}
+ runCtx,cancel:=context.WithCancel(ctx);done:=make(chan struct{});s.cancel=cancel;s.done=done;dev:=s.device;s.state=ServiceRunning
  s.mu.Unlock()
  runErr:=dev.Run(runCtx);cancel()
  s.mu.Lock();close(done);s.done=nil;s.cancel=nil
@@ -128,7 +139,7 @@ func(s *Service)Shutdown()error{
  s.mu.Lock()
  if s.state==ServiceClosed{s.mu.Unlock();return nil}
  if s.state==ServiceCreated{s.state=ServiceClosed;s.mu.Unlock();return nil}
- if s.state==ServiceReady{s.state=ServiceDraining}
+ if s.state==ServiceReady||s.state==ServiceRunning{s.state=ServiceDraining}
  cancel,done:=s.cancel,s.done
  s.mu.Unlock()
  if cancel!=nil{cancel()}
