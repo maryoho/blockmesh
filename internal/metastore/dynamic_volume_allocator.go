@@ -291,6 +291,7 @@ func(a *DynamicVolumeAllocator) allocateVolumeLocked(index uint32,d format.Dynam
  // It can reuse the existing bitmap layout only while BitmapPages remains
  // unchanged; otherwise an explicit allocator-layout migration is required.
  func(a *DynamicVolumeAllocator) ExpandRegion(dev Device,nextSB format.DynamicSuperblock,committer ClusterSafeCommitter) error {
+	if a!=nil && a.readOnly { return ErrReadOnlyVolumeAllocator }
 	if a==nil||dev==nil||committer==nil||!committer.ClusterSafe(){return ErrClusterSafeCommitterRequired}
 	a.mu.Lock();defer a.mu.Unlock()
 	if err:=nextSB.Validate();err!=nil{return err}
