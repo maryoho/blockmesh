@@ -108,7 +108,7 @@ func main() {
 
 func run(cfg daemonConfig) error {
 	offsets:=cfg.Sanlock.ResourceOffsets
-	dynamicOffsets,err:=lock.NewHashedResourceOffsets(cfg.Sanlock.DynamicResourceBase,cfg.Sanlock.DynamicResourceSlots)
+	dynamicOffsets,err:=lock.NewHashedResourceOffsets(cfg.Sanlock.DynamicResourceBase,cfg.Sanlock.DynamicResourceSlots,cfg.Sanlock.ResourceAlignmentBytes)
 	if cfg.Sanlock.DynamicResourceBase==0&&cfg.Sanlock.DynamicResourceSlots==0 { dynamicOffsets=nil } else if err!=nil { return fmt.Errorf("configure dynamic sanlock resource range: %w",err) }
 	locker:=&lock.SanlockLocker{
 		Binary:cfg.Sanlock.Binary,HelperBinary:cfg.Sanlock.HelperBinary,ReadyDir:cfg.Sanlock.ReadyDir,
