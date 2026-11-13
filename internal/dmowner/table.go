@@ -2,6 +2,7 @@ package dmowner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -44,6 +45,13 @@ func dmUUIDHex(value string) (string,error) {
 	return strings.ToLower(value),nil
 }
 
+func dmIdentityHex(value string) (string,error) {
+	if strings.TrimSpace(value)=="" { return "",errors.New("empty DM node/boot identity") }
+	if id,err:=dmUUIDHex(value);err==nil { return id,nil }
+	sum:=sha256.Sum256([]byte("blockmesh/dm-identity/v1/"+value))
+	return hex.EncodeToString(sum[:16]),nil
+}
+
 func BlockMeshDMName(volumeID string) (string,error) {
 	id,err:=dmUUIDHex(volumeID)
 	if err!=nil { return "",err }
@@ -59,8 +67,8 @@ func (m TableManager) table(spec TableSpec) (name,line string,readOnly bool,err 
 	}
 	volume,node,boot:="","",""
 	if volume,err=dmUUIDHex(spec.VolumeID);err!=nil{return}
-	if node,err=dmUUIDHex(spec.NodeID);err!=nil{return}
-	if boot,err=dmUUIDHex(spec.BootID);err!=nil{return}
+	if node,err=dmIdentityHex(spec.NodeID);err!=nil{return}
+	if boot,err=dmIdentityHex(spec.BootID);err!=nil{return}
 	if name,err=BlockMeshDMName(spec.VolumeID);err!=nil{return}
 	sectors:=spec.LogicalSizeBytes/512
 	line=fmt.Sprintf("0 %d blockmesh %s 0 %s %s %s",sectors,spec.BackingDevice,volume,node,boot)

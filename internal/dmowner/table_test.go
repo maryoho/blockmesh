@@ -76,10 +76,12 @@ func TestTableManagerRemoveRequiresFencedDrainedTarget(t *testing.T) {
 	if r.table!=""{t.Fatal("DM table remains after remove")}
 }
 
-func TestDMTableRejectsNonUUIDIdentityAndUnalignedSize(t *testing.T) {
+func TestDMTableHashesStableNodeAndBootIdentities(t *testing.T) {
 	m:=TableManager{}
-	spec:=validTableSpec();spec.NodeID="node-a"
-	if _,err:=m.table(spec);err==nil{t.Fatal("non-UUID NodeID accepted")}
-	spec=validTableSpec();spec.LogicalSizeBytes=513
-	if _,err:=m.table(spec);err==nil{t.Fatal("unaligned logical size accepted")}
+	spec:=validTableSpec();spec.NodeID="node-a";spec.BootID="boot-a"
+	_,line,_,err:=m.table(spec);if err!=nil{t.Fatal(err)}
+	if !strings.Contains(line,"blockmesh /dev/mapper/mpatha 0 "){t.Fatalf("invalid DM table: %s",line)}
+	_,again,_,err:=m.table(spec);if err!=nil||again!=line{t.Fatalf("identity mapping is not stable: %v",err)}
+	spec.LogicalSizeBytes=513
+	if _,_,_,err=m.table(spec);err==nil{t.Fatal("unaligned logical size accepted")}
 }
