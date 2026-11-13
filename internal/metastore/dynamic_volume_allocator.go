@@ -169,6 +169,15 @@ func dynamicReservedFormatMarkerMatches(b []byte,h dynamicReservedHeader) bool {
 }
 
 func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) {
+	return openDynamicVolumeAllocator(dev,sb,true)
+}
+
+// OpenDynamicVolumeAllocatorReadOnly validates the Reserved allocator and Volume descriptor table without repairing redundant headers or writing to the MetadataView.
+func OpenDynamicVolumeAllocatorReadOnly(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) {
+	return openDynamicVolumeAllocator(dev,sb,false)
+}
+
+func openDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock,repair bool) (*DynamicVolumeAllocator,error) {
 	if dev==nil{return nil,errors.New("nil BMPOOL03 MetadataView")}
 	expected,bitmapPages,err:=dynamicReservedGeometry(sb);if err!=nil{return nil,err}
 	var valid []struct{h dynamicReservedHeader;slot uint64}
@@ -188,7 +197,7 @@ func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*Dynami
 	if err=readFullAt(dev,bitmap,int64((best.h.RegionStart+2)*format.PageSize));err!=nil{return nil,err}
 	if crc32.Checksum(bitmap,crcTable)!=best.h.BitmapCRC{return nil,errors.New("BMPOOL03 Reserved allocator bitmap CRC32C mismatch")}
 	a:=&DynamicVolumeAllocator{dev:dev,sb:sb,header:best.h,headerSlot:best.slot,bitmap:bitmap}
-	if len(valid)==1{
+	if len(valid)==1 && repair {
 		page,e:=best.h.encode();if e!=nil{return nil,e}
 		if e=writeFullAt(dev,page,int64((best.h.RegionStart+(1-best.slot))*format.PageSize));e!=nil{return nil,e}
 		if e=dev.Sync();e!=nil{return nil,e}

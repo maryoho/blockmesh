@@ -293,3 +293,19 @@ func TestDynamicVolumeCatalogDeleteRequiresClusterWideGuard(t *testing.T) {
 	if err=a.DeleteVolume(context.Background(),created.Entry.Index,&dynamicVolumeTestDeleteProof{},committer);err!=nil{t.Fatal(err)}
 	if _,err=a.FindVolumeByID(req.VolumeID);!errors.Is(err,ErrVolumeCatalogNotFound){t.Fatalf("deleted Volume still visible: %v",err)}
 }
+
+
+type dynamicVolumeReadOnlyDevice struct { Device; writeAttempted bool }
+func(d *dynamicVolumeReadOnlyDevice)WriteAt([]byte,int64)(int,error){d.writeAttempted=true;return 0,errors.New("read-only test device")}
+func(d *dynamicVolumeReadOnlyDevice)Sync()error{return errors.New("read-only test device")}
+
+func TestOpenDynamicVolumeAllocatorReadOnlyDoesNotRepairHeader(t *testing.T){
+ dev,sb:=dynamicVolumeAllocatorFixture(t)
+ if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+ second:=(dynamicReservedGeometryMust(sb)+1)*format.PageSize
+ for i:=uint64(0);i<format.PageSize;i++{dev.b[second+i]=0}
+ ro:=&dynamicVolumeReadOnlyDevice{Device:dev}
+ if _,err:=OpenDynamicVolumeAllocatorReadOnly(ro,sb);err!=nil{t.Fatalf("read-only open failed: %v",err)}
+ if ro.writeAttempted{t.Fatal("read-only catalog open attempted to repair the redundant header")}
+}
+func dynamicReservedGeometryMust(sb format.DynamicSuperblock)uint64{h,_,err:=dynamicReservedGeometry(sb);if err!=nil{panic(err)};return h.RegionStart}
