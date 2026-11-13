@@ -301,6 +301,7 @@ func (*catalogLifecycleBackend) unsupported(action string) (any, error) {
 }
 func (b *catalogLifecycleBackend) PoolCreate(ctx context.Context, args control.PoolCreateArgs) (any, error) {
 	if b == nil || ctx == nil || b.locker == nil || !b.locker.Distributed() { return nil, errors.New("Pool create requires a distributed sanlock backend") }
+	if !args.Confirmed { return nil, errors.New("Pool create requires explicit destructive-operation confirmation") }
 	if strings.TrimSpace(args.Name) == "" || len(args.Name) > 23 { return nil, errors.New("Pool name must contain 1-23 supported ASCII characters") }
 	configured := false
 	for _, path := range b.devices { if path == args.Device { configured = true; break } }

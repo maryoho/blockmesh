@@ -34,3 +34,16 @@ func TestLifecycleHandlerRejectsUnknownOrTrailingArguments(t *testing.T){
 func TestLifecycleHandlerRequiresProductionBackend(t *testing.T){
  if _,err:=(LifecycleHandler{}).Handle(context.Background(),"poollist",json.RawMessage(`{}`));err==nil||!strings.Contains(err.Error(),"not configured"){t.Fatalf("got %v",err)}
 }
+
+func TestLifecycleHandlerRequiresExplicitPoolCreateConfirmation(t *testing.T) {
+	b:=&testLifecycleBackend{}
+	h:=LifecycleHandler{Backend:b}
+	for _,raw:=range []string{ `{"name":"pool0","device":"/dev/mapper/mpatha"}`, `{"name":"pool0","device":"/dev/mapper/mpatha","confirmed":false}` } {
+		if _,err:=h.Handle(context.Background(),"poolcreate",json.RawMessage(raw));err==nil||!strings.Contains(err.Error(),"confirmation") {
+			t.Fatalf("expected explicit Pool create confirmation requirement, got %v",err)
+		}
+	}
+	if b.called!="" { t.Fatalf("backend invoked without confirmation: %s",b.called) }
+	if _,err:=h.Handle(context.Background(),"poolcreate",json.RawMessage(`{"name":"pool0","device":"/dev/mapper/mpatha","confirmed":true}`));err!=nil { t.Fatal(err) }
+	if b.called!="poolcreate" { t.Fatalf("backend was not called after confirmation: %s",b.called) }
+}

@@ -11,7 +11,7 @@ import (
  "strings"
 )
 
-type PoolCreateArgs struct { Name string `json:"name"`; Device string `json:"device"` }
+type PoolCreateArgs struct { Name string `json:"name"`; Device string `json:"device"`; Confirmed bool `json:"confirmed"` }
 type PoolNameArgs struct { Name string `json:"name"` }
 type VolumeCreateArgs struct { Pool string `json:"pool"`; Name string `json:"name"`; SizeBytes uint64 `json:"size_bytes"`; CreateToken [16]byte }
 type VolumeIDArgs struct { UUID string `json:"uuid"` }
@@ -46,6 +46,7 @@ func(h LifecycleHandler)Handle(ctx context.Context,action string,raw json.RawMes
  case "poolcreate":
   var a PoolCreateArgs;if err:=decode(&a);err!=nil{return nil,err}
   if strings.TrimSpace(a.Name)==""||strings.TrimSpace(a.Device)==""{return nil,errors.New("pool create requires name and device")}
+  if !a.Confirmed { return nil, errors.New("pool create requires explicit destructive-operation confirmation") }
   return h.Backend.PoolCreate(ctx,a)
  case "poollist":
   if err:=decode(&struct{}{});err!=nil{return nil,err};return h.Backend.PoolList(ctx)

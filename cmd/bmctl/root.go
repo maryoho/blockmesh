@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -26,7 +28,7 @@ func newRootCommand() *cobra.Command {
 func newPoolCommand() *cobra.Command {
 	pool := &cobra.Command{Use: "pool", Short: "Manage storage Pools"}
 	pool.AddCommand(
-		newLifecycleCommand("pool", "create", "name device", 2),
+		newPoolCreateCommand(),
 		newLifecycleCommand("pool", "list", "", 0),
 		newLifecycleCommand("pool", "info", "name", 1),
 		newLifecycleCommand("pool", "destroy", "name", 1),
@@ -43,6 +45,34 @@ func newPoolCommand() *cobra.Command {
 		})
 	}
 	return pool
+}
+
+
+func newPoolCreateCommand() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use: "create name device",
+		Short: "Create and initialize a Pool on a blank SAN device",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !yes {
+				info, err := os.Stdin.Stat()
+				if err != nil { return fmt.Errorf("inspect stdin for Pool confirmation: %w", err) }
+				if info.Mode()&os.ModeCharDevice == 0 {
+					return errors.New("Pool creation initializes on-disk metadata; use --yes for non-interactive execution")
+				}
+				fmt.Fprintf(os.Stderr, "This will initialize device %s as Pool %q. Type the Pool name to continue: ", args[1], args[0])
+				line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+				if err != nil { return fmt.Errorf("read Pool creation confirmation: %w", err) }
+				if strings.TrimSpace(line) != args[0] { return errors.New("Pool creation confirmation did not match the Pool name") }
+			}
+			socket, err := cmd.Root().PersistentFlags().GetString("socket")
+			if err != nil { return err }
+			return callLifecycle(socket, "poolcreate", lifecycleArgs{Name: args[0], Device: args[1], Confirmed: true})
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm initialization without an interactive prompt")
+	return cmd
 }
 
 func newVolumeCommand() *cobra.Command {

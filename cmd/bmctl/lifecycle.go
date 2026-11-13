@@ -24,7 +24,7 @@ Global options (must appear before the command):
   --socket <path>         bm-metad control socket (default /run/blockmesh/control.sock)
 
 Pool commands:
-  pool create <name> <device>
+  pool create <name> <device> [--yes]
   pool list
   pool info <name>
   pool destroy <name>
@@ -61,6 +61,7 @@ type lifecycleArgs struct {
 	UUID string `json:"uuid,omitempty"`
 	Mode string `json:"mode,omitempty"`
 	CreateToken string `json:"create_token,omitempty"`
+	Confirmed bool `json:"confirmed,omitempty"`
 }
 
 func parseVolumeSize(s string) (uint64, error) {
