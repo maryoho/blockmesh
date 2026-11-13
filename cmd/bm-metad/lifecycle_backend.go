@@ -307,6 +307,18 @@ func (b *catalogLifecycleBackend) PoolCreate(ctx context.Context, args control.P
 	if !configured { return nil, errors.New("Pool create device must be listed in discovery_devices") }
 	identity, err := device.StableBlockIdentity(args.Device)
 	if err != nil { return nil, fmt.Errorf("resolve stable Pool device identity: %w", err) }
+	existingPools, err := b.scan(ctx)
+	if err != nil { return nil, fmt.Errorf("check existing Pool catalog before create: %w", err) }
+	for _, existing := range existingPools {
+		existingID, idErr := device.StableBlockIdentity(existing.Device)
+		if idErr != nil { return nil, fmt.Errorf("resolve existing Pool device identity for %s: %w", existing.Device, idErr) }
+		if existing.Name == args.Name && existingID != identity {
+			return nil, fmt.Errorf("Pool name %q already exists on another SAN device", args.Name)
+		}
+		if existingID == identity && existing.Name != args.Name {
+			return nil, fmt.Errorf("device WWID %s already belongs to Pool %q", identity, existing.Name)
+		}
+	}
 	dev, err := device.OpenBlockDevice(args.Device, true, false)
 	if err != nil { return nil, fmt.Errorf("open Pool device for initialization: %w", err) }
 	defer dev.Close()
