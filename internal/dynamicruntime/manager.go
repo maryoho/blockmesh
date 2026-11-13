@@ -488,6 +488,11 @@ func (m *DynamicVolumeRuntimeManager) deactivateLocked(ctx context.Context, volu
 	if err := m.cfg.Gate.DrainRequests(ctx, volumeID); err != nil {
 		return fmt.Errorf("drain BMPOOL03 DM requests: %w", err)
 	}
+	if remover,ok:=m.cfg.Gate.(interface{ RemoveDevice(context.Context,string) error }); ok {
+		if err:=remover.RemoveDevice(ctx,volumeID);err!=nil {
+			return fmt.Errorf("remove drained BMPOOL03 DM table before releasing leases: %w",err)
+		}
+	}
 	if rt.watchCancel != nil { rt.watchCancel() }
 	if rt.watchDone != nil { <-rt.watchDone }
 	m.mu.Lock()

@@ -28,6 +28,7 @@ type DMRequestGate struct {
 	owner dmowner.Gate
 	reader dmowner.ReaderGate
 	deviceFor DMDeviceResolver
+	removeDevice func(context.Context,string) error
 
 	mu sync.Mutex
 	locks map[string]*sync.Mutex
@@ -38,7 +39,12 @@ func NewDMRequestGate(owner dmowner.Gate, reader dmowner.ReaderGate, deviceFor D
 	if owner == nil || reader == nil || deviceFor == nil {
 		return nil, errors.New("DM Owner gate, Reader gate and Volume-to-device resolver are required")
 	}
-	return &DMRequestGate{owner:owner,reader:reader,deviceFor:deviceFor,
+	return NewDMRequestGateWithRemoval(owner,reader,deviceFor,nil)
+}
+
+func NewDMRequestGateWithRemoval(owner dmowner.Gate, reader dmowner.ReaderGate, deviceFor DMDeviceResolver, removeDevice func(context.Context,string) error) (*DMRequestGate,error) {
+	if owner==nil || reader==nil || deviceFor==nil { return nil,errors.New("DM Owner gate, Reader gate and Volume-to-device resolver are required") }
+	return &DMRequestGate{owner:owner,reader:reader,deviceFor:deviceFor,removeDevice:removeDevice,
 		locks:make(map[string]*sync.Mutex),sessions:make(map[string]dmGateSession)},nil
 }
 
@@ -157,3 +163,13 @@ func (g *DMRequestGate) FailStop(ctx context.Context, spec metastore.VolumeRunti
 }
 
 var _ RequestGate = (*DMRequestGate)(nil)
+
+
+// RemoveDevice removes the already-fenced and drained DM table. The Runtime
+// manager invokes this after DrainRequests and before closing Reader/Owner
+// leases, preserving the required teardown ordering.
+func (g *DMRequestGate) RemoveDevice(ctx context.Context,volumeID string) error {
+	if g==nil || ctx==nil { return errors.New("DM gate and context are required") }
+	if g.removeDevice==nil { return nil }
+	return g.removeDevice(ctx,volumeID)
+}

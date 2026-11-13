@@ -127,3 +127,34 @@ func (m TableManager) Remove(ctx context.Context,volumeID string) error {
 	if _,err=r.Run(ctx,b,"remove",name);err!=nil{return fmt.Errorf("remove DM table %s: %w",name,err)}
 	return nil
 }
+
+
+// List returns the names of all loaded BlockMesh targets. Startup reconciliation
+// uses this list to fence and remove stale local DM tables before serving RPC.
+func (m TableManager) List(ctx context.Context) ([]string,error) {
+	if ctx==nil{return nil,errors.New("DM table context is required")}
+	r,b:=m.runner()
+	out,err:=r.Run(ctx,b,"ls","--target","blockmesh","--noheadings")
+	if err!=nil{return nil,fmt.Errorf("list BlockMesh DM tables: %w",err)}
+	names:=make([]string,0)
+	for _,line:=range strings.Split(string(out),"\n") {
+		name:=strings.TrimSpace(line)
+		if name==""{continue}
+		if !strings.HasPrefix(name,"bm-") || len(name)!=35 {
+			return nil,fmt.Errorf("unexpected BlockMesh DM table name %q",name)
+		}
+		if _,err:=hex.DecodeString(strings.TrimPrefix(name,"bm-"));err!=nil{return nil,fmt.Errorf("invalid BlockMesh DM table name %q",name)}
+		names=append(names,name)
+	}
+	return names,nil
+}
+
+func (m TableManager) RemoveName(ctx context.Context,name string) error {
+	if ctx==nil{return errors.New("DM table context is required")}
+	if !strings.HasPrefix(name,"bm-") || len(name)!=35 { return errors.New("invalid BlockMesh DM table name") }
+	if _,err:=hex.DecodeString(strings.TrimPrefix(name,"bm-"));err!=nil{return err}
+	r,b:=m.runner()
+	if err:=m.requireClosedFenced(ctx,r,b,name);err!=nil{return fmt.Errorf("refuse to remove non-fenced DM table %s: %w",name,err)}
+	if _,err:=r.Run(ctx,b,"remove",name);err!=nil{return fmt.Errorf("remove DM table %s: %w",name,err)}
+	return nil
+}
