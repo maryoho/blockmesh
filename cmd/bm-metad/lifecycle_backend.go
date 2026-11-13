@@ -64,7 +64,12 @@ func (b *catalogLifecycleBackend) scan(ctx context.Context) ([]discoveredPool, e
 		if err != nil { return nil, fmt.Errorf("open Pool discovery device %s: %w", path, err) }
 		entry, readErr := poolspace.ReadPoolCatalog(dev)
 		closeErr := dev.Close()
-		if readErr != nil || closeErr != nil { return nil, errors.Join(fmt.Errorf("read Pool catalog on %s: %w", path, readErr), closeErr) }
+		if readErr != nil {
+			if closeErr != nil { return nil, errors.Join(fmt.Errorf("read Pool catalog on %s: %w", path, readErr), closeErr) }
+			if isUnformattedDiscoveryDevice(readErr) { continue }
+			return nil, fmt.Errorf("read Pool catalog on %s: %w", path, readErr)
+		}
+		if closeErr != nil { return nil, fmt.Errorf("close Pool discovery device %s: %w", path, closeErr) }
 		out = append(out, discoveredPool{PoolCatalogEntry: entry, Device: path})
 	}
 	sort.Slice(out, func(i, j int) bool { return strings.Compare(out[i].Name, out[j].Name) < 0 })
@@ -72,6 +77,10 @@ func (b *catalogLifecycleBackend) scan(ctx context.Context) ([]discoveredPool, e
 		if out[i-1].Name == out[i].Name { return nil, fmt.Errorf("duplicate Pool name %q discovered on %s and %s", out[i].Name, out[i-1].Device, out[i].Device) }
 	}
 	return out, nil
+}
+
+func isUnformattedDiscoveryDevice(err error) bool {
+	return errors.Is(err, poolspace.ErrBootstrapUnformatted) || errors.Is(err, poolspace.ErrUnknownPoolFormat)
 }
 
 func (b *catalogLifecycleBackend) PoolList(ctx context.Context) (any, error) { return b.scan(ctx) }

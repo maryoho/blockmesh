@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"blockmesh/internal/control"
+	"blockmesh/internal/poolspace"
 )
 
 func TestCatalogLifecycleBackendMutationFailsClosed(t *testing.T) {
@@ -25,4 +26,16 @@ func TestCatalogLifecycleBackendEmptyVolumeList(t *testing.T) {
  b:=newCatalogLifecycleBackend(nil,nil)
  got,err:=b.VolumeList(context.Background());if err!=nil{t.Fatalf("empty discovery list: %v",err)}
  items,ok:=got.([]discoveredVolume);if !ok||len(items)!=0{t.Fatalf("expected empty Volume catalog, got %#v",got)}
+}
+
+func TestUnformattedDiscoveryDeviceIsSkipped(t *testing.T) {
+	if !isUnformattedDiscoveryDevice(poolspace.ErrBootstrapUnformatted) {
+		t.Fatal("blank device must be skipped during Pool catalog discovery")
+	}
+	if !isUnformattedDiscoveryDevice(poolspace.ErrUnknownPoolFormat) {
+		t.Fatal("unknown/blank device must be skipped during Pool catalog discovery")
+	}
+	if isUnformattedDiscoveryDevice(poolspace.ErrLegacyPoolFormat) {
+		t.Fatal("legacy Pool format must not be silently skipped")
+	}
 }
