@@ -13,12 +13,8 @@
     "ready_dir": "/run/blockmesh/sanlock",
     "lockspace": "blockmesh-lockspace",
     "lock_device": "/dev/mapper/sanlock-lockspace",
-    "resource_offsets": {
-      "owner/vol-001": 1048576,
-      "reader-set/vol-001": 2097152,
-      "reader/vol-001/0": 3145728,
-      "wal/00112233445566778899aabbccddeeff/0": 4194304
-    }
+    "resource_index_offset": 1048576,
+    "resource_alignment_bytes": 1048576
   },
   "san": {
     "sg_persist_binary": "/usr/bin/sg_persist",
@@ -39,15 +35,7 @@
   "runtime": {
     "reader_heartbeat_interval": "250ms"
   },
-  "volumes": [
-    {
-      "volume_id": "vol-001",
-      "device_path": "/dev/mapper/mpathX",
-      "dm_device": "bm-vol-001",
-      "volume_index": 0,
-      "mode": "rw",
-      "reader_slot": 0,
-      "reader_epoch": 0
-    }
+  "discovery_devices": [
+    "/dev/mapper/mpatha"
   ]
 }
