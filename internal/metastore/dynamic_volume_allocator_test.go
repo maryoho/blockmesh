@@ -309,3 +309,10 @@ func TestOpenDynamicVolumeAllocatorReadOnlyDoesNotRepairHeader(t *testing.T){
  if ro.writeAttempted{t.Fatal("read-only catalog open attempted to repair the redundant header")}
 }
 func dynamicReservedGeometryMust(sb format.DynamicSuperblock)uint64{h,_,err:=dynamicReservedGeometry(sb);if err!=nil{panic(err)};return h.RegionStart}
+
+func TestReadOnlyDynamicVolumeAllocatorRejectsMutation(t *testing.T) {
+ dev,sb:=dynamicVolumeAllocatorFixture(t)
+ if err:=FormatDynamicVolumeAllocator(dev,sb);err!=nil{t.Fatal(err)}
+ a,err:=OpenDynamicVolumeAllocatorReadOnly(dev,sb);if err!=nil{t.Fatal(err)}
+ if _,err=a.AllocateVolume(0,dynamicVolumeDescriptor(sb,"readonly"),dynamicVolumeTestCommitter{dev});!errors.Is(err,ErrDynamicVolumeAllocatorReadOnly){t.Fatalf("expected read-only mutation rejection, got %v",err)}
+}

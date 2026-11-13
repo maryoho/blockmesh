@@ -21,6 +21,7 @@ const (
 )
 
 var ErrDynamicVolumeAllocatorUnformatted = errors.New("BMPOOL03 reserved-region allocator is not formatted")
+var ErrDynamicVolumeAllocatorReadOnly = errors.New("BMPOOL03 Volume catalog was opened read-only")
 var ErrDynamicVolumeSpace = errors.New("BMPOOL03 reserved metadata region has insufficient contiguous space")
 
 type dynamicReservedHeader struct {
@@ -79,6 +80,7 @@ type DynamicVolumeAllocator struct {
 	header dynamicReservedHeader
 	headerSlot uint64
 	bitmap []byte
+	readOnly bool
 }
 
 func dynamicReservedGeometry(sb format.DynamicSuperblock) (dynamicReservedHeader,uint64,error) {
@@ -196,7 +198,7 @@ func openDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock,repair bo
 	bitmap:=make([]byte,best.h.BitmapPages*format.PageSize)
 	if err=readFullAt(dev,bitmap,int64((best.h.RegionStart+2)*format.PageSize));err!=nil{return nil,err}
 	if crc32.Checksum(bitmap,crcTable)!=best.h.BitmapCRC{return nil,errors.New("BMPOOL03 Reserved allocator bitmap CRC32C mismatch")}
-	a:=&DynamicVolumeAllocator{dev:dev,sb:sb,header:best.h,headerSlot:best.slot,bitmap:bitmap}
+	a:=&DynamicVolumeAllocator{dev:dev,sb:sb,header:best.h,headerSlot:best.slot,bitmap:bitmap,readOnly:!repair}
 	if len(valid)==1 && repair {
 		page,e:=best.h.encode();if e!=nil{return nil,e}
 		if e=writeFullAt(dev,page,int64((best.h.RegionStart+(1-best.slot))*format.PageSize));e!=nil{return nil,e}
@@ -210,6 +212,7 @@ func openDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock,repair bo
 // LifecyclePages in descriptor are requested sizes; their starts are assigned.
 func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolumeDescriptor,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,error) {
 	if a==nil { return d,ErrGeometry }
+	if a.readOnly{return d,ErrDynamicVolumeAllocatorReadOnly}
 	a.mu.Lock();defer a.mu.Unlock()
 	return a.allocateVolumeLocked(index,d,committer)
 }
@@ -293,6 +296,7 @@ func(a *DynamicVolumeAllocator) allocateVolumeLocked(index uint32,d format.Dynam
  // unchanged; otherwise an explicit allocator-layout migration is required.
  func(a *DynamicVolumeAllocator) ExpandRegion(dev Device,nextSB format.DynamicSuperblock,committer ClusterSafeCommitter) error {
 	if a==nil||dev==nil||committer==nil||!committer.ClusterSafe(){return ErrClusterSafeCommitterRequired}
+	if a.readOnly{return ErrDynamicVolumeAllocatorReadOnly}
 	a.mu.Lock();defer a.mu.Unlock()
 	if err:=nextSB.Validate();err!=nil{return err}
 	if nextSB.PoolUUID!=a.sb.PoolUUID||nextSB.Generation<a.sb.Generation||nextSB.Generation>a.sb.Generation+1||
@@ -330,6 +334,7 @@ func(a *DynamicVolumeAllocator) allocateVolumeLocked(index uint32,d format.Dynam
 func(a *DynamicVolumeAllocator) GrowVolume(index uint32,pages uint64,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,uint64,error){
 	var zero format.DynamicVolumeDescriptor
 	if a==nil||committer==nil||!committer.ClusterSafe()||pages==0{return zero,0,ErrClusterSafeCommitterRequired}
+	if a.readOnly{return zero,0,ErrDynamicVolumeAllocatorReadOnly}
 	a.mu.Lock();defer a.mu.Unlock()
 	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index);if err!=nil{return zero,0,err}
 	d,slot,err:=a.readDescriptorWithSlot(pair);if err!=nil{return zero,0,err}
@@ -411,6 +416,7 @@ type DynamicVolumeFencingProof interface {
 
 func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,proof DynamicVolumeFencingProof,committer ClusterSafeCommitter)(retErr error) {
 	if a==nil||ctx==nil||proof==nil||committer==nil||!committer.ClusterSafe(){return errors.New("allocator, context, fencing proof and cluster-safe committer are required")}
+	if a.readOnly{return ErrDynamicVolumeAllocatorReadOnly}
 	a.mu.Lock();defer a.mu.Unlock()
 	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index);if err!=nil{return err}
 	d,err:=a.readDescriptor(pair);if err!=nil{return err}

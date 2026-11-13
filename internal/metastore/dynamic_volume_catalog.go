@@ -75,6 +75,7 @@ func (a *DynamicVolumeAllocator) ensureUniqueVolumeName(name string,except uint3
 func (a *DynamicVolumeAllocator) CreateVolume(req VolumeCreateRequest, committer ClusterSafeCommitter) (VolumeCreateResult,error) {
 	var result VolumeCreateResult
 	if a==nil || committer==nil || !committer.ClusterSafe() { return result,ErrClusterSafeCommitterRequired }
+	if a.readOnly{return result,ErrDynamicVolumeAllocatorReadOnly}
 	if req.VolumeID=="" || len(req.VolumeID)>64 || !format.ValidDynamicVolumeName(req.Name) ||
 		req.SizeBytes==0 || req.SizeBytes%format.BlockSize!=0 ||
 		req.CreateToken==([16]byte{}) || req.ArenaPages==0 {
@@ -192,6 +193,7 @@ func (p heldVolumeDeleteProof) AcquireVolumeFencing(context.Context,string,uint6
 }
 func (a *DynamicVolumeAllocator) DeleteVolume(ctx context.Context,index uint32,proof DynamicVolumeDeleteProof,committer ClusterSafeCommitter) error {
 	if a==nil||ctx==nil||proof==nil||committer==nil||!committer.ClusterSafe(){return errors.New("allocator, context, cluster-wide delete proof and cluster-safe committer are required")}
+	if a.readOnly{return ErrDynamicVolumeAllocatorReadOnly}
 	a.mu.Lock()
 	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index)
 	if err!=nil{a.mu.Unlock();return err}

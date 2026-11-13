@@ -69,7 +69,7 @@ func (b *catalogLifecycleBackend) volumesForPool(ctx context.Context, pool disco
  if generation==0{return nil,errors.New("Pool MetadataView has zero generation")}
  sb,err:=allocator.OpenDynamicSuperblockPair(metadata);if err!=nil{return nil,fmt.Errorf("open Pool %s superblock: %w",pool.Name,err)}
  if sb.PoolUUID!=record.PoolUUID||sb.ViewGeneration!=generation{return nil,fmt.Errorf("Pool %s superblock identity or MetadataView generation mismatch",pool.Name)}
- catalog,err:=metastore.OpenDynamicVolumeAllocatorReadOnly(metadata,sb);if err!=nil{return nil,fmt.Errorf("open Pool %s Volume catalog: %w",pool.Name,err)}
+ catalog,err:=metastore.OpenDynamicVolumeAllocator(metadata,sb);if err!=nil{return nil,fmt.Errorf("open Pool %s Volume catalog: %w",pool.Name,err)}
  entries,err:=catalog.ListVolumes();if err!=nil{return nil,fmt.Errorf("list Pool %s Volume descriptors: %w",pool.Name,err)}
  out:=make([]discoveredVolume,0,len(entries));for _,entry:=range entries{if err:=ctx.Err();err!=nil{return nil,err};out=append(out,discoveredVolume{Pool:pool.Name,PoolUUID:pool.UUID,Device:pool.Device,Index:entry.Index,Descriptor:entry.Descriptor})};return out,nil
 }
