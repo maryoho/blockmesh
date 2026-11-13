@@ -200,7 +200,7 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	if err!=nil{return err}
 	socketPath:=cfg.Control.SocketPath
 	if strings.TrimSpace(socketPath)=="" { socketPath="/run/blockmesh/control.sock" }
-	lifecycleServer,err:=control.New(control.Config{Path:socketPath,Handler:control.LifecycleHandler{Backend:newCatalogLifecycleBackend(cfg.DiscoveryDevices)}})
+	lifecycleServer,err:=control.New(control.Config{Path:socketPath,Handler:control.LifecycleHandler{Backend:newCatalogLifecycleBackend(cfg.DiscoveryDevices, locker)}})
 	if err!=nil{return fmt.Errorf("construct lifecycle control server: %w",err)}
 	defer lifecycleServer.Close()
 
