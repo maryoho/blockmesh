@@ -224,3 +224,13 @@ journalctl -u bm-metad --since "-30 min" --no-pager
 ```
 
 同时记录 Pool UUID、Volume UUID、设备 WWID、OwnerEpoch、ViewGeneration、AG/WAL 状态、fio job 文件和退出码。
+
+## daemon startup and lifecycle readiness
+
+`bm-metad` first acquires its singleton lock and opens/reconciles the
+kernel Metadata Service device. It then fences and removes stale local
+BlockMesh DM tables left by a previous daemon instance. Only after this
+recovery completes does it start the request-consumer loop and expose the
+lifecycle Unix socket. A client should treat a missing socket or a rejected
+connection during startup as "daemon not ready" and retry; the daemon does
+not intentionally accept Pool/Volume lifecycle actions before recovery.
