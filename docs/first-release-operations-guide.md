@@ -1,8 +1,8 @@
 # BlockMesh 第一版操作指南与验收计划
 
-> 文档状态：跟随 `main` 更新。当前代码基线：以 GitHub `main` 最新提交为准（2026-11-12）；P4-1.3.5.3 Catalog、删除前 Data Retire 强制回收、sparse zero-read 和 P4-1.3.5.4 RPC transport/action router 已进入实现。
+> 文档状态：跟随 `main` 更新。当前代码基线：2026-11-13。P4-1.3.5.3 Volume Catalog、P4-1.3.5.4 Unix socket RPC、P4-1.3.5.5 Pool 初始化与 Volume RW 激活/停用已有代码接线和 CI 单测。
 >
-> **重要：本指南同时说明目标操作流程和当前代码可用边界。当前还没有完成 `bmctl` → `bm-metad` 生命周期 RPC 闭环，因此下文的 Pool/Volume 简化命令是第一版目标接口，不代表当前提交已经可以直接执行。不要在生产 LUN 上尝试尚未接通的命令。**
+> **重要：命令链路已接入不等于生产验收完成。当前仍缺跨节点 interrupted Pool bootstrap 的 OwnerRecord/恢复闭环、Volume Delete 的生产 Data Retire 后端、Pool Destroy、RO 动态 Reader 生命周期，以及真实 SAN/目标内核端到端验证。未通过这些验收前，不要在生产 LUN 上执行破坏性操作。**
 
 ## 1. 第一版交付目标（优先级最高）
 
@@ -60,18 +60,19 @@ bmctl pool destroy pool0
 | 能力 | 当前状态 | 当前能否作为第一版用户功能 |
 |---|---|---|
 | BMPOOL03 Bootstrap / Extent Map / 动态几何 | 已实现并有测试 | 尚需由生命周期命令统一调用 |
-| Pool Catalog 与按 LUN 只读发现 | P4-1.3.5.2 已实现 | RPC/daemon 注册尚未接通 |
-| `poolinit.Initialize` 自动初始化服务 | 已实现并有单测，要求调用方提供分布式锁和真实 Owner Lease | 尚未接入 `bmctl pool create` |
-| Dynamic Volume Reserved allocator | 已实现 | 可供后续 Catalog 使用 |
-| Volume Catalog（Descriptor v5） | P4-1.3.5.3 已实现持久化名称/UUID/逻辑容量/CreateToken，支持 create/list/find/delete API；双副本 Descriptor 与 Reserved bitmap 由 cluster-safe WAL 原子提交 | CLI/RPC 尚未接通；生产删除仍要求集群级 Reader-set guard |
-| `bmctl` Cobra 生命周期命令树与参数解析 | 已实现 | 命令会请求 Unix socket；服务端尚未实现 |
-| `bm-metad` 守护进程 | 已有初始生产入口和 systemd unit | 目前仍是静态 `volumes[]` 配置启动，不是动态 Pool/Volume 控制面 |
-| bm-metad Unix socket 生命周期 RPC | 尚未实现 | 不可用 |
-| DM + Metadata Service 动态 Volume 激活/停用闭环 | 部分组件已存在 | 尚未完成动态目录发现和生命周期接线 |
+| Pool Catalog 与按 LUN 只读发现 | 已实现 | 通过 `discovery_devices` 动态扫描 |
+| `poolinit.Initialize` 自动初始化服务 | 已实现 | `bmctl pool create` 已接入 sanlock Pool Owner 锁、WWID 匹配的 SCSI PR 注册/Reservation 和初始化流程；跨节点中断恢复仍 fail-closed |
+| Dynamic Volume Reserved allocator | 已实现 | 已供 Volume Catalog 使用 |
+| Volume Catalog（Descriptor v5） | 已实现 create/list/find/delete 元数据 API、CreateToken 幂等和 cluster-safe WAL | `volume create/list/info` 已接入；生产 delete 的 Data Retire 后端仍未接入 |
+| `bmctl` Cobra 生命周期命令树与参数解析 | 已实现 | 生命周期命令通过 Unix socket 请求 `bm-metad` |
+| `bm-metad` 守护进程 | 已实现动态目录发现和运行时接线 | 仍保留兼容用静态 `volumes[]` 配置 |
+| bm-metad Unix socket 生命周期 RPC | 已实现 | Pool/Volume list/info/create 与 RW activate/deactivate 已接入 |
+| DM + Metadata Service 动态 Volume 激活/停用 | 已接入 RW 路径 | 已有 closed/fenced DM table、OwnerCoordinator、WAL recovery、gate admission、drain/remove；需真实 SAN 和目标内核验收 |
+| Pool Destroy / Volume Delete / 动态 RO | 未完成生产后端 | 不可用 |
 | 4 MiB 分配、清零、Mapping WAL 事务、COW、Discard retire | 底层数据路径已实现；稀疏 Mapping Vector 已增加 Unmapped 标记，Kernel 对未映射读区间执行 zero-fill | 仍需在目标内核和真实块设备上做端到端 I/O/重启验收 |
 | 真实 SAN / multipath / SCSI PR 双节点故障测试 | 未在目标硬件完成 | 不可宣称生产验收通过 |
 
-当前 `bmctl pool create/list/info` 和 `bmctl volume create/list/info/activate/deactivate/delete` 还不能作为可用命令。不要把 Cobra help 能显示命令、内部 Go API 单测通过或 CI 内核模块编译通过，等同于用户操作闭环已经完成。
+当前 `pool create/list/info`、`volume create/list/info`、`volume activate <uuid> rw` 和 `volume deactivate` 已有 RPC/backend 实现，但尚未完成真实 SAN 上的端到端验收。`pool destroy`、`volume delete` 和动态 `ro` 仍不可用。不要把 Go 单测或 CI 内核模块编译通过，等同于生产验收完成。
 
 ## 4. 当前可执行的开发验证
 
@@ -199,10 +200,10 @@ multipath -ll
 后续开发按可运行主链路优先，避免继续扩展与第一版无关的功能：
 
 1. **P4-1.3.5.3 Volume Catalog：** Descriptor v5、持久化 Catalog API、CreateToken 幂等重试、AG 绑定容量校验已实现；删除 API 现在强制先执行 Data Retire 回收，并在同一个集群 fencing guard 下完成 Descriptor 释放。
-2. **P4-1.3.5.4 Lifecycle RPC：** 实现 Unix socket 服务端、Pool 动态发现/注册和 CLI 接线；优先先打通 Pool create/list/info。
-3. **P4-1.3.5.5 Volume 生命周期：** 接通 Volume create/list/info/delete 和动态 RW activate；不再使用静态 `volumes[]` 作为权威清单。
-4. **P4-1.3.5.6 Deactivate/Recovery：** 完成 drain、关闭 DM、释放 lease 和 daemon crash reconciliation。
-5. **P4-1.3.5.7 第一版端到端验收：** 单节点 RW，从空 LUN 执行 pool create → volume create → activate → fio（含稀疏零读、首次写、COW、discard）→ deactivate → daemon restart → activate → delete。
+2. **P4-1.3.5.4 Lifecycle RPC：** Unix socket 服务端、动态 Pool/Volume 发现和 CLI 接线已实现。
+3. **P4-1.3.5.5 Pool/Volume 生命周期：** Pool create 初始化、Volume create/list/info、RW activate 已接入；Pool destroy、Volume delete 和 RO 仍待完成。
+4. **P4-1.3.5.6 Deactivate/Recovery：** RW deactivate 的 drain、DM remove、lease release 顺序和 daemon 启动时 stale DM 清理已接入；跨节点 interrupted Pool bootstrap 的持久 OwnerRecord/恢复仍待实现。
+5. **P4-1.3.5.7 第一版端到端验收：** 需在真实测试 LUN 执行 pool create → volume create → activate → fio（含稀疏零读、首次写、COW、discard）→ deactivate → daemon restart → activate。Volume delete 在生产 Retire 后端接入前不纳入可执行步骤。
 6. **第一版发布门槛：** Go test/race/vet、Linux 5.15 模块构建、真实目标内核加载、单机真实块设备读写/重启恢复全部通过。双节点 SAN、RO 并发和故障切换作为独立验收，不以跳过安全机制换取进度。
 
 ## 8. 故障信息收集
