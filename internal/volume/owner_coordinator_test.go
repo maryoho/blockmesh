@@ -222,3 +222,7 @@ func TestOwnerCoordinatorRejectsFencingProofWithoutMatchingOwnerRecord(t *testin
 	if err:=coordinator.ProveVolumeFenced(context.Background(),"vol",12);err==nil{t.Fatal("missing OwnerRecord with prior descriptor epoch accepted")}
 	if !lease.closed{t.Fatal("Owner resource leaked after missing-record proof rejection")}
 }
+
+func TestOwnerResourceNameIsStable(t *testing.T) {
+ if got:=OwnerResourceName("vol-123");got!="owner/vol-123"{t.Fatalf("unexpected Owner resource name %q",got)}
+}

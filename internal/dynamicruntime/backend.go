@@ -103,7 +103,7 @@ func (b *Backend) OpenReadWrite(ctx context.Context, spec metastore.VolumeRuntim
 		return nil,cause
 	}
 	if owner == nil || !owner.Valid() || owner.Epoch() == 0 || owner.VolumeID() != spec.VolumeID ||
-		owner.Resource() != "volume:"+spec.VolumeID || !owner.ReservationVerified() ||
+		owner.Resource() != volume.OwnerResourceName(spec.VolumeID) || !owner.ReservationVerified() ||
 		!owner.PreviousOwnerFenced() || !owner.OldOwnerIODrained() {
 		return closeOwnerOnError(ErrOwnerProof)
 	}

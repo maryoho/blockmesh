@@ -14,6 +14,10 @@ import (
 	"blockmesh/internal/runtimeevents"
 )
 
+// OwnerResourceName is the canonical sanlock resource identity for a Volume Owner.
+// Keep this name identical in the coordinator, runtime proof validation and daemon configuration.
+func OwnerResourceName(volumeID string) string { return "owner/" + volumeID }
+
 var (
 	ErrOwnerRecordConflict = errors.New("authoritative owner record changed concurrently")
 	ErrOwnerIdentityReuse = errors.New("same node/boot owner identity cannot be safely fenced as a previous owner")

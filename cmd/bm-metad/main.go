@@ -126,7 +126,7 @@ func run(cfg daemonConfig) error {
 	for _,v:=range cfg.Volumes{records.volumes[v.VolumeID]=v;volumeByID[v.VolumeID]=v}
 
 	ownerCoordinator,err:=volume.NewOwnerCoordinator(volume.OwnerCoordinatorConfig{
-		Locker:locker,ResourceFor:func(id string)string{return "owner/"+id},
+		Locker:locker,ResourceFor:volume.OwnerResourceName,
 		Records:records,Fencer:fencer,Reservation:reservation,
 		ReadEpoch:records.ReadEpoch,
 		DrainOldOwner:func(ctx context.Context,id string,old volume.OwnerRecord)error{
