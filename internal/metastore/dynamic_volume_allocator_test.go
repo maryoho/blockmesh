@@ -293,3 +293,21 @@ func TestDynamicVolumeCatalogDeleteRequiresClusterWideGuard(t *testing.T) {
 	if err=a.DeleteVolume(context.Background(),created.Entry.Index,&dynamicVolumeTestDeleteProof{},committer);err!=nil{t.Fatal(err)}
 	if _,err=a.FindVolumeByID(req.VolumeID);!errors.Is(err,ErrVolumeCatalogNotFound){t.Fatalf("deleted Volume still visible: %v",err)}
 }
+
+
+func TestDynamicVolumeAllocatorReadOnlyDoesNotRepairOrMutate(t *testing.T) {
+	dev, sb := dynamicVolumeAllocatorFixture(t)
+	if err := FormatDynamicVolumeAllocator(dev, sb); err != nil { t.Fatal(err) }
+	// Damage one redundant header while preserving the other valid copy.
+	start := sb.Geometry.ReservedOffset
+	dev.b[start+format.PageSize] = 0x7f
+	before := append([]byte(nil), dev.b[start:start+2*format.PageSize]...)
+	ro, err := OpenDynamicVolumeAllocatorReadOnly(dev, sb)
+	if err != nil { t.Fatal(err) }
+	after := dev.b[start:start+2*format.PageSize]
+	if string(before) != string(after) { t.Fatal("read-only open repaired a redundant allocator header") }
+	if _, err := ro.AllocateVolume(0, dynamicVolumeDescriptor(sb, "read-only"), dynamicVolumeTestCommitter{dev}); !errors.Is(err, ErrReadOnlyVolumeAllocator) {
+		t.Fatalf("read-only allocator allowed mutation: %v", err)
+	}
+	if string(before) != string(dev.b[start:start+2*format.PageSize]) { t.Fatal("rejected read-only mutation changed metadata") }
+}

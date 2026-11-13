@@ -22,6 +22,7 @@ const (
 
 var ErrDynamicVolumeAllocatorUnformatted = errors.New("BMPOOL03 reserved-region allocator is not formatted")
 var ErrDynamicVolumeSpace = errors.New("BMPOOL03 reserved metadata region has insufficient contiguous space")
+var ErrReadOnlyVolumeAllocator = errors.New("BMPOOL03 Volume allocator is read-only")
 
 type dynamicReservedHeader struct {
 	Generation uint64
@@ -79,6 +80,7 @@ type DynamicVolumeAllocator struct {
 	header dynamicReservedHeader
 	headerSlot uint64
 	bitmap []byte
+	readOnly bool
 }
 
 func dynamicReservedGeometry(sb format.DynamicSuperblock) (dynamicReservedHeader,uint64,error) {
@@ -168,7 +170,12 @@ func dynamicReservedFormatMarkerMatches(b []byte,h dynamicReservedHeader) bool {
 	return string(b)==string(encodeDynamicReservedFormatMarker(h))
 }
 
-func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) {
+func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) { return openDynamicVolumeAllocator(dev,sb,true) }
+
+// OpenDynamicVolumeAllocatorReadOnly validates the persisted allocator without repairing or writing either header copy.
+func OpenDynamicVolumeAllocatorReadOnly(dev Device,sb format.DynamicSuperblock) (*DynamicVolumeAllocator,error) { return openDynamicVolumeAllocator(dev,sb,false) }
+
+func openDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock,repair bool) (*DynamicVolumeAllocator,error) {
 	if dev==nil{return nil,errors.New("nil BMPOOL03 MetadataView")}
 	expected,bitmapPages,err:=dynamicReservedGeometry(sb);if err!=nil{return nil,err}
 	var valid []struct{h dynamicReservedHeader;slot uint64}
@@ -187,8 +194,8 @@ func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*Dynami
 	bitmap:=make([]byte,best.h.BitmapPages*format.PageSize)
 	if err=readFullAt(dev,bitmap,int64((best.h.RegionStart+2)*format.PageSize));err!=nil{return nil,err}
 	if crc32.Checksum(bitmap,crcTable)!=best.h.BitmapCRC{return nil,errors.New("BMPOOL03 Reserved allocator bitmap CRC32C mismatch")}
-	a:=&DynamicVolumeAllocator{dev:dev,sb:sb,header:best.h,headerSlot:best.slot,bitmap:bitmap}
-	if len(valid)==1{
+	a:=&DynamicVolumeAllocator{dev:dev,sb:sb,header:best.h,headerSlot:best.slot,bitmap:bitmap,readOnly:!repair}
+	if repair && len(valid)==1{
 		page,e:=best.h.encode();if e!=nil{return nil,e}
 		if e=writeFullAt(dev,page,int64((best.h.RegionStart+(1-best.slot))*format.PageSize));e!=nil{return nil,e}
 		if e=dev.Sync();e!=nil{return nil,e}
@@ -201,6 +208,7 @@ func OpenDynamicVolumeAllocator(dev Device,sb format.DynamicSuperblock) (*Dynami
 // LifecyclePages in descriptor are requested sizes; their starts are assigned.
 func(a *DynamicVolumeAllocator) AllocateVolume(index uint32,d format.DynamicVolumeDescriptor,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,error) {
 	if a==nil { return d,ErrGeometry }
+	if a.readOnly { return d,ErrReadOnlyVolumeAllocator }
 	a.mu.Lock();defer a.mu.Unlock()
 	return a.allocateVolumeLocked(index,d,committer)
 }
@@ -320,6 +328,7 @@ func(a *DynamicVolumeAllocator) allocateVolumeLocked(index uint32,d format.Dynam
 // location and synced before the descriptor/bitmap transaction is committed.
 func(a *DynamicVolumeAllocator) GrowVolume(index uint32,pages uint64,committer ClusterSafeCommitter)(format.DynamicVolumeDescriptor,uint64,error){
 	var zero format.DynamicVolumeDescriptor
+	if a!=nil && a.readOnly { return zero,0,ErrReadOnlyVolumeAllocator }
 	if a==nil||committer==nil||!committer.ClusterSafe()||pages==0{return zero,0,ErrClusterSafeCommitterRequired}
 	a.mu.Lock();defer a.mu.Unlock()
 	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index);if err!=nil{return zero,0,err}
@@ -401,6 +410,7 @@ type DynamicVolumeFencingProof interface {
 }
 
 func(a *DynamicVolumeAllocator) ReleaseVolume(ctx context.Context,index uint32,proof DynamicVolumeFencingProof,committer ClusterSafeCommitter)(retErr error) {
+	if a!=nil && a.readOnly { return ErrReadOnlyVolumeAllocator }
 	if a==nil||ctx==nil||proof==nil||committer==nil||!committer.ClusterSafe(){return errors.New("allocator, context, fencing proof and cluster-safe committer are required")}
 	a.mu.Lock();defer a.mu.Unlock()
 	pair,err:=format.DynamicVolumeDescriptorPairOffset(a.sb,index);if err!=nil{return err}
