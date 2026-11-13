@@ -23,6 +23,7 @@ static_assert(sizeof(struct bm_uapi_mapping) == BM_UAPI_MAPPING_SIZE);
 struct bm_target {
 	struct dm_dev *dev;
 	sector_t start;
+	sector_t data_sectors;
 	spinlock_t state_lock;
 	struct mutex control_lock;
 	wait_queue_head_t drain_wait;
@@ -134,7 +135,7 @@ static int bm_map(struct dm_target *ti, struct bio *bio)
 		}
 	}
 	ret = bm_queue_submit(bm->queue_id, bm->queue_cookie, &request, bio,
-			      bm->dev->bdev, bm->start, ti->len, sector_offset, block_count);
+			      bm->dev->bdev, bm->start, bm->data_sectors, sector_offset, block_count);
 	if (!ret)
 		return DM_MAPIO_SUBMITTED;
 fail:
@@ -376,7 +377,7 @@ static void bm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 static int bm_iterate_devices(struct dm_target *ti, iterate_devices_callout_fn fn, void *data)
 {
 	struct bm_target *bm = ti->private;
-	return fn(ti, bm->dev, bm->start, ti->len, data);
+	return fn(ti, bm->dev, bm->start, bm->data_sectors, data);
 }
 static void bm_dtr(struct dm_target *ti)
 {
@@ -418,9 +419,16 @@ static int bm_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (ret) { ti->error = "cannot create BlockMesh queue"; kfree(bm); return ret; }
 	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &bm->dev);
 	if (ret) { ti->error = "cannot open underlying device"; bm_queue_destroy(bm->queue_id, bm->queue_cookie); kfree(bm); return ret; }
-	if (bm->start > bdev_nr_sectors(bm->dev->bdev) ||
-	    ti->len > bdev_nr_sectors(bm->dev->bdev) - bm->start) {
-		ti->error = "target range exceeds underlying device";
+	if (bm->start >= bdev_nr_sectors(bm->dev->bdev)) {
+		ti->error = "data start exceeds underlying device";
+		dm_put_device(ti, bm->dev); bm_queue_destroy(bm->queue_id, bm->queue_cookie); kfree(bm); return -EINVAL;
+	}
+	/* A thin Volume may be larger than the physical DataView. BIO logical
+	 * sectors are bounded by ti->len; returned physical mappings are bounded
+	 * by data_sectors in bm_queue_submit/bm_finish_pending. */
+	bm->data_sectors = bdev_nr_sectors(bm->dev->bdev) - bm->start;
+	if (!bm->data_sectors) {
+		ti->error = "underlying DataView is empty";
 		dm_put_device(ti, bm->dev); bm_queue_destroy(bm->queue_id, bm->queue_cookie); kfree(bm); return -EINVAL;
 	}
 	ti->private = bm;

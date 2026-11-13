@@ -172,6 +172,7 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	if err!=nil{return fmt.Errorf("construct BMPOOL03 Backend: %w",err)}
 	dmSetup:=dmowner.DMSetupGate{}
 	tables:=dmowner.TableManager{}
+	dataViews:=dmowner.LinearViewManager{}
 	gate,err:=dynamicruntime.NewDMRequestGateWithRemoval(dmSetup,dmSetup,func(id string)string{
 		v,e:=resolveVolume(id);if e!=nil{return ""};return v.DMDevice
 	},func(ctx context.Context,id string)error{return tables.Remove(ctx,id)})
@@ -180,7 +181,7 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	if err!=nil{return err}
 	manager,err:=dynamicruntime.NewIntegratedDynamicVolumeRuntimeManager(backend,ownerCoordinator,gate,heartbeat)
 	if err!=nil{return fmt.Errorf("construct integrated Volume Runtime manager: %w",err)}
-	lifecycleBackend.attachRuntime(manager,tables,dmSetup,cfg.NodeID,cfg.BootID)
+	lifecycleBackend.attachRuntime(manager,tables,dmSetup,dataViews,cfg.NodeID,cfg.BootID)
 	processor,err:=metaservice.NewDynamicPoolRuntimeProcessor(manager)
 	if err!=nil{return err}
 	requestTimeout,err:=parseDuration("service.request_timeout",cfg.Service.RequestTimeout,metaservice.DefaultRequestTimeout)

@@ -34,6 +34,7 @@ type catalogLifecycleBackend struct {
 	runtime *dynamicruntime.DynamicVolumeRuntimeManager
 	tables dmowner.TableManager
 	dmSetup dmowner.DMSetupGate
+	dataViews dmowner.LinearViewManager
 	nodeID string
 	bootID string
 }
@@ -134,8 +135,8 @@ func (b *catalogLifecycleBackend) findVolume(ctx context.Context,id string) (dis
 }
 func (b *catalogLifecycleBackend) VolumeInfo(ctx context.Context,id string) (any,error) { return b.findVolume(ctx,id) }
 
-func (b *catalogLifecycleBackend) attachRuntime(manager *dynamicruntime.DynamicVolumeRuntimeManager,tables dmowner.TableManager,setup dmowner.DMSetupGate,nodeID,bootID string) {
-	b.runtime=manager;b.tables=tables;b.dmSetup=setup;b.nodeID=nodeID;b.bootID=bootID
+func (b *catalogLifecycleBackend) attachRuntime(manager *dynamicruntime.DynamicVolumeRuntimeManager,tables dmowner.TableManager,setup dmowner.DMSetupGate,dataViews dmowner.LinearViewManager,nodeID,bootID string) {
+	b.runtime=manager;b.tables=tables;b.dmSetup=setup;b.dataViews=dataViews;b.nodeID=nodeID;b.bootID=bootID
 }
 
 func newVolumeUUID() (string, error) {
@@ -209,8 +210,18 @@ func (b *catalogLifecycleBackend) VolumeActivate(ctx context.Context,id,mode str
 	if mode!="rw" { return nil,errors.New("dynamic RO activation requires a cluster-coordinated Reader slot allocator and is not enabled yet") }
 	item,err:=b.findVolume(ctx,id);if err!=nil{return nil,err}
 	dmName,err:=dmowner.BlockMeshDMName(id);if err!=nil{return nil,err}
+	parent,err:=device.OpenBlockDevice(item.Device,false,false);if err!=nil{return nil,fmt.Errorf("open Pool LUN to resolve DataView extents: %w",err)}
+	bootstrap,err:=poolspace.OpenBootstrap(parent);if err!=nil{_=parent.Close();return nil,err}
+	var linearExtents []dmowner.LinearExtent
+	for _,extent:=range bootstrap.Extents(){if extent.Kind==poolspace.Data{
+		if extent.Start%512!=0||extent.Length%512!=0{_=parent.Close();return nil,errors.New("Pool Data extent is not 512-byte aligned")}
+		linearExtents=append(linearExtents,dmowner.LinearExtent{StartSector:extent.Start/512,Sectors:extent.Length/512})
+	}}
+	_=parent.Close()
+	dataDevice,err:=b.dataViews.Ensure(ctx,item.PoolUUID,item.Device,linearExtents)
+	if err!=nil{return nil,fmt.Errorf("create/verify Pool DataView linear device: %w",err)}
 	if _,err=b.tables.Ensure(ctx,dmowner.TableSpec{VolumeID:id,LogicalSizeBytes:item.Descriptor.LogicalSizeBytes,
-		BackingDevice:item.Device,NodeID:b.nodeID,BootID:b.bootID});err!=nil{return nil,fmt.Errorf("create closed/fenced DM target: %w",err)}
+		BackingDevice:dataDevice,DataStartSector:0,NodeID:b.nodeID,BootID:b.bootID});err!=nil{return nil,fmt.Errorf("create closed/fenced DM target: %w",err)}
 	spec:=metastore.VolumeRuntimeSpec{VolumeID:id,Mode:metastore.VolumeRuntimeReadWrite,NodeID:b.nodeID,BootID:b.bootID,VolumeIndex:item.Index}
 	if err=b.runtime.Activate(ctx,spec);err!=nil{return nil,fmt.Errorf("activate fenced BMPOOL03 RW Runtime: %w",err)}
 	return map[string]any{"volume_id":id,"mode":"rw","dm_device":dmName,"device":"/dev/mapper/"+dmName},nil

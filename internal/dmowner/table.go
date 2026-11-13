@@ -16,6 +16,7 @@ type TableSpec struct {
 	VolumeID string
 	LogicalSizeBytes uint64
 	BackingDevice string
+	DataStartSector uint64
 	NodeID string
 	BootID string
 	ReadOnly bool
@@ -71,7 +72,7 @@ func (m TableManager) table(spec TableSpec) (name,line string,readOnly bool,err 
 	if boot,err=dmIdentityHex(spec.BootID);err!=nil{return}
 	if name,err=BlockMeshDMName(spec.VolumeID);err!=nil{return}
 	sectors:=spec.LogicalSizeBytes/512
-	line=fmt.Sprintf("0 %d blockmesh %s 0 %s %s %s",sectors,spec.BackingDevice,volume,node,boot)
+	line=fmt.Sprintf("0 %d blockmesh %s %d %s %s %s",sectors,spec.BackingDevice,spec.DataStartSector,volume,node,boot)
 	readOnly=spec.ReadOnly
 	return
 }
@@ -165,4 +166,49 @@ func (m TableManager) RemoveName(ctx context.Context,name string) error {
 	if err:=m.requireClosedFenced(ctx,r,b,name);err!=nil{return fmt.Errorf("refuse to remove non-fenced DM table %s: %w",name,err)}
 	if _,err:=r.Run(ctx,b,"remove",name);err!=nil{return fmt.Errorf("remove DM table %s: %w",name,err)}
 	return nil
+}
+
+
+// LinearExtent describes one physical Pool Data extent in 512-byte sectors.
+type LinearExtent struct { StartSector uint64; Sectors uint64 }
+
+// LinearViewManager builds a stable DM-linear device for the Pool DataView.
+// The BlockMesh target addresses physical DataView block IDs; this translation
+// layer maps those logical DataView sectors onto possibly fragmented extents
+// on the same parent LUN.
+type LinearViewManager struct { Runner CommandRunner; Binary string }
+
+func DataViewDMName(poolUUID string) (string,error) {
+	id,err:=dmUUIDHex(poolUUID);if err!=nil{return "",err}
+	return "bmd-"+id,nil
+}
+
+func (m LinearViewManager) Ensure(ctx context.Context,poolUUID,parent string,extents []LinearExtent) (string,error) {
+	if ctx==nil{return "",errors.New("DataView context is required")}
+	if strings.TrimSpace(parent)==""||strings.ContainsAny(parent," \t\r\n"){return "",errors.New("invalid Pool parent device path")}
+	if len(extents)==0{return "",errors.New("Pool has no allocated Data extents")}
+	name,err:=DataViewDMName(poolUUID);if err!=nil{return "",err}
+	logical:=uint64(0)
+	lines:=make([]string,0,len(extents))
+	for i,e:=range extents {
+		if e.Sectors==0||e.StartSector>^uint64(0)-e.Sectors||logical>^uint64(0)-e.Sectors{return "",fmt.Errorf("invalid Data extent %d",i)}
+		lines=append(lines,fmt.Sprintf("%d %d linear %s %d",logical,e.Sectors,parent,e.StartSector))
+		logical+=e.Sectors
+	}
+	want:=strings.Join(lines,"\n")
+	r,b:=m.Runner,m.Binary
+	if r==nil{r=ExecRunner{}}
+	if b==""{b="dmsetup"}
+	if out,e:=r.Run(ctx,b,"table",name);e==nil {
+		if strings.TrimSpace(string(out))!=want{return "",fmt.Errorf("%w: existing Pool DataView DM table %s differs from current Bootstrap Extent Map",ErrDMTableConflict,name)}
+		return "/dev/mapper/"+name,nil
+	}
+	_,createErr:=r.Run(ctx,b,"create",name,"--table",want)
+	out,lookupErr:=r.Run(ctx,b,"table",name)
+	if lookupErr!=nil {
+		if createErr!=nil{return "",fmt.Errorf("create Pool DataView DM table %s: %w",name,createErr)}
+		return "",fmt.Errorf("Pool DataView DM table %s is not visible after successful create",name)
+	}
+	if strings.TrimSpace(string(out))!=want{return "",fmt.Errorf("%w after Pool DataView create",ErrDMTableConflict)}
+	return "/dev/mapper/"+name,nil
 }
