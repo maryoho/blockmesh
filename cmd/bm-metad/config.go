@@ -50,10 +50,16 @@ func(c daemonConfig)validate()error{
  rindexEnabled:=c.Sanlock.ResourceIndexOffset!=0
  if rindexEnabled { if c.Sanlock.ResourceAlignmentBytes!=1<<20&&c.Sanlock.ResourceAlignmentBytes!=2<<20&&c.Sanlock.ResourceAlignmentBytes!=4<<20&&c.Sanlock.ResourceAlignmentBytes!=8<<20{return errors.New("sanlock.resource_alignment_bytes must be 1, 2, 4 or 8 MiB when resource_index_offset is configured")};if c.Sanlock.ResourceIndexOffset%c.Sanlock.ResourceAlignmentBytes!=0{return errors.New("sanlock.resource_index_offset must align to resource_alignment_bytes")} } else if len(c.Sanlock.ResourceOffsets)==0{return errors.New("configure sanlock.resource_offsets or sanlock.resource_index_offset for dynamic resource allocation") }
  used:=map[uint64]string{}
- resourceAlignment:=uint64(512);if rindexEnabled{resourceAlignment=c.Sanlock.ResourceAlignmentBytes}
+resourceAlignment:=uint64(512);if rindexEnabled{resourceAlignment=c.Sanlock.ResourceAlignmentBytes}
+var rindexEnd uint64
+if rindexEnabled {
+ if c.Sanlock.ResourceIndexOffset>^uint64(0)-2*resourceAlignment{return errors.New("sanlock RINDEX region overflows address space")}
+ rindexEnd=c.Sanlock.ResourceIndexOffset+2*resourceAlignment
+}
  for name,off:=range c.Sanlock.ResourceOffsets{
   if strings.TrimSpace(name)==""||off==0||off%resourceAlignment!=0{return fmt.Errorf("invalid sanlock resource offset for %q: offsets must be nonzero and aligned to the configured sanlock resource alignment",name)}
   
+  if rindexEnabled&&off>=c.Sanlock.ResourceIndexOffset&&off<rindexEnd{return fmt.Errorf("static sanlock resource %q overlaps the RINDEX metadata region",name)}
   if prev,ok:=used[off];ok{return fmt.Errorf("sanlock resources %q and %q share offset %d",prev,name,off)}
   used[off]=name
  }
