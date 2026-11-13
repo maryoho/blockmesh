@@ -12,7 +12,7 @@ import (
 
 func TestCatalogLifecycleBackendMutationFailsClosed(t *testing.T) {
 	b:=newCatalogLifecycleBackend(nil,nil)
-	if _,err:=b.PoolCreate(context.Background(),control.PoolCreateArgs{Name:"p",Device:"/dev/sdb"});err==nil||!strings.Contains(err.Error(),"not available yet"){t.Fatalf("expected explicit fail-closed error, got %v",err)}
+	if _,err:=b.PoolCreate(context.Background(),control.PoolCreateArgs{Name:"p",Device:"/dev/sdb"});err==nil||!strings.Contains(err.Error(),"distributed sanlock"){t.Fatalf("expected Pool create to require distributed sanlock, got %v",err)}
 	if _,err:=b.VolumeActivate(context.Background(),"vol-a","rw");err==nil||!strings.Contains(err.Error(),"Runtime manager is not configured"){t.Fatalf("expected explicit fail-closed error, got %v",err)}
 	if _,err:=b.VolumeCreate(context.Background(),control.VolumeCreateArgs{Pool:"p",Name:"v",SizeBytes:4<<20});err==nil||!strings.Contains(err.Error(),"distributed sanlock"){t.Fatalf("expected create to require distributed sanlock, got %v",err)}
 }

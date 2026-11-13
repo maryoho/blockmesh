@@ -21,7 +21,7 @@ func (r *ownerReservationRunner) Run(_ context.Context, _ string, args ...string
 	device := ""
 	var rk, sark uint64
 	var typ uint64
-	register, reserve, readKeys, readReservation := false,false,false,false
+	register, reserve, release, readKeys, readReservation := false,false,false,false,false
 	for _, arg := range args {
 		switch {
 		case strings.HasPrefix(arg,"--device="): device=strings.TrimPrefix(arg,"--device=")
@@ -30,6 +30,7 @@ func (r *ownerReservationRunner) Run(_ context.Context, _ string, args ...string
 		case strings.HasPrefix(arg,"--prout-type="): typ,_=strconv.ParseUint(strings.TrimPrefix(arg,"--prout-type="),10,8)
 		case arg=="--register": register=true
 		case arg=="--reserve": reserve=true
+		case arg=="--release": release=true
 		case arg=="--read-keys": readKeys=true
 		case arg=="--read-reservation": readReservation=true
 		}
@@ -48,6 +49,9 @@ func (r *ownerReservationRunner) Run(_ context.Context, _ string, args ...string
 		r.holder=rk; r.prType=uint8(typ)
 		if r.reserveErr { return []byte("response lost after target commit"),errors.New("injected transport timeout") }
 		return []byte("reserved"),nil
+	case release:
+		if r.holder==rk { r.holder=0; r.prType=0 }
+		return []byte("released"),nil
 	case readReservation:
 		if device==r.failReadReservation { return []byte("path unavailable"),errors.New("injected read error") }
 		if r.holder==0 { return []byte("No reservation held"),nil }
@@ -101,4 +105,28 @@ func TestParseLiveReservation(t *testing.T) {
 	} {
 		if _,_,ok:=parseLiveReservation(output);ok { t.Fatalf("accepted ambiguous reservation output %q",output) }
 	}
+}
+
+
+func TestPoolBootstrapReservationRejectsForeignRegistrations(t *testing.T) {
+	runner:=&ownerReservationRunner{keys:map[string]map[uint64]bool{
+		"/dev/a":{0xa1:true,0xdead:true},
+		"/dev/b":{0xb2:true},
+	}}
+	manager:=&SCSIPROwnerReservation{Paths:[]PRPath{{Device:"/dev/a",LocalKey:0xa1},{Device:"/dev/b",LocalKey:0xb2}},Runner:runner,ReservationType:6}
+	if err:=manager.VerifyNoForeignRegistrations(context.Background());err==nil||!strings.Contains(err.Error(),"foreign") {
+		t.Fatalf("expected foreign registration rejection, got %v",err)
+	}
+}
+
+func TestPoolBootstrapReservationCanResumeAndReleaseSameInitiator(t *testing.T) {
+	runner:=&ownerReservationRunner{keys:map[string]map[uint64]bool{}}
+	manager:=&SCSIPROwnerReservation{Paths:[]PRPath{{Device:"/dev/a",LocalKey:0xa1},{Device:"/dev/b",LocalKey:0xb2}},Runner:runner,ReservationType:6}
+	if err:=manager.VerifyNoForeignRegistrations(context.Background());err!=nil { t.Fatal(err) }
+	if err:=manager.PrepareOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
+	if err:=manager.EstablishOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
+	if err:=manager.VerifyNoForeignRegistrations(context.Background());err!=nil { t.Fatalf("same initiator should be resumable: %v",err) }
+	if err:=manager.VerifyOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
+	if err:=manager.ReleaseOwnerReservation(context.Background(),"node-a","boot-a");err!=nil { t.Fatal(err) }
+	if runner.holder!=0 || runner.keys["/dev/a"][0xa1] || runner.keys["/dev/b"][0xb2] { t.Fatal("Pool bootstrap PR reservation or registrations were not released") }
 }

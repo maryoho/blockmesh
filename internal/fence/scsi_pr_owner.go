@@ -167,4 +167,102 @@ func parseLiveReservation(output string) (uint64, uint8, bool) {
 	return key, prType, true
 }
 
+
+func (r *SCSIPROwnerReservation) prCommandConfig() (string, CommandRunner) {
+	binary := r.Binary
+	if binary == "" { binary = "sg_persist" }
+	runner := r.Runner
+	if runner == nil { runner = execRunner{} }
+	return binary, runner
+}
+
+func readReservationState(ctx context.Context, runner CommandRunner, binary, path string) (uint64, uint8, bool, error) {
+	out, err := runner.Run(ctx, binary, "--in", "--read-reservation", "--device="+path)
+	if err != nil { return 0, 0, false, fmt.Errorf("read SCSI PR reservation on %s: %w: %s", path, err, strings.TrimSpace(string(out))) }
+	lower := strings.ToLower(string(out))
+	if strings.Contains(lower, "no reservation") || strings.Contains(lower, "reservation not held") || strings.Contains(lower, "not reserved") {
+		return 0, 0, false, nil
+	}
+	key, typ, ok := parseLiveReservation(string(out))
+	if !ok { return 0, 0, false, fmt.Errorf("ambiguous SCSI PR reservation response on %s: %s", path, strings.TrimSpace(string(out))) }
+	return key, typ, true, nil
+}
+
+// VerifyNoForeignRegistrations is used only for first-time Pool bootstrap. It
+// permits registrations belonging to this configured initiator, but rejects
+// any other initiator because the bootstrap format has no previous-owner
+// record that could safely identify and drain an interrupted foreign writer.
+func (r *SCSIPROwnerReservation) VerifyNoForeignRegistrations(ctx context.Context) error {
+	if r == nil || ctx == nil { return errors.New("SCSI PR reservation manager and context are required") }
+	if err := validatePRPaths(r.Paths); err != nil { return err }
+	binary, runner := r.prCommandConfig()
+	allowed := make(map[uint64]struct{}, len(r.Paths))
+	for _, path := range r.Paths { allowed[path.LocalKey] = struct{}{} }
+	var holder uint64
+	var holderType uint8
+	heldCount, absentCount := 0, 0
+	for _, path := range r.Paths {
+		out, err := runner.Run(ctx, binary, "--in", "--read-keys", "--device="+path.Device)
+		if err != nil { return fmt.Errorf("read SCSI PR registrations on %s: %w: %s", path.Device, err, strings.TrimSpace(string(out))) }
+		for key := range parsePRKeys(out) {
+			if _, ok := allowed[key]; !ok { return fmt.Errorf("Pool bootstrap refuses foreign SCSI PR registration %x on %s", key, path.Device) }
+		}
+		key, typ, held, err := readReservationState(ctx, runner, binary, path.Device)
+		if err != nil { return err }
+		if !held { absentCount++; continue }
+		heldCount++
+		if holder == 0 { holder, holderType = key, typ } else if holder != key || holderType != typ {
+			return errors.New("SCSI PR reservation differs across configured Pool paths")
+		}
+	}
+	if heldCount != 0 && absentCount != 0 { return errors.New("SCSI PR reservation is present on only some Pool paths") }
+	if heldCount != 0 {
+		if holder != r.Paths[0].LocalKey { return fmt.Errorf("Pool bootstrap reservation is held by foreign key %x", holder) }
+		typ := r.ReservationType
+		if typ == 0 { typ = 6 }
+		if holderType != typ { return fmt.Errorf("Pool bootstrap reservation type %d differs from configured type %d", holderType, typ) }
+	}
+	return nil
+}
+
+// VerifyOwnerReservation rechecks the reservation on every component path.
+// Pool bootstrap calls this from OwnerLease.Valid before each metadata phase.
+func (r *SCSIPROwnerReservation) VerifyOwnerReservation(ctx context.Context, nodeID, bootID string) error {
+	if r == nil || ctx == nil || strings.TrimSpace(nodeID) == "" || strings.TrimSpace(bootID) == "" {
+		return errors.New("SCSI PR reservation and initiator identity are required")
+	}
+	if err := validatePRPaths(r.Paths); err != nil { return err }
+	binary, runner := r.prCommandConfig()
+	typ := r.ReservationType
+	if typ == 0 { typ = 6 }
+	return verifyLiveReservation(ctx, runner, binary, r.Paths, r.Paths[0].LocalKey, typ)
+}
+
+// ReleaseOwnerReservation releases only this initiator's verified reservation,
+// verifies that every path reports no holder, and then unregisters local keys.
+func (r *SCSIPROwnerReservation) ReleaseOwnerReservation(ctx context.Context, nodeID, bootID string) error {
+	if r == nil || ctx == nil { return errors.New("SCSI PR reservation manager and context are required") }
+	if err := r.VerifyNoForeignRegistrations(ctx); err != nil { return err }
+	binary, runner := r.prCommandConfig()
+	typ := r.ReservationType
+	if typ == 0 { typ = 6 }
+	holder := r.Paths[0].LocalKey
+	key, actualType, held, err := readReservationState(ctx, runner, binary, r.Paths[0].Device)
+	if err != nil { return err }
+	if held {
+		if key != holder || actualType != typ { return ErrOwnerReservationMismatch }
+		out, releaseErr := runner.Run(ctx, binary, "--out", "--release", fmt.Sprintf("--param-rk=%x", holder),
+			fmt.Sprintf("--prout-type=%d", typ), "--device="+r.Paths[0].Device)
+		if releaseErr != nil { return fmt.Errorf("release Pool bootstrap SCSI PR reservation: %w: %s", releaseErr, strings.TrimSpace(string(out))) }
+	}
+	for _, path := range r.Paths {
+		_, _, stillHeld, verifyErr := readReservationState(ctx, runner, binary, path.Device)
+		if verifyErr != nil { return verifyErr }
+		if stillHeld { return fmt.Errorf("Pool bootstrap SCSI PR reservation remains on %s", path.Device) }
+	}
+	registrar := &SCSIPRRegistrar{Binary: binary, Paths: r.Paths, Runner: runner}
+	if err = registrar.UnregisterReader(ctx, nodeID, bootID); err != nil { return fmt.Errorf("unregister Pool bootstrap PR keys: %w", err) }
+	return nil
+}
+
 var _ OwnerReservation = (*SCSIPROwnerReservation)(nil)

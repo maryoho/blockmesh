@@ -133,6 +133,7 @@ if cfg.Sanlock.ResourceIndexOffset!=0 {
 	}
 	paths:=make([]fence.PRPath,0,len(cfg.SAN.Paths))
 	for _,p:=range cfg.SAN.Paths{paths=append(paths,fence.PRPath{Device:p.Device,LocalKey:p.LocalKey})}
+	lifecycleBackend.attachPoolBootstrap(cfg.NodeID,cfg.BootID,cfg.SAN.SGPersistBinary,cfg.SAN.ReservationType,paths)
 	keyResolver:=staticPRKeyResolver(cfg.SAN.OwnerKeys)
 	fencer:=&fence.SCSIPRFencer{Binary:cfg.SAN.SGPersistBinary,Paths:paths,Keys:keyResolver,ReservationType:cfg.SAN.ReservationType}
 	reservation:=&fence.SCSIPROwnerReservation{Binary:cfg.SAN.SGPersistBinary,Paths:paths,ReservationType:cfg.SAN.ReservationType}

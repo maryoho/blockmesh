@@ -10,16 +10,20 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"blockmesh/internal/allocator"
 	"blockmesh/internal/control"
 	"blockmesh/internal/dmowner"
 	"blockmesh/internal/dynamicruntime"
+	"blockmesh/internal/fence"
 	"blockmesh/internal/metastore"
 	"blockmesh/internal/device"
 	"blockmesh/internal/format"
 	"blockmesh/internal/lock"
 	"blockmesh/internal/poolspace"
+	"blockmesh/internal/poolinit"
 	"blockmesh/internal/wal"
 )
 
@@ -37,6 +41,9 @@ type catalogLifecycleBackend struct {
 	dataViews dmowner.LinearViewManager
 	nodeID string
 	bootID string
+	prPaths []fence.PRPath
+	prBinary string
+	prType uint8
 }
 
 func newCatalogLifecycleBackend(paths []string, locker lock.DistributedLocker) *catalogLifecycleBackend {
@@ -135,6 +142,87 @@ func (b *catalogLifecycleBackend) findVolume(ctx context.Context,id string) (dis
 }
 func (b *catalogLifecycleBackend) VolumeInfo(ctx context.Context,id string) (any,error) { return b.findVolume(ctx,id) }
 
+
+func (b *catalogLifecycleBackend) attachPoolBootstrap(nodeID, bootID, binary string, reservationType uint8, paths []fence.PRPath) {
+	b.nodeID, b.bootID, b.prBinary, b.prType = nodeID, bootID, binary, reservationType
+	b.prPaths = append([]fence.PRPath(nil), paths...)
+}
+
+type poolBootstrapOwnerLease struct {
+	lease lock.Lease
+	reservation *fence.SCSIPROwnerReservation
+	nodeID, bootID string
+	epoch uint64
+	closeErr error
+	closed bool
+	mu sync.Mutex
+	lastVerify time.Time
+	verified bool
+}
+
+func (l *poolBootstrapOwnerLease) Epoch() uint64 { if l == nil { return 0 }; return l.epoch }
+func (l *poolBootstrapOwnerLease) Valid() bool {
+	if l == nil || l.lease == nil || l.reservation == nil || !l.lease.Valid() { return false }
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed { return false }
+	// Bootstrap format writes many metadata pages. Verify the PR reservation
+	// periodically rather than spawning sg_persist for every 4KiB WriteAt;
+	// the SCSI target itself still enforces the reservation on each I/O.
+	if l.verified && time.Since(l.lastVerify) < time.Second { return l.lease.Valid() }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := l.reservation.VerifyOwnerReservation(ctx, l.nodeID, l.bootID)
+	l.lastVerify = time.Now()
+	l.verified = err == nil
+	return l.verified && l.lease.Valid()
+}
+func (l *poolBootstrapOwnerLease) Close() error {
+	if l == nil { return nil }
+	l.mu.Lock()
+	if l.closed { err := l.closeErr; l.mu.Unlock(); return err }
+	l.closed = true
+	l.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var prErr error
+	if l.reservation != nil { prErr = l.reservation.ReleaseOwnerReservation(ctx, l.nodeID, l.bootID) }
+	var lockErr error
+	if l.lease != nil { lockErr = l.lease.Close() }
+	l.mu.Lock()
+	l.closeErr = errors.Join(prErr, lockErr)
+	err := l.closeErr
+	l.mu.Unlock()
+	return err
+}
+
+func poolReady(dev device.Device, name string) (poolspace.PoolCatalogEntry, bool, error) {
+	version, err := poolspace.DetectFormat(dev)
+	if errors.Is(err, poolspace.ErrUnknownPoolFormat) { return poolspace.PoolCatalogEntry{}, false, nil }
+	if err != nil { return poolspace.PoolCatalogEntry{}, false, err }
+	if version == poolspace.FormatBMPOOL02 { return poolspace.PoolCatalogEntry{}, false, poolspace.ErrLegacyPoolFormat }
+	bootstrap, err := poolspace.OpenBootstrap(dev)
+	if errors.Is(err, poolspace.ErrBootstrapFormatIncomplete) { return poolspace.PoolCatalogEntry{}, false, nil }
+	if err != nil { return poolspace.PoolCatalogEntry{}, false, err }
+	record := bootstrap.Record()
+	if record.PoolName != name { return poolspace.PoolCatalogEntry{}, false, fmt.Errorf("device already belongs to Pool %q, not %q", record.PoolName, name) }
+	metadata, data, generation, err := bootstrap.OpenViews()
+	if err != nil { return poolspace.PoolCatalogEntry{}, false, err }
+	defer metadata.Close()
+	if data != nil { defer data.Close() }
+	sb, err := allocator.OpenDynamicSuperblockPair(metadata)
+	if errors.Is(err, allocator.ErrDynamicFormatIncomplete) || errors.Is(err, allocator.ErrDynamicSuperblockUnformatted) {
+		return poolspace.PoolCatalogEntry{}, false, nil
+	}
+	if err != nil { return poolspace.PoolCatalogEntry{}, false, err }
+	if sb.PoolUUID != record.PoolUUID || sb.ViewGeneration != generation { return poolspace.PoolCatalogEntry{}, false, errors.New("Pool Superblock identity or MetadataView generation mismatch") }
+	if _, err = metastore.OpenDynamicVolumeAllocatorReadOnly(metadata, sb); errors.Is(err, metastore.ErrDynamicVolumeAllocatorUnformatted) {
+		return poolspace.PoolCatalogEntry{}, false, nil
+	} else if err != nil { return poolspace.PoolCatalogEntry{}, false, err }
+	entry, err := poolspace.ReadPoolCatalog(dev)
+	return entry, err == nil, err
+}
+
 func (b *catalogLifecycleBackend) attachRuntime(manager *dynamicruntime.DynamicVolumeRuntimeManager,tables dmowner.TableManager,setup dmowner.DMSetupGate,dataViews dmowner.LinearViewManager,nodeID,bootID string) {
 	b.runtime=manager;b.tables=tables;b.dmSetup=setup;b.dataViews=dataViews;b.nodeID=nodeID;b.bootID=bootID
 }
@@ -202,7 +290,55 @@ func (b *catalogLifecycleBackend) VolumeCreate(ctx context.Context, args control
 func (*catalogLifecycleBackend) unsupported(action string) (any, error) {
 	return nil, fmt.Errorf("%s is not available yet: production SAN-fenced Pool/Volume runtime integration is still in progress", action)
 }
-func (b *catalogLifecycleBackend) PoolCreate(context.Context, control.PoolCreateArgs) (any, error) { return b.unsupported("pool create") }
+func (b *catalogLifecycleBackend) PoolCreate(ctx context.Context, args control.PoolCreateArgs) (any, error) {
+	if b == nil || ctx == nil || b.locker == nil || !b.locker.Distributed() { return nil, errors.New("Pool create requires a distributed sanlock backend") }
+	if strings.TrimSpace(args.Name) == "" || len(args.Name) > 23 { return nil, errors.New("Pool name must contain 1-23 supported ASCII characters") }
+	configured := false
+	for _, path := range b.devices { if path == args.Device { configured = true; break } }
+	if !configured { return nil, errors.New("Pool create device must be listed in discovery_devices") }
+	identity, err := device.StableBlockIdentity(args.Device)
+	if err != nil { return nil, fmt.Errorf("resolve stable Pool device identity: %w", err) }
+	dev, err := device.OpenBlockDevice(args.Device, true, false)
+	if err != nil { return nil, fmt.Errorf("open Pool device for initialization: %w", err) }
+	defer dev.Close()
+	if entry, ready, readyErr := poolReady(dev, args.Name); readyErr != nil { return nil, readyErr } else if ready {
+		return map[string]any{"pool": entry, "device": args.Device, "state": "ready", "idempotent": true}, nil
+	}
+
+	paths := make([]fence.PRPath, 0, len(b.prPaths))
+	for _, path := range b.prPaths {
+		pathID, idErr := device.StableBlockIdentity(path.Device)
+		if idErr != nil { return nil, fmt.Errorf("resolve configured SAN path identity for %s: %w", path.Device, idErr) }
+		if pathID == identity { paths = append(paths, path) }
+	}
+	if len(paths) == 0 { return nil, fmt.Errorf("no configured SCSI PR paths match Pool device WWID %s", identity) }
+	if strings.TrimSpace(b.nodeID) == "" || strings.TrimSpace(b.bootID) == "" { return nil, errors.New("Pool bootstrap requires configured node_id and boot_id") }
+	reservation := &fence.SCSIPROwnerReservation{Binary: b.prBinary, Paths: paths, ReservationType: b.prType}
+	ownerLease, err := b.locker.Acquire(ctx, "pool-owner/"+identity)
+	if err != nil { return nil, fmt.Errorf("acquire distributed Pool Owner resource: %w", err) }
+	if ownerLease == nil || !ownerLease.Valid() {
+		if ownerLease != nil { _ = ownerLease.Close() }
+		return nil, errors.New("distributed Pool Owner lease is not valid")
+	}
+	closeLeaseOnError := true
+	defer func() { if closeLeaseOnError { _ = ownerLease.Close() } }()
+	if err = reservation.VerifyNoForeignRegistrations(ctx); err != nil { return nil, fmt.Errorf("Pool bootstrap cannot prove that no foreign SAN initiator is registered: %w", err) }
+	if err = reservation.PrepareOwnerReservation(ctx, b.nodeID, b.bootID); err != nil { return nil, fmt.Errorf("prepare Pool bootstrap SCSI PR registrations: %w", err) }
+	if err = reservation.EstablishOwnerReservation(ctx, b.nodeID, b.bootID); err != nil { return nil, fmt.Errorf("establish Pool bootstrap SCSI PR reservation: %w", err) }
+	epoch := uint64(1)
+	if existing, openErr := poolspace.OpenBootstrap(dev); openErr == nil {
+		if existing.Record().OwnerEpoch == ^uint64(0) { return nil, errors.New("Pool OwnerEpoch exhausted") }
+		epoch = existing.Record().OwnerEpoch + 1
+	} else if !errors.Is(openErr, poolspace.ErrBootstrapUnformatted) && !errors.Is(openErr, poolspace.ErrBootstrapFormatIncomplete) {
+		return nil, fmt.Errorf("inspect Pool Bootstrap OwnerEpoch: %w", openErr)
+	}
+	owner := &poolBootstrapOwnerLease{lease: ownerLease, reservation: reservation, nodeID: b.nodeID, bootID: b.bootID, epoch: epoch}
+	initResult, initErr := poolinit.Initialize(ctx, dev, args.Name, "pool-init/"+identity, b.locker, owner, poolinit.Config{})
+	closeErr := owner.Close()
+	closeLeaseOnError = false
+	if initErr != nil || closeErr != nil { return nil, errors.Join(initErr, closeErr) }
+	return map[string]any{"pool": initResult, "device": args.Device, "state": "ready", "idempotent": false}, nil
+}
 func (b *catalogLifecycleBackend) PoolDestroy(context.Context, string) (any, error) { return b.unsupported("pool destroy") }
 func (b *catalogLifecycleBackend) VolumeDelete(context.Context, string) (any, error) { return b.unsupported("volume delete") }
 func (b *catalogLifecycleBackend) VolumeActivate(ctx context.Context,id,mode string) (any,error) {
