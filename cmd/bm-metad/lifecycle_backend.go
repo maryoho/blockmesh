@@ -137,7 +137,7 @@ func newVolumeUUID() (string, error) {
 // descriptor-slot and Reserved-bitmap selection across nodes. The transaction
 // itself is committed through the selected AG's shared WAL resource; a retry
 // with the CLI's stable CreateToken resolves an uncertain commit.
-func (b *catalogLifecycleBackend) VolumeCreate(ctx context.Context, args control.VolumeCreateArgs) (any, error) {
+func (b *catalogLifecycleBackend) VolumeCreate(ctx context.Context, args control.VolumeCreateArgs) (result any, retErr error) {
 	if b == nil || b.locker == nil || !b.locker.Distributed() { return nil, errors.New("Volume create requires a configured distributed sanlock backend") }
 	if err := ctx.Err(); err != nil { return nil, err }
 	if args.SizeBytes == 0 || args.SizeBytes%format.BlockSize != 0 { return nil, fmt.Errorf("Volume size must be a positive multiple of %d bytes", format.BlockSize) }
@@ -151,7 +151,7 @@ func (b *catalogLifecycleBackend) VolumeCreate(ctx context.Context, args control
 	// This RINDEX-backed resource is stable across nodes and independent of /dev path.
 	release, err := b.locker.Lock(ctx, "pool-catalog/"+pool.UUID)
 	if err != nil { return nil, fmt.Errorf("acquire distributed Pool catalog lock: %w", err) }
-	defer func() { _ = release() }()
+	defer func() { retErr = errors.Join(retErr, release()) }()
 
 	parent, err := device.OpenBlockDevice(pool.Device, true, false)
 	if err != nil { return nil, fmt.Errorf("open Pool LUN for Volume create: %w", err) }
@@ -169,6 +169,14 @@ func (b *catalogLifecycleBackend) VolumeCreate(ctx context.Context, args control
 	if err != nil { return nil, fmt.Errorf("open writable Volume catalog: %w", err) }
 	committer, err := wal.NewDynamicSharedCommitter(metadata, sb, 0, b.locker, fmt.Sprintf("wal/%x/0", record.PoolUUID))
 	if err != nil { return nil, err }
+	existing, lookupErr := catalog.FindVolumeByCreateToken(args.CreateToken)
+	if lookupErr == nil {
+		if existing.Descriptor.VolumeName != args.Name || existing.Descriptor.LogicalSizeBytes != args.SizeBytes {
+			return nil, metastore.ErrVolumeCreateTokenConflict
+		}
+		return discoveredVolume{Pool: pool.Name, PoolUUID: pool.UUID, Device: pool.Device, Index: existing.Index, Descriptor: existing.Descriptor}, nil
+	}
+	if !errors.Is(lookupErr, metastore.ErrVolumeCatalogNotFound) { return nil, fmt.Errorf("lookup Volume create idempotency token: %w", lookupErr) }
 	id, err := newVolumeUUID(); if err != nil { return nil, err }
 	created, err := catalog.CreateVolume(metastore.VolumeCreateRequest{
 		VolumeID: id, Name: args.Name, SizeBytes: args.SizeBytes, CreateToken: args.CreateToken,
