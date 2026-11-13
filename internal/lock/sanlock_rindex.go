@@ -31,7 +31,7 @@ func(sanlockExecRunner)Run(ctx context.Context,name string,args ...string)([]byt
 
 func(r *SanlockRIndexResolver) Resolve(name string)(uint64,error){
  if r==nil||strings.TrimSpace(r.Lockspace)==""||strings.TrimSpace(r.Device)==""||r.Offset==0||r.Offset%512!=0{return 0,errors.New("sanlock RINDEX resolver requires lockspace, device and a nonzero 512-byte-aligned RINDEX offset")}
- if name==""||len(name)>48||strings.ContainsAny(name,":\\r\\n"){return 0,fmt.Errorf("invalid sanlock resource name %q: maximum 48 bytes and no colon/newline",name)}
+ if name==""||len(name)>48||strings.ContainsAny(name,":\r\n"){return 0,fmt.Errorf("invalid sanlock resource name %q: maximum 48 bytes and no colon/newline",name)}
  binary:=r.Binary;if binary==""{binary="sanlock"}
  runner:=r.Runner;if runner==nil{runner=sanlockExecRunner{}}
  timeout:=r.Timeout;if timeout<=0{timeout=30*time.Second}

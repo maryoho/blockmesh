@@ -10,7 +10,6 @@ import (
  "strings"
  "time"
 
- "blockmesh/internal/lock"
 )
 
 type daemonConfig struct {
