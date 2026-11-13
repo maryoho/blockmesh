@@ -19,3 +19,9 @@ func TestDaemonConfigAllowsNoStaticVolumes(t *testing.T) {
 	cfg:=validTestConfig();cfg.Volumes=nil
 	if err:=cfg.validate();err!=nil{t.Fatalf("empty static volume list should be valid for catalog-only daemon: %v",err)}
 }
+
+func TestCatalogLifecycleBackendEmptyVolumeList(t *testing.T) {
+ b:=newCatalogLifecycleBackend(nil)
+ got,err:=b.VolumeList(context.Background());if err!=nil{t.Fatalf("empty discovery list: %v",err)}
+ items,ok:=got.([]discoveredVolume);if !ok||len(items)!=0{t.Fatalf("expected empty Volume catalog, got %#v",got)}
+}
