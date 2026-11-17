@@ -98,10 +98,12 @@ func TestStableBlockIdentityIncludesPartitionNumber(t *testing.T) {
 	if got != "naa.6001405abc123-part-1" { t.Fatalf("identity = %q", got) }
 }
 
-func TestStableBlockIdentityRejectsMissingStableID(t *testing.T) {
+func TestStableBlockIdentityFallsBackToLocalTopologyWhenStableIDMissing(t *testing.T) {
 	root := t.TempDir()
 	_ = makeSysfsBlock(t, root, "virtual/block/sdb")
-	if _, err := stableBlockIdentityAt(root, 8, 16); err == nil { t.Fatal("expected missing stable identity error") }
+	got, err := stableBlockIdentityAt(root, 8, 16)
+	if err != nil { t.Fatal(err) }
+	if !strings.HasPrefix(got, "local-topology:") { t.Fatalf("identity = %q", got) }
 }
 
 func TestStableBlockIdentityRejectsMissingSysfsDevice(t *testing.T) {
