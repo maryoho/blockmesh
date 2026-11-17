@@ -3,6 +3,8 @@
 package device
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -116,5 +118,14 @@ func stableIdentityForSysfsNode(node string, visiting map[string]bool) (string, 
 			return value, nil
 		}
 	}
-	return "", fmt.Errorf("block device sysfs node %q has no stable WWID, NGUID, EUI or serial", resolved)
+	// Local devices without exported WWID/serial use a host-local sysfs
+	// topology identity. It is not a shared-SAN identifier and must never be
+	// used as a substitute for cross-node fencing.
+	topology := filepath.Clean(resolved)
+	marker := string(filepath.Separator) + "devices" + string(filepath.Separator)
+	if idx := strings.Index(topology, marker); idx >= 0 {
+		topology = topology[idx+len(marker):]
+	}
+	sum := sha256.Sum256([]byte(topology))
+	return "local-topology:" + hex.EncodeToString(sum[:]), nil
 }

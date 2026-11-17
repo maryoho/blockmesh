@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"strings"
 )
 
 func makeSysfsBlock(t *testing.T, root, target string) string {
@@ -105,4 +106,28 @@ func TestStableBlockIdentityRejectsMissingStableID(t *testing.T) {
 
 func TestStableBlockIdentityRejectsMissingSysfsDevice(t *testing.T) {
 	if _, err := stableBlockIdentityAt(t.TempDir(), 8, 16); err == nil { t.Fatal("expected missing sysfs device error") }
+}
+
+func TestStableBlockIdentityUsesHostLocalTopologyWhenHardwareIDMissing(t *testing.T) {
+	root := t.TempDir()
+	_ = makeSysfsBlock(t, root, "pci0000/0000:00:10.0/host2/target2:0:1/2:0:1:0/block/sdb")
+	got, err := stableBlockIdentityAt(root, 8, 16)
+	if err != nil { t.Fatal(err) }
+	if !strings.HasPrefix(got, "local-topology:") { t.Fatalf("identity = %q", got) }
+	again, err := stableBlockIdentityAt(root, 8, 16)
+	if err != nil { t.Fatal(err) }
+	if got != again { t.Fatalf("identity changed: %q != %q", got, again) }
+}
+
+func TestStableBlockIdentityDoesNotUseTopologyFallbackForMultipathLeaves(t *testing.T) {
+	root := t.TempDir()
+	base := makeSysfsBlock(t, root, "virtual/block/dm-0")
+	for _, name := range []string{"sdb", "sdc"} {
+		slave := filepath.Join(root, "devices", "pci0000", "host0", name)
+		if err := os.MkdirAll(slave, 0755); err != nil { t.Fatal(err) }
+		slaveLink := filepath.Join(base, "slaves", name)
+		if err := os.MkdirAll(filepath.Dir(slaveLink), 0755); err != nil { t.Fatal(err) }
+		if err := os.Symlink(slave, slaveLink); err != nil { t.Fatal(err) }
+	}
+	if _, err := stableBlockIdentityAt(root, 8, 16); err == nil { t.Fatal("expected multipath backing identities to be rejected without real LUN IDs") }
 }
