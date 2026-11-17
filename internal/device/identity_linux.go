@@ -11,9 +11,13 @@ import (
 	"syscall"
 )
 
-// StableBlockIdentity returns a device identity suitable for cluster-wide
-// sanlock resource naming. It deliberately refuses to fall back to /dev path
-// names, which are not stable across hosts or reboots.
+// StableBlockIdentity returns the persistent identity of a block device.
+// It uses identifiers exported by the underlying device (WWID, NGUID, EUI or
+// serial), never the transient /dev name or kernel major:minor number.
+//
+// For stacked devices it follows sysfs "slaves" and requires every backing
+// device to resolve to the same identity. This naturally handles multipath
+// maps without depending on Device Mapper UUIDs or dm-N names.
 func StableBlockIdentity(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", errors.New("block device path is required")
@@ -38,27 +42,79 @@ func stableBlockIdentityAt(sysfsRoot string, major, minor uint32) (string, error
 	if err != nil {
 		return "", fmt.Errorf("resolve sysfs block device %d:%d: %w", major, minor, err)
 	}
-	// Device Mapper multipath exposes the canonical WWID in dm/uuid as
-	// "mpath-<WWID>". Prefer it over the transient dm-N device number.
-	if raw, readErr := os.ReadFile(filepath.Join(resolved, "dm", "uuid")); readErr == nil {
-		value := strings.TrimSpace(string(raw))
-		if strings.HasPrefix(strings.ToLower(value), "mpath-") && len(value) > len("mpath-") {
-			return strings.ToLower(strings.TrimPrefix(value, "mpath-")), nil
+	return stableIdentityForSysfsNode(resolved, make(map[string]bool))
+}
+
+func stableIdentityForSysfsNode(node string, visiting map[string]bool) (string, error) {
+	resolved, err := filepath.EvalSymlinks(node)
+	if err != nil {
+		return "", fmt.Errorf("resolve sysfs node %q: %w", node, err)
+	}
+	if visiting[resolved] {
+		return "", fmt.Errorf("sysfs backing-device cycle at %q", resolved)
+	}
+	visiting[resolved] = true
+	defer delete(visiting, resolved)
+
+	// A partition shares its parent disk's persistent identifier, but must
+	// retain the partition number so two Pools on different partitions do not
+	// collide.
+	if raw, readErr := os.ReadFile(filepath.Join(resolved, "partition")); readErr == nil {
+		part := strings.TrimSpace(string(raw))
+		if part != "" {
+			parentID, parentErr := stableIdentityForSysfsNode(filepath.Dir(resolved), visiting)
+			if parentErr != nil {
+				return "", fmt.Errorf("resolve parent identity for partition %s: %w", part, parentErr)
+			}
+			return fmt.Sprintf("%s-part-%s", parentID, part), nil
 		}
 	}
+
+	// Stacked block devices expose their backing devices in "slaves".
+	// Requiring a single common identity avoids treating an arbitrary
+	// dm-linear/crypt aggregate as one physical LUN.
+	entries, readErr := os.ReadDir(filepath.Join(resolved, "slaves"))
+	if readErr == nil && len(entries) > 0 {
+		var identity string
+		for _, entry := range entries {
+			backingID, backingErr := stableIdentityForSysfsNode(filepath.Join(resolved, "slaves", entry.Name()), visiting)
+			if backingErr != nil {
+				return "", fmt.Errorf("resolve backing device %q: %w", entry.Name(), backingErr)
+			}
+			if identity == "" {
+				identity = backingID
+				continue
+			}
+			if identity != backingID {
+				return "", fmt.Errorf("stacked block device %q has multiple distinct backing identities %q and %q", resolved, identity, backingID)
+			}
+		}
+		if identity != "" {
+			return identity, nil
+		}
+	}
+
+	// These are device-independent sysfs attributes. WWID is preferred for
+	// SCSI/iSCSI LUNs; NGUID/EUI identify NVMe namespaces; serial is the
+	// fallback for local disks that do not expose the stronger identifiers.
 	for _, candidate := range []string{
 		filepath.Join(resolved, "device", "wwid"),
 		filepath.Join(resolved, "wwid"),
+		filepath.Join(resolved, "nguid"),
+		filepath.Join(resolved, "device", "nguid"),
+		filepath.Join(resolved, "eui"),
+		filepath.Join(resolved, "device", "eui"),
 		filepath.Join(resolved, "device", "serial"),
+		filepath.Join(resolved, "serial"),
 	} {
-		raw, readErr := os.ReadFile(candidate)
-		if readErr != nil {
+		raw, candidateErr := os.ReadFile(candidate)
+		if candidateErr != nil {
 			continue
 		}
-		value := strings.TrimSpace(string(raw))
-		if value != "" {
-			return strings.ToLower(value), nil
+		value := strings.ToLower(strings.TrimSpace(string(raw)))
+		if value != "" && value != "0" {
+			return value, nil
 		}
 	}
-	return "", fmt.Errorf("block device %d:%d has no stable WWID or serial in sysfs", major, minor)
+	return "", fmt.Errorf("block device sysfs node %q has no stable WWID, NGUID, EUI or serial", resolved)
 }
